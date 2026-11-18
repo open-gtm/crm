@@ -14,6 +14,25 @@ export default tseslint.config(
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
     },
   },
+  // SQL lives in per-domain query modules (ADR 0012). In the directories converted so far, a tagged
+  // template (tx`…`, sql`…`, db()`…`) or .unsafe() anywhere but the query module is refused.
+  // Add a directory here once its SQL has moved.
+  {
+    files: ["packages/server/src/auth/**/*.ts", "packages/server/src/api/**/*.ts", "packages/server/src/web/**/*.ts"],
+    ignores: ["packages/server/src/auth/queries.ts", "packages/server/src/auth/queries/**", "packages/server/src/api/queries.ts"],
+    rules: {
+      "no-restricted-syntax": ["error",
+        {
+          selector: "TaggedTemplateExpression:not([tag.object.name='String'][tag.property.name='raw'])",
+          message: "Put SQL in the directory's query module (auth/queries.ts, api/queries.ts), not inline. See docs/decisions/0012-sql-in-query-modules.md",
+        },
+        {
+          selector: "CallExpression[callee.property.name='unsafe']",
+          message: "Put SQL in the directory's query module (auth/queries.ts, api/queries.ts), not inline. See docs/decisions/0012-sql-in-query-modules.md",
+        },
+      ],
+    },
+  },
   // The web UI (packages/web): browser globals, the rules of hooks, and accessibility checks on JSX.
   {
     files: ["packages/web/src/**/*.{ts,tsx}", "packages/web/test/**/*.{ts,tsx}"],
