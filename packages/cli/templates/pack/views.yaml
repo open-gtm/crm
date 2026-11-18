@@ -1,0 +1,7 @@
+# Shared views, by object and name.
+views:
+  - name: Healthy projects
+    object: project
+    where: { field: health, op: gte, value: 4 }
+    sort: [{ field: progress, dir: desc }]
+    columns: [name, client, progress, health]

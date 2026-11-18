@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
+import { YES } from "./patterns.js";
 import type { Runtime } from "./runtime.js";
 
 /** The process's streams, or stand-ins with `isTTY` set (the tests drive prompts through PassThrough streams). */
@@ -44,7 +45,7 @@ export function terminalRuntime(t: Terminal): Runtime {
       rl.question(question, (answer) => {
         answered = true;
         rl.close();
-        resolve(/^y(es)?$/i.test(answer.trim()));
+        resolve(YES.test(answer.trim()));
       });
     }),
     env: t.env,

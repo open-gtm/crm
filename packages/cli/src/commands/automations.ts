@@ -4,6 +4,7 @@ import YAML from "yaml";
 import type { Context } from "../context.js";
 import { CliError, EXIT, usage } from "../errors.js";
 import { clean, cleanLine } from "../output.js";
+import { AUTOMATION_ID } from "../patterns.js";
 import type { Act } from "../program.js";
 
 /**
@@ -13,7 +14,6 @@ import type { Act } from "../program.js";
  * prompt; with --no-input, --yes is required. run shows a dry run the same way first.
  */
 
-const AUTOMATION_ID = /^auto_[0-9A-Za-z]{26}$/;
 const automationId = (id: string) => {
   if (!AUTOMATION_ID.test(id)) throw usage(`"${id}" is not an automation ID (auto_…)`);
   return id;

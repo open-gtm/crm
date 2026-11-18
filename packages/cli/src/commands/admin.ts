@@ -3,11 +3,10 @@ import { accessRows, type ObjectAccess } from "../access.js";
 import type { Context } from "../context.js";
 import { EXIT, usage } from "../errors.js";
 import { clean } from "../output.js";
+import { CONNECTED_APP_ID, KEY_ID, MEMBER_ID, ROLE_REF, SESSION_ID, USER_ID } from "../patterns.js";
 import type { Act } from "../program.js";
 import { registerManage } from "./manage.js";
 
-const KEY_ID = /^key_[0-9A-Za-z]{26}$/;
-const MEMBER_ID = /^(usr|svc)_[0-9A-Za-z]{26}$/;
 const SCOPES = ["admin", "ops:write", "ops:read", "restricted:read"];
 
 /**
@@ -114,7 +113,7 @@ export function registerAdmin(program: Command, act: Act): void {
     ctx.out.table(data.map((r) => ({ ...r, kind: r.is_system ? "system" : "custom" })), ["key", "name", "kind", "members", "permissions"]);
   }));
   roles.command("get <role>").description("Show a role by key or role_… ID, with its object and field rules and the record access they give").action(act(async (ctx, role: string) => {
-    if (!/^[a-z0-9_]{1,64}$/i.test(role)) throw usage(`"${role}" is not a role key or ID`);
+    if (!ROLE_REF.test(role)) throw usage(`"${role}" is not a role key or ID`);
     const client = ctx.client();
     const { data } = await client.get<{ data: Record<string, unknown> }>(`/v1/roles/${role}`);
     const access = (await client.get<{ data: { objects: ObjectAccess[] } }>(`/v1/roles/${role}/access`)).data.objects;
@@ -135,7 +134,7 @@ export function registerAdmin(program: Command, act: Act): void {
 
   const sessions = program.command("sessions").description("Members' browser sign-in sessions (needs members:manage). API keys are separate: see `crm keys`");
   sessions.command("list <member>").description("A member's live browser sessions").action(act(async (ctx, member: string) => {
-    if (!/^usr_[0-9A-Za-z]{26}$/.test(member)) throw usage(`"${member}" is not a member ID (usr_…)`);
+    if (!USER_ID.test(member)) throw usage(`"${member}" is not a member ID (usr_…)`);
     const { data } = await ctx.client().get<{ data: Record<string, unknown>[] }>(`/v1/members/${member}/sessions`);
     if (ctx.g.json) return ctx.out.data({ data });
     if (!data.length) return ctx.out.line(`${member} has no live sessions.`);
@@ -148,14 +147,14 @@ export function registerAdmin(program: Command, act: Act): void {
     .action(act(async (ctx, session: string | undefined, opts: { member?: string; all?: boolean }) => {
       if (session && (opts.all || opts.member)) throw usage("Pass a session ID, or --member with --all, not both");
       if (session) {
-        if (!/^ses_[0-9A-Za-z]{26}$/.test(session)) throw usage(`"${session}" is not a session ID (ses_…)`);
+        if (!SESSION_ID.test(session)) throw usage(`"${session}" is not a session ID (ses_…)`);
         await ctx.confirm(`End session ${session}? Whoever uses it is signed out now. [y/N] `, `Revoking ${session} signs it out immediately`);
         const { data } = await ctx.client().delete<{ data: unknown }>(`/v1/sessions/${session}`);
         if (ctx.g.json) return ctx.out.data({ data });
         return ctx.out.line(`Revoked ${session}.`);
       }
       if (!opts.member || !opts.all) throw usage("Pass a session ID (ses_…), or --member <usr_…> --all");
-      if (!/^usr_[0-9A-Za-z]{26}$/.test(opts.member)) throw usage(`"${opts.member}" is not a member ID (usr_…)`);
+      if (!USER_ID.test(opts.member)) throw usage(`"${opts.member}" is not a member ID (usr_…)`);
       await ctx.confirm(`Sign ${opts.member} out of every browser session? Their API keys keep working. [y/N] `, `Revoking signs ${opts.member} out everywhere`);
       const { data } = await ctx.client().post<{ data: { revoked: number } }>(`/v1/members/${opts.member}/sessions/revoke`);
       if (ctx.g.json) return ctx.out.data({ data });
@@ -166,7 +165,7 @@ export function registerAdmin(program: Command, act: Act): void {
   apps.command("list").description("Connected apps, newest first")
     .option("--member <id>", "a member's apps (usr_…) instead of your own")
     .action(act(async (ctx, opts: { member?: string }) => {
-      if (opts.member && !/^usr_[0-9A-Za-z]{26}$/.test(opts.member)) throw usage(`"${opts.member}" is not a member ID (usr_…)`);
+      if (opts.member && !USER_ID.test(opts.member)) throw usage(`"${opts.member}" is not a member ID (usr_…)`);
       const { data } = await ctx.client().get<{ data: Record<string, unknown>[] }>("/v1/apps", { member: opts.member });
       if (ctx.g.json) return ctx.out.data({ data });
       if (!data.length) return ctx.out.line(opts.member ? `${opts.member} has no connected apps.` : "No connected apps.");
@@ -177,7 +176,7 @@ export function registerAdmin(program: Command, act: Act): void {
     }));
   apps.command("revoke <app>").description("Disconnect an app (ogr_…): its access and refresh tokens stop working at once")
     .action(act(async (ctx, app: string) => {
-      if (!/^ogr_[0-9A-Za-z]{26}$/.test(app)) throw usage(`"${app}" is not a connected app ID (ogr_…)`);
+      if (!CONNECTED_APP_ID.test(app)) throw usage(`"${app}" is not a connected app ID (ogr_…)`);
       await ctx.confirm(`Disconnect ${app}? The app loses access now and must be approved again to reconnect. [y/N] `, `Revoking ${app} disconnects it immediately`);
       const { data } = await ctx.client().delete<{ data: unknown }>(`/v1/apps/${app}`);
       if (ctx.g.json) return ctx.out.data({ data });
