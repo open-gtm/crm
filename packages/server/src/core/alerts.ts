@@ -3,6 +3,7 @@ import type { Tx } from "../db/pool.js";
 import { withTenant } from "../db/tx.js";
 import { ApiError, conflict, forbidden, notFound, unprocessable } from "../lib/errors.js";
 import { decodeId, encodeId, uuidv7 } from "../lib/ids.js";
+import { TEXT_MAX } from "../lib/limits.js";
 import { logger } from "../lib/logger.js";
 import { accessGuard, assertObject, canObject, canReadField } from "./access.js";
 import { audit } from "./audit.js";
@@ -33,8 +34,8 @@ const Trigger = z.discriminatedUnion("type", [
 type TriggerT = z.infer<typeof Trigger>;
 
 export const AlertInput = z.object({
-  name: z.string().min(1).max(200),
-  description: z.string().max(2000).optional(),
+  name: z.string().min(1).max(TEXT_MAX.name),
+  description: z.string().max(TEXT_MAX.description).optional(),
   object: z.string(),
   trigger: Trigger,
   condition: z.unknown().optional(),

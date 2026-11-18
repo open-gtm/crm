@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { Tx } from "../db/pool.js";
 import { unprocessable } from "../lib/errors.js";
 import { encodeId } from "../lib/ids.js";
+import { TEXT_MAX } from "../lib/limits.js";
 import { permissionsForScopes, type Ctx } from "./context.js";
 import { compileQuery, type Where } from "./query.js";
 import { ScheduleFields, type Schedule } from "./schedule.js";
@@ -104,8 +105,8 @@ export type Trigger = z.infer<typeof TriggerSchema>;
 export type EventTriggerT = z.infer<typeof EventTrigger>;
 
 export const AutomationInput = z.object({
-  name: z.string().min(1).max(200),
-  description: z.string().max(2000).optional(),
+  name: z.string().min(1).max(TEXT_MAX.name),
+  description: z.string().max(TEXT_MAX.description).optional(),
   enabled: z.boolean().optional(),
   trigger: TriggerSchema,
   condition: z.unknown().optional(),
