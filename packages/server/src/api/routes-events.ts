@@ -8,8 +8,9 @@ import {
 } from "../core/automations.js";
 import {
   archiveWebhook, createWebhook, getDelivery, getWebhook, listDeliveries, listWebhooks, publicEvent, replayDelivery,
-  revealWebhookSecret, rotateWebhookSecret, testWebhook, updateWebhook, type EventRow,
+  revealWebhookSecret, rotateWebhookSecret, testWebhook, updateWebhook,
 } from "../core/webhooks.js";
+import { recentEvents, type EventProcessing } from "../core/events-queries.js";
 import { loadSchema } from "../core/schema.js";
 import { badRequest } from "../lib/errors.js";
 import { decodeId } from "../lib/ids.js";
@@ -259,10 +260,8 @@ route({
 
 // --- Events ----------------------------------------------------------------------------------
 
-interface Processing { processed_at: Date | null; dead_at: Date | null; attempts: number; last_error: string | null; next_attempt_at: Date | null }
-
 /** How the worker got on with an event: whether its automations and webhooks ran, are retrying, or gave up. */
-const publicProcessing = (r: Processing) => ({
+const publicProcessing = (r: EventProcessing) => ({
   status: r.processed_at ? "processed" : r.dead_at ? "dead" : "pending",
   attempts: r.attempts, last_error: r.last_error,
   next_attempt_at: !r.processed_at && !r.dead_at ? r.next_attempt_at?.toISOString() ?? null : null,
@@ -287,19 +286,8 @@ route({
     if (query.record && !record) throw badRequest("record must be a record ID");
     const before = query.before ? decodeId(query.before) : null;
     if (query.before && (!before || before.prefix !== "evt")) throw badRequest("before must be an event ID (evt_…)");
-    const rows = await tx<(EventRow & Processing)[]>`
-      SELECT id, type, object_type, record_id, occurred_at, actor_type, actor_id, surface, data, causation_depth, automation_id,
-             processed_at, dead_at, attempts, last_error, next_attempt_at
-      FROM outbox_events
-      WHERE (${query.type ?? null}::text IS NULL OR type LIKE ${(query.type ?? "").replace(/[\\%_]/g, (c) => `\\${c}`) + "%"})
-        AND (${record?.uuid ?? null}::uuid IS NULL OR record_id = ${record?.uuid ?? null}::uuid)
-        AND (${before?.uuid ?? null}::uuid IS NULL OR id < ${before?.uuid ?? null}::uuid)
-        AND (${all} OR record_id IS NULL OR object_type = ANY(${readable}::text[]))
-        AND (${query.status ?? null}::text IS NULL
-          OR (${query.status ?? null} = 'processed' AND processed_at IS NOT NULL)
-          OR (${query.status ?? null} = 'dead' AND dead_at IS NOT NULL)
-          OR (${query.status ?? null} = 'pending' AND processed_at IS NULL AND dead_at IS NULL))
-      ORDER BY id DESC LIMIT ${limit}`;
+    const rows = await recentEvents(tx, { type: query.type ?? null, record: record?.uuid ?? null, before: before?.uuid ?? null, all, readable,
+      status: query.status ?? null, limit });
     const data = [];
     for (const r of rows) data.push({ ...(await publicEvent(tx, r, ctx)), processing: publicProcessing(r) });
     return { body: { data, next_before: rows.length === limit ? data[data.length - 1]!.id : null } };

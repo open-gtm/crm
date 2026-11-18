@@ -67,6 +67,12 @@ export async function signInMember(tx: Tx, userId: string): Promise<SignInMember
   return r;
 }
 
+/** A member's display name (the inviter, in an invitation email). */
+export async function memberName(tx: Tx, userId: string): Promise<{ name: string } | undefined> {
+  const [r] = await tx<{ name: string }[]>`SELECT name FROM users WHERE id = ${userId}`;
+  return r;
+}
+
 /** A member's role and its permissions, whatever their state. */
 export async function memberRole(tx: Tx, userId: string): Promise<{ role: string; permissions: string[] } | undefined> {
   const [m] = await tx<{ role: string; permissions: string[] }[]>`
@@ -282,8 +288,42 @@ export async function revokeSessionOf(tx: Tx, sessionId: string, userId: string,
   return row;
 }
 
+/** The member a session belongs to, whatever its state. */
+export async function sessionOwner(tx: Tx, sessionId: string): Promise<{ user_id: string } | undefined> {
+  const [row] = await tx<{ user_id: string }[]>`SELECT user_id FROM sessions WHERE id = ${sessionId}`;
+  return row;
+}
+
 /** Deletes sessions that ended more than a day ago, in the workspace the transaction is in. Returns how many. */
 export async function deleteEndedSessions(tx: Tx): Promise<number> {
   const rows = await tx`DELETE FROM sessions WHERE least(expires_at, idle_expires_at, coalesce(revoked_at, 'infinity')) < now() - interval '1 day' RETURNING 1`;
   return rows.length;
+}
+
+// --- What the session and account pages show --------------------------------------------------------
+
+/** GET /v1/auth/session: the session's expiry and its member, with whether they have a password or an SSO link. */
+export async function sessionInfo(tx: Tx, sessionId: string) {
+  const [row] = await tx<{ expires_at: Date; idle_expires_at: Date; email: string; name: string; has_password: boolean; sso_linked: boolean }[]>`
+      SELECT s.expires_at, s.idle_expires_at, u.email::text, u.name,
+             coalesce(c.password_hash IS NOT NULL, false) AS has_password, coalesce(c.oidc_subject IS NOT NULL, false) AS sso_linked
+      FROM sessions s JOIN users u ON u.tenant_id = s.tenant_id AND u.id = s.user_id
+      LEFT JOIN member_credentials c ON c.tenant_id = s.tenant_id AND c.user_id = s.user_id
+      WHERE s.id = ${sessionId}`;
+  return row;
+}
+
+/** The /auth/signed-in page: the member, workspace and session expiry, and whether they have (and may have) a password. */
+export async function signedInPageFacts(tx: Tx, sessionId: string) {
+  return (await tx<{ name: string; email: string; workspace: string; expires_at: Date; has_password: boolean; allowed: boolean }[]>`
+      SELECT u.name, u.email::text, t.name AS workspace, s.expires_at, c.password_hash IS NOT NULL AS has_password, t.password_sign_in AS allowed
+      FROM sessions s JOIN users u ON u.tenant_id = s.tenant_id AND u.id = s.user_id CROSS JOIN tenants t
+      LEFT JOIN member_credentials c ON c.tenant_id = u.tenant_id AND c.user_id = u.id WHERE s.id = ${sessionId}`)[0];
+}
+
+/** The /auth/password page: whether the member has a password and whether the workspace allows them. */
+export async function passwordPageFacts(tx: Tx, userId: string) {
+  return (await tx<{ has_password: boolean; allowed: boolean }[]>`
+      SELECT c.password_hash IS NOT NULL AS has_password, t.password_sign_in AS allowed FROM users u CROSS JOIN tenants t
+      LEFT JOIN member_credentials c ON c.tenant_id = u.tenant_id AND c.user_id = u.id WHERE u.id = ${userId}`)[0];
 }

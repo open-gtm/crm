@@ -2,6 +2,7 @@ import { z } from "zod";
 import { applyPasswordChange, preparePasswordChange, type PasswordChange } from "../auth/account.js";
 import { clearCookie, cookieNames } from "../auth/cookies.js";
 import { unlinkSso } from "../auth/oidc.js";
+import { sessionInfo, sessionOwner } from "../auth/queries.js";
 import { assertMayManageSignInOf, listSessions, requireRecentSignIn, requireSession, revokeOne, revokeUserSessions, sessionPublicId } from "../auth/sessions.js";
 import { csrfToken } from "../auth/tokens.js";
 import { oauthSettings } from "../config.js";
@@ -27,12 +28,7 @@ route({
     + "what this server offers (connected apps), and the CSRF token to send as X-CSRF-Token",
   handler: async ({ tx, ctx }) => {
     const s = requireSession(ctx);
-    const [row] = await tx<{ expires_at: Date; idle_expires_at: Date; email: string; name: string; has_password: boolean; sso_linked: boolean }[]>`
-      SELECT s.expires_at, s.idle_expires_at, u.email::text, u.name,
-             coalesce(c.password_hash IS NOT NULL, false) AS has_password, coalesce(c.oidc_subject IS NOT NULL, false) AS sso_linked
-      FROM sessions s JOIN users u ON u.tenant_id = s.tenant_id AND u.id = s.user_id
-      LEFT JOIN member_credentials c ON c.tenant_id = s.tenant_id AND c.user_id = s.user_id
-      WHERE s.id = ${s.id}`;
+    const row = await sessionInfo(tx, s.id);
     return {
       body: {
         session: { id: sessionPublicId(s.id), method: s.method, signed_in_at: s.signedInAt.toISOString(), expires_at: row!.expires_at.toISOString(),
@@ -105,7 +101,7 @@ route({
   response: data(strict({ id: S.str, revoked: S.bool })),
   summary: "Revoke a session: one of my own (from a signed-in session), or (with members:manage, by key or session) a member's",
   handler: async ({ tx, ctx, params }) => {
-    const [row] = await tx<{ user_id: string }[]>`SELECT user_id FROM sessions WHERE id = ${parseSessionId(params.id!)}`;
+    const row = await sessionOwner(tx, parseSessionId(params.id!));
     // Ending your own session takes a session: a key, whatever its scopes, ends sessions only through members:manage.
     const own = Boolean(row && ctx.session && ctx.actor.type === "user" && ctx.actor.id === row.user_id);
     // A session you may not act on answers as an unknown one does, so the answer says nothing about which IDs exist.

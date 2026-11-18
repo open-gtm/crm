@@ -25,6 +25,7 @@ import { canonicalJson, sha256 } from "../lib/crypto.js";
 import { ApiError, forbidden } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
 import { buildOpenApi } from "./openapi.js";
+import { claimIdempotencyKey, pingDatabase, priorIdempotentRequest, storeIdempotentResponse } from "./queries.js";
 import { isWrite, requiredPermission, routes, type Required } from "./registry.js";
 import "./routes.js";
 import "./routes-events.js";
@@ -418,7 +419,7 @@ export function buildApp(): Hono<Env> {
 
   app.get("/healthz", (c) => c.json({ ok: true }));
   app.get("/readyz", async (c) => {
-    await db()`SELECT 1`;
+    await pingDatabase(db());
     return c.json({ ok: true });
   });
   app.get("/openapi.json", async (c) => c.json(await buildOpenApi(null)));
@@ -658,13 +659,10 @@ async function serve(c: Context<Env>, r: (typeof routes)[number], ctx: Ctx, cred
     const useIdem = isWrite(r.method) && idemKey;
     const bodyHash = sha256(canonicalJson({ method: r.method, path: c.req.path, body: body ?? null }));
     if (useIdem) {
-      const inserted = await tx`
-        INSERT INTO idempotency_keys (tenant_id, credential_id, credential, idem_key, method, path, body_hash, status, response)
-        VALUES (${ctx.tenantId}, ${credId}, ${credential.kind}, ${idemKey}, ${r.method}, ${c.req.path}, ${bodyHash}, 0, '{}')
-        ON CONFLICT DO NOTHING RETURNING 1`;
-      if (inserted.length === 0) {
-        const [prior] = await tx<{ body_hash: Buffer; status: number; response: unknown }[]>`
-          SELECT body_hash, status, response FROM idempotency_keys WHERE credential_id = ${credId} AND idem_key = ${idemKey}`;
+      const claimed = await claimIdempotencyKey(tx, { tenantId: ctx.tenantId, credentialId: credId, credential: credential.kind, key: idemKey, method: r.method,
+        path: c.req.path, bodyHash });
+      if (!claimed) {
+        const prior = await priorIdempotentRequest(tx, credId, idemKey);
         if (!prior || !prior.body_hash.equals(bodyHash)) {
           throw new ApiError(422, "idempotency_key_reused", "This Idempotency-Key was used with a different request");
         }
@@ -675,8 +673,7 @@ async function serve(c: Context<Env>, r: (typeof routes)[number], ctx: Ctx, cred
     const out = await r.handler({ tx, ...args, prepared } as never);
     const status = out.status ?? 200;
     if (useIdem) {
-      await tx`UPDATE idempotency_keys SET status = ${status}, response = ${tx.json(await sealStoredResponse(tx, ctx, credId, idemKey, out.body ?? null, out.headers) as never)}
-               WHERE credential_id = ${credId} AND idem_key = ${idemKey}`;
+      await storeIdempotentResponse(tx, credId, idemKey, status, await sealStoredResponse(tx, ctx, credId, idemKey, out.body ?? null, out.headers));
     }
     return { status, body: out.body, replayed: false, headers: out.headers, after: out.after };
   });
