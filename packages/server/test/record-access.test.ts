@@ -327,6 +327,23 @@ describe("operations check every object they touch, before any work", () => {
   });
 });
 
+describe("managing another member's sign-in follows record access", () => {
+  it("a member manager can't list or revoke the sessions of someone whose role reads records theirs can't", async () => {
+    const manage = [...ALL, "members:manage"];
+    const noDeals = await role(manage, { objects: { deal: { read: false, write: false, archive: false } } });
+    const manager = await memberWithKey(ws, noDeals.key, ["admin", "ops:read", "ops:write"]);
+    const wider = await memberWithKey(ws, (await role(ALL)).key, OPS);
+    const peer = await memberWithKey(ws, noDeals.key, OPS);
+    for (const [method, path] of [["GET", `/v1/members/${wider.id}/sessions`], ["POST", `/v1/members/${wider.id}/sessions/revoke`]] as const) {
+      const r = await call(method, path, { key: manager.key });
+      expect(r.status, path).toBe(403);
+      expect(r.json.detail, path).toMatch(/This member's role has record access you don't: deal/);
+    }
+    expect((await call("GET", `/v1/members/${peer.id}/sessions`, { key: manager.key })).status).toBe(200);
+    expect((await call("GET", `/v1/members/${wider.id}/sessions`, { key: ws.keys.admin })).status).toBe(200);
+  });
+});
+
 describe("notifications and alerts follow each recipient's access", () => {
   it("alert titles use what the recipient can read; recipients who can't read the object get nothing", async () => {
     const noNames = await memberWithKey(ws, (await role(ALL, { fields: { contact: { first_name: "none", last_name: "none" } } })).key, OPS);
