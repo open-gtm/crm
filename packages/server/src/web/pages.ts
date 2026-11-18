@@ -163,7 +163,7 @@ ${hidden("csrf_token", o.csrf)}
 ${current}
 <label for="new">New password</label>
 <input id="new" name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="256" aria-describedby="rules">
-<p id="rules" class="hint">At least 12 characters. Not a common password, and not containing your email or the workspace name.</p>
+<p id="rules" class="hint">At least 12 characters, not easy to guess, and not containing your email or the workspace name. A few unrelated words make a good one.</p>
 <label for="again">New password again</label>
 <input id="again" name="password_again" type="password" autocomplete="new-password" required minlength="12" maxlength="256">
 <button type="submit">${o.hasPassword ? "Change password" : "Set password"}</button>
