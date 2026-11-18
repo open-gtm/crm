@@ -11,6 +11,7 @@ import { ADDRESS_PART_NAMES, FieldValueError, isAddressPart, normalizeInput, sam
 import type { Where } from "./query.js";
 import { createRecord, getRecord, queryRecords, updateRecord, type RecordOut } from "./records.js";
 import { getObject, loadSchema, type FieldMeta, type ObjectMeta, type Schema } from "./schema.js";
+import { activeUsersByEmail } from "./queries/directory.js";
 import { normalizeDomain } from "./standard.js";
 
 /**
@@ -428,7 +429,7 @@ async function lookup(tx: Tx, ctx: Ctx, schema: Schema, f: FieldMeta, by: string
     cacheKey = `user|email|${value.toLowerCase()}`; // users.email is citext
     const hit = cache.get(cacheKey);
     if (hit) return hit;
-    const rows = await tx<{ id: string }[]>`SELECT id FROM users WHERE email = ${value} AND disabled_at IS NULL LIMIT 2`;
+    const rows = await activeUsersByEmail(tx, value);
     ids = rows.map((r) => encodeId("usr", r.id));
   } else {
     const target = getObject(schema, to);
