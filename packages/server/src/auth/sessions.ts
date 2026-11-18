@@ -2,6 +2,8 @@ import { config } from "../config.js";
 import { audit } from "../core/audit.js";
 import { ALL_SCOPES, OWNER_ROLE, can, type Ctx, type SignInMethod } from "../core/context.js";
 import { keyOwner, memberAccess, type Principal } from "../core/keys.js";
+import { assertCoversRole } from "../core/roles.js";
+import { loadSchema } from "../core/schema.js";
 import { db, type Tx } from "../db/pool.js";
 import { tenantIds } from "../core/auditchain.js";
 import { safeEqual } from "../lib/crypto.js";
@@ -130,8 +132,8 @@ export async function revokeOne(tx: Tx, ctx: Ctx, userId: string, publicId: stri
 /**
  * The rules for seeing or acting on another member's sign-in (their sessions, with addresses and
  * browsers, and their SSO link), as for changing the member: members:manage, an owner's only by an
- * owner, and never someone whose role holds permissions the caller doesn't. Listing is held to the
- * same rules as revoking.
+ * owner, and never someone whose role holds permissions or record access the caller doesn't. Listing
+ * is held to the same rules as revoking.
  */
 export async function assertMayManageSignInOf(tx: Tx, ctx: Ctx, userId: string) {
   if (!can(ctx, "members:manage")) throw forbidden("Managing other members' sign-in needs the members:manage permission");
@@ -139,8 +141,9 @@ export async function assertMayManageSignInOf(tx: Tx, ctx: Ctx, userId: string) 
   if (!m) throw notFound("Member");
   if (ctx.actor.type === "user" && ctx.actor.id === userId) return;
   if (m.role === OWNER_ROLE && ctx.actor.role !== OWNER_ROLE) throw forbidden("Only an owner can see or change an owner's sign-in");
-  const over = m.permissions.filter((p) => !ctx.permissions.has(p as never));
+  const over = m.permissions.filter((p) => !ctx.permissions.has(p));
   if (over.length) throw forbidden(`This member has permissions you don't hold: ${over.join(", ")}`);
+  await assertCoversRole(tx, ctx, await loadSchema(tx), { id: m.role_id, key: m.role, permissions: m.permissions, access_version: m.access_version }, "This member's role");
 }
 
 /** Deletes sessions that ended more than a day ago, in every workspace. The worker runs this hourly. */
