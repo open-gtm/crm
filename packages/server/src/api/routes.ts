@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { describeAccess } from "../core/access.js";
-import { auditLogPage } from "../core/audit-queries.js";
+import { auditLogPage } from "../core/queries/audit.js";
 import { verifyInTx } from "../core/auditchain.js";
 import { PREVIEW_PER_TOKEN, previewCreates } from "../core/bulk.js";
 import { describeObject, listObjects, schemaChanges, schemaSummary } from "../core/describe.js";
