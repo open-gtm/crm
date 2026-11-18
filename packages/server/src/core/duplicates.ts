@@ -5,6 +5,7 @@ import type { Ctx } from "./context.js";
 import { Compiler, targetFor } from "./query.js";
 import { fetchRows, serialize, type RecordOut } from "./records.js";
 import { getObject, loadSchema, quoteIdent, type FieldMeta, type ObjectMeta } from "./schema.js";
+import { limitFuzzyComparison } from "./queries/duplicates.js";
 
 /**
  * The duplicate finder (POST /v1/objects/{object}/duplicates): groups of records that look like the
@@ -140,7 +141,7 @@ export async function findDuplicates(tx: Tx, ctx: Ctx, objectName: string, input
     try {
       // In a savepoint that is always rolled back: the lower timeout and the threshold end with it, and a timeout leaves the transaction usable.
       await tx.savepoint(async (sp) => {
-        await sp`SELECT set_config('statement_timeout', ${String(FUZZY_LIMITS.timeoutMs)}, true), set_config('pg_trgm.similarity_threshold', ${String(minSimilarity)}, true)`;
+        await limitFuzzyComparison(sp, String(FUZZY_LIMITS.timeoutMs), String(minSimilarity));
         throw new Done(await sp.unsafe<{ a: string; b: string; s: number }[]>(`
           WITH n AS MATERIALIZED (SELECT r.id, ${name} AS nm FROM (${window(FUZZY_SCAN)}) r)
           SELECT x.id AS a, y.id AS b, similarity(x.nm, y.nm)::float8 AS s FROM n x JOIN n y ON x.id < y.id AND x.nm % y.nm
