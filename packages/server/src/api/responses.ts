@@ -63,6 +63,14 @@ const webhook = {
 /** A record an alert would have fired for, and when. */
 const alertSample = object({ record: str, display_name: { ...nullable(str), description: "null when the caller can't read the record" }, at: time });
 
+/** The per-object and per-field record rules of a role (core/roles.ts publicRules), by object and field api_name. */
+const recordRules = {
+  objects: { type: "object", additionalProperties: object({ read: nullable(bool), write: nullable(bool), archive: nullable(bool) }),
+    description: "Per object: true allows, false denies, null inherits the role's records:* permission" },
+  fields: { type: "object", additionalProperties: { type: "object", additionalProperties: enumOf("none", "read") },
+    description: "Per object, per field: none (not visible) or read (not writable)" },
+};
+
 /** Components every document has. The authenticated document replaces Record with one schema per object. */
 export const BASE_SCHEMAS: Record<string, JsonSchema> = {
   Problem: {
@@ -244,6 +252,28 @@ export const BASE_SCHEMAS: Record<string, JsonSchema> = {
     stopped: { type: "string", description: "When a stop step would end the run: its reason" },
     error: { type: "string", description: "When a step would fail: why" },
   }, ["matched", "explanation", "actions"]),
+  Member: object({
+    id: { type: "string", description: "usr_… for a member, svc_… for a service account" },
+    email: { type: "string", description: "Members only" }, name: str,
+    role: { type: "string", description: "The role's key" }, role_name: str, active: bool,
+    sign_in: ref("MemberSignIn"),
+    keys_revoked: { type: "integer", description: "After disabling: the API keys revoked with it (absent when none)" },
+    sessions_revoked: { type: "integer", description: "After disabling a member: the browser sessions ended (absent when none)" },
+    apps_revoked: { type: "integer", description: "After disabling a member: the connected apps revoked (absent when none)" },
+    invitation: { ...enumOf("queued"), description: "When added with send_invite" },
+  }, ["id", "name", "role", "role_name", "active"]),
+  MemberSignIn: object({ has_password: bool, sso_linked: bool, last_sign_in_at: nullable(time), active_sessions: int }),
+  Role: object({
+    id: str, key: str, name: str, description: str, permissions: list(str), is_system: bool, ...recordRules,
+    created_at: time, updated_at: time, archived_at: nullable(time),
+    active_members: { type: "integer", description: "Active members and service accounts holding it" },
+  }),
+  ObjectAccess: object({
+    object: str, read: bool, write: bool, archive: bool,
+    rule: { ...nullable(object({ read: nullable(bool), write: nullable(bool), archive: nullable(bool) })), description: "The role's own rule for the object, or null" },
+    fields: { type: "object", additionalProperties: enumOf("none", "read", "write"), description: "Fields with a rule of their own, by api_name: their effective access" },
+    restricted_fields: list(object({ field: str, values: enumOf("visible", "redacted") })),
+  }),
 };
 
 /** The responses map of one operation: the declared success, and problem documents for everything else. */
@@ -305,4 +335,18 @@ export const R = {
   webhookWithSecret: data(ref("WebhookWithSecret")),
   webhookDelivery: data(ref("WebhookDelivery")),
   automationTest: data(ref("AutomationTest")),
+  member: data(ref("Member")),
+  role: data(ref("Role")),
+  accessReview: data(object({
+    generated_at: time,
+    members: list(object({
+      id: str, type: enumOf("user", "service_account"), email: { type: "string", description: "Members only" }, name: str, active: bool,
+      role: object({ key: str, name: str }), permissions: list(str), record_rules: object(recordRules), created_at: time,
+      keys: list(object({ id: str, name: str, scopes: list(str), environment: enumOf("live", "test"), created_at: time,
+        last_used_at: nullable(time), expires_at: nullable(time), revoked_at: nullable(time), usable: bool })),
+      sign_in: { ...ref("MemberSignIn"), description: "Members only" },
+      apps: { ...list(ref("ConnectedApp")), description: "Members only: apps they connected over OAuth" },
+    }, ["id", "type", "name", "active", "role", "permissions", "record_rules", "created_at", "keys"])),
+  })),
+  roles: dataList(ref("Role")),
 };
