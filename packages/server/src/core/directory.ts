@@ -3,6 +3,9 @@ import { forbidden, unprocessable } from "../lib/errors.js";
 import { encodeId } from "../lib/ids.js";
 import { canObject, fieldAccess } from "./access.js";
 import type { Ctx } from "./context.js";
+import {
+  activeUsersPage, deletePreference, lockPreferences, preferencesOf, preferencesTotalBytes, preferenceValueSizes, upsertPreference,
+} from "./queries/directory.js";
 import { escapeLike, UUID } from "./query.js";
 import { isModuleOn, loadSchema } from "./schema.js";
 
@@ -38,12 +41,7 @@ export async function listUsers(tx: Tx, ctx: Ctx, opts: { q?: string; limit?: nu
     }
   }
   const like = `${escapeLike(q)}%`;
-  const rows = await tx<{ id: string; name: string; email: string }[]>`
-    SELECT id, name, email::text AS email FROM users
-    WHERE disabled_at IS NULL
-      AND (${q} = '' OR lower(name) LIKE ${like} OR lower(email::text) LIKE ${like} OR lower(name) LIKE ${`% ${escapeLike(q)}%`})
-      AND (${after?.n ?? null}::text IS NULL OR (name, id) > (${after?.n ?? ""}, ${after?.id ?? "00000000-0000-0000-0000-000000000000"}::uuid))
-    ORDER BY name, id LIMIT ${limit + 1}`;
+  const rows = await activeUsersPage(tx, { q, like, wordLike: `% ${escapeLike(q)}%`, after, take: limit + 1 });
   const page = rows.slice(0, limit);
   const last = page[page.length - 1];
   return {
@@ -67,8 +65,7 @@ const member = (ctx: Ctx) => {
 /** The caller's own preferences: UI state such as column widths or the last view opened. Never for secrets. */
 export async function getPreferences(tx: Tx, ctx: Ctx): Promise<Record<string, unknown>> {
   const m = member(ctx);
-  const rows = await tx<{ key: string; value: unknown }[]>`
-    SELECT key, value FROM member_preferences WHERE member_type = ${m.type} AND member_id = ${m.id} ORDER BY key`;
+  const rows = await preferencesOf(tx, m.type, m.id);
   return Object.fromEntries(rows.map((r) => [r.key, r.value]));
 }
 
@@ -83,24 +80,18 @@ export async function setPreferences(tx: Tx, ctx: Ctx, input: Record<string, unk
   }
   // Sizes as the database CHECK measures them (each value's jsonb text, longer than JSON.stringify), so too big is a 422, not a 500.
   const set = entries.filter(([, v]) => v !== null);
-  const sizes = set.length === 0 ? [] : await tx<{ n: number }[]>`
-    SELECT octet_length(x::text)::int AS n FROM jsonb_array_elements(${tx.json(set.map(([, v]) => v) as never)}::jsonb) WITH ORDINALITY AS e(x, i) ORDER BY i`;
+  const sizes = set.length === 0 ? [] : await preferenceValueSizes(tx, set.map(([, v]) => v));
   sizes.forEach((r, i) => {
     if (r.n > PREFERENCE_LIMITS.valueBytes) throw unprocessable(`Preference "${set[i]![0]}" is larger than ${PREFERENCE_LIMITS.valueBytes} bytes`);
   });
   // Serialises this member's writes, so the caps hold under concurrent requests.
-  await tx`SELECT pg_advisory_xact_lock(hashtext(${`prefs:${ctx.tenantId}:${m.type}:${m.id}`}))`;
+  await lockPreferences(tx, ctx.tenantId, m.type, m.id);
   for (const [k, v] of entries) {
-    if (v === null) await tx`DELETE FROM member_preferences WHERE member_type = ${m.type} AND member_id = ${m.id} AND key = ${k}`;
-    else {
-      await tx`INSERT INTO member_preferences (tenant_id, member_type, member_id, key, value) VALUES (${ctx.tenantId}, ${m.type}, ${m.id}, ${k}, ${tx.json(v as never)})
-        ON CONFLICT (tenant_id, member_type, member_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
-    }
+    if (v === null) await deletePreference(tx, m.type, m.id, k);
+    else await upsertPreference(tx, { tenantId: ctx.tenantId, type: m.type, id: m.id, key: k, value: v });
   }
   const all = await getPreferences(tx, ctx);
   if (Object.keys(all).length > PREFERENCE_LIMITS.keys) throw unprocessable(`At most ${PREFERENCE_LIMITS.keys} preferences; remove some (set them to null) first`);
-  const [total] = await tx<{ n: number }[]>`
-    SELECT coalesce(sum(octet_length(value::text)), 0)::int AS n FROM member_preferences WHERE member_type = ${m.type} AND member_id = ${m.id}`;
-  if (total!.n > PREFERENCE_LIMITS.totalBytes) throw unprocessable(`Preferences can hold at most ${PREFERENCE_LIMITS.totalBytes} bytes in all`);
+  if ((await preferencesTotalBytes(tx, m.type, m.id)) > PREFERENCE_LIMITS.totalBytes) throw unprocessable(`Preferences can hold at most ${PREFERENCE_LIMITS.totalBytes} bytes in all`);
   return all;
 }

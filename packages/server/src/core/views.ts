@@ -7,6 +7,9 @@ import { audit } from "./audit.js";
 import { isEntity } from "./catalog.js";
 import { can, type Ctx } from "./context.js";
 import { compileQuery, type SortInput, type Where } from "./query.js";
+import {
+  countViews, definitionBytes, deleteViewRow, insertView, lockViewCap, sharedAndOwnViews, updateViewRow, viewById, type ViewRow,
+} from "./queries/views.js";
 import { isModuleOn, loadSchema, type ObjectMeta, type Schema } from "./schema.js";
 
 /**
@@ -28,11 +31,6 @@ export const VIEW_LIMITS = { name: 100, columns: 100, personalPerMember: 200, sh
 
 export interface ViewDefinition { where?: Where; sort?: SortInput[]; columns?: string[]; group_by?: GroupBy[] }
 export interface ViewInput extends ViewDefinition { object?: string; name?: string; shared?: boolean }
-
-interface ViewRow {
-  id: string; object_id: string; name: string; shared: boolean; owner_type: string | null; owner_id: string | null;
-  definition: ViewDefinition; created_by: string | null; updated_by: string | null; created_at: Date; updated_at: Date; version: number;
-}
 
 /** What a view needs to run, after the reader's access is applied. */
 export interface ResolvedView { id: string; object: string; where?: Where; sort?: SortInput[]; columns?: string[]; group_by?: GroupBy[] }
@@ -181,7 +179,7 @@ function viewOut(ctx: Ctx, schema: Schema, row: ViewRow) {
 
 /** A view this caller may see (canSee); anything else is not found. */
 async function loadVisible(tx: Tx, ctx: Ctx, schema: Schema, publicId: string): Promise<ViewRow> {
-  const [row] = await tx<ViewRow[]>`SELECT * FROM views WHERE id = ${parseViewId(publicId)}`;
+  const row = await viewById(tx, parseViewId(publicId));
   if (!row || !canSee(ctx, schema, row)) throw notFound(`View ${publicId}`);
   return row;
 }
@@ -193,10 +191,8 @@ export async function listViews(tx: Tx, ctx: Ctx, objectName?: string) {
     if (!obj || !isModuleOn(schema, obj)) throw notFound(`Object "${objectName}"`);
     assertObject(ctx, obj, "read");
   }
-  const rows = await tx<ViewRow[]>`
-    SELECT * FROM views
-    WHERE (shared OR (owner_type = ${ctx.actor.type} AND owner_id = ${ctx.actor.id}::uuid)) AND (${obj?.id ?? null}::uuid IS NULL OR object_id = ${obj?.id ?? null}::uuid)
-    ORDER BY shared, name, id LIMIT ${VIEW_LIMITS.personalPerMember + VIEW_LIMITS.sharedPerWorkspace}`;
+  const rows = await sharedAndOwnViews(tx, { actorType: ctx.actor.type, actorId: ctx.actor.id, objectId: obj?.id ?? null,
+    limit: VIEW_LIMITS.personalPerMember + VIEW_LIMITS.sharedPerWorkspace });
   return rows.filter((r) => canSee(ctx, schema, r)).map((r) => viewOut(ctx, schema, r));
 }
 
@@ -230,8 +226,7 @@ const validName = (name: unknown) => {
 
 /** Measured as the database CHECK measures it (the jsonb's text, which is longer than JSON.stringify), so too big is a 422, not a 500. */
 async function checkSize(tx: Tx, def: ViewDefinition): Promise<void> {
-  const [r] = await tx<{ n: number }[]>`SELECT octet_length(${tx.json(def as never)}::jsonb::text)::int AS n`;
-  if (r!.n > VIEW_LIMITS.definitionBytes) throw unprocessable(`A view's filter, sort, columns and group_by can take at most ${VIEW_LIMITS.definitionBytes} bytes in all`);
+  if ((await definitionBytes(tx, def)) > VIEW_LIMITS.definitionBytes) throw unprocessable(`A view's filter, sort, columns and group_by can take at most ${VIEW_LIMITS.definitionBytes} bytes in all`);
 }
 
 /**
@@ -239,12 +234,10 @@ async function checkSize(tx: Tx, def: ViewDefinition): Promise<void> {
  * The advisory lock serialises writers to the same cap, so concurrent requests can't all pass the count.
  */
 async function checkCap(tx: Tx, ctx: Ctx, shared: boolean, owner: { type: string | null; id: string | null }): Promise<void> {
-  await tx`SELECT pg_advisory_xact_lock(hashtext(${`views:${ctx.tenantId}:${shared ? "shared" : `${owner.type}:${owner.id}`}`}))`;
-  const [counted] = shared
-    ? await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM views WHERE shared`
-    : await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM views WHERE owner_type = ${owner.type} AND owner_id = ${owner.id}`;
+  await lockViewCap(tx, ctx.tenantId, shared, owner);
+  const counted = await countViews(tx, shared, owner);
   const cap = shared ? VIEW_LIMITS.sharedPerWorkspace : VIEW_LIMITS.personalPerMember;
-  if (counted!.n >= cap) throw unprocessable(`At most ${cap} ${shared ? "shared views per workspace" : "personal views per member"}`);
+  if (counted >= cap) throw unprocessable(`At most ${cap} ${shared ? "shared views per workspace" : "personal views per member"}`);
 }
 
 export async function createView(tx: Tx, ctx: Ctx, input: ViewInput) {
@@ -261,10 +254,8 @@ export async function createView(tx: Tx, ctx: Ctx, input: ViewInput) {
   check(ctx, schema, obj, def, true);
   await checkCap(tx, ctx, shared, ctx.actor);
   const id = uuidv7();
-  const [row] = await tx<ViewRow[]>`
-    INSERT INTO views (tenant_id, id, object_id, name, shared, owner_type, owner_id, definition, created_by, updated_by)
-    VALUES (${ctx.tenantId}, ${id}, ${obj.id}, ${name}, ${shared}, ${shared ? null : ctx.actor.type}, ${shared ? null : ctx.actor.id},
-            ${tx.json(def as never)}, ${ctx.actor.id}, ${ctx.actor.id}) RETURNING *`;
+  const row = await insertView(tx, { tenantId: ctx.tenantId, id, objectId: obj.id, name, shared, ownerType: shared ? null : ctx.actor.type,
+    ownerId: shared ? null : ctx.actor.id, definition: def, actorId: ctx.actor.id });
   // Names only, never the definition: its filter values are data.
   if (shared) await audit(tx, ctx, { action: "view.created", objectType: obj.api_name, details: { view: encodeId(VIEW_ID_PREFIX, id), name } });
   return viewOut(ctx, schema, row!);
@@ -290,9 +281,7 @@ export async function updateView(tx: Tx, ctx: Ctx, publicId: string, input: Omit
   // A shared view made personal becomes the caller's.
   const [owner_type, owner_id] = shared ? [null, null] : row.shared ? [ctx.actor.type, ctx.actor.id] : [row.owner_type, row.owner_id];
   if (shared !== row.shared) await checkCap(tx, ctx, shared, { type: owner_type, id: owner_id });
-  const [updated] = await tx<ViewRow[]>`
-    UPDATE views SET name = ${name}, shared = ${shared}, owner_type = ${owner_type}, owner_id = ${owner_id}, definition = ${tx.json(def as never)},
-      updated_by = ${ctx.actor.id}, version = version + 1 WHERE id = ${row.id} RETURNING *`;
+  const updated = await updateViewRow(tx, { id: row.id, name, shared, ownerType: owner_type, ownerId: owner_id, definition: def, actorId: ctx.actor.id });
   if (row.shared || shared) await audit(tx, ctx, { action: "view.updated", objectType: obj.api_name, details: { view: publicId, name, shared } });
   return viewOut(ctx, schema, updated!);
 }
@@ -301,7 +290,7 @@ export async function deleteView(tx: Tx, ctx: Ctx, publicId: string) {
   const schema = await loadSchema(tx);
   const row = await loadVisible(tx, ctx, schema, publicId);
   if (row.shared) needManage(ctx);
-  await tx`DELETE FROM views WHERE id = ${row.id}`;
+  await deleteViewRow(tx, row.id);
   if (row.shared) await audit(tx, ctx, { action: "view.deleted", objectType: objectOf(schema, row)?.api_name ?? null, details: { view: publicId, name: row.name } });
   return { id: publicId, deleted: true };
 }
