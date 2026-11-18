@@ -10,6 +10,7 @@ import type { Ctx } from "./context.js";
 import { Compiler, targetFor, type Where } from "./query.js";
 import { archiveRecord, assertInputAllowed, createRecord, fetchRows, serialize, updateRecord } from "./records.js";
 import { getObject, loadSchema, quoteIdent, type ObjectMeta, type Schema } from "./schema.js";
+import { matchingIds } from "./queries/records.js";
 
 /**
  * Bulk update and bulk archive of one object's records, by explicit IDs or by a filter.
@@ -94,7 +95,7 @@ async function matching(tx: Tx, ctx: Ctx, schema: Schema, obj: ObjectMeta, where
   const select = `SELECT r.id FROM ${quoteIdent(obj.table_name ?? "records")} r WHERE ${conds.join(" AND ")} ORDER BY r.id LIMIT ${opts.limit}`;
   try {
     if (opts.count) return (await tx.unsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM (${select}) x`, c.params as never[]))[0]!.n;
-    return (await tx.unsafe<{ id: string }[]>(select, c.params as never[])).map((r) => r.id);
+    return (await matchingIds(tx, select, c.params)).map((r) => r.id);
   } catch (e) {
     if (typeof (e as { code?: string }).code === "string" && (e as { code: string }).code.startsWith("22")) throw unprocessable("A filter value is not valid for its field");
     throw e;

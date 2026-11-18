@@ -10,11 +10,16 @@ import { decryptValue, encryptValue } from "./encryption.js";
 import { emit } from "./events.js";
 import { FieldValueError, fromStorage, normalizeInput, searchString, toStorage } from "./fieldtypes.js";
 import { compileQuery, COUNT_CAP, encodeCursor, type QueryInput } from "./query.js";
+import {
+  archiveRecordRow, associationsOf, clearRecordLinks, compiledCount, compiledRows, customRowsById, entityRowExists, insertRecordLink, insertRecordRow,
+  jsonValueTaken, lockUniqueField, mergeChainRows, recordLinksFrom, registeredRecordExists, registerRecord, restoreRecordRow, standardRowsById,
+  updateRecordRow, valueHeldElsewhere, type RecordRow,
+} from "./queries/records.js";
 import { getObject, loadSchema, quoteIdent, SEARCH_TEXT_TYPES, type FieldMeta, type ObjectMeta, type Schema } from "./schema.js";
 import { afterCreate, afterUpdate, beforeCreate, beforeUpdate, type Draft } from "./standard.js";
 
 export type RecordOut = Record<string, unknown> & { id: string; object: string };
-type Row = Record<string, unknown> & { id: string };
+type Row = RecordRow;
 
 const VIRTUAL_INPUTS: Record<string, string[]> = { activity: ["related_to"], task: ["related_to"] };
 
@@ -34,13 +39,13 @@ export async function resolveRef(tx: Tx, schema: Schema, target: string, publicI
   if (!decoded || decoded.prefix !== prefixFor(schema, target)) {
     throw unprocessable(`"${field}" must be a ${target} ID (${prefixFor(schema, target)}_…); got "${publicId}"`, { field });
   }
-  let found: readonly unknown[];
+  let found: boolean;
   if (isEntity(target)) {
-    found = await tx.unsafe(`SELECT 1 FROM ${quoteIdent(ENTITIES[target].table)} WHERE id = $1`, [decoded.uuid]);
+    found = await entityRowExists(tx, ENTITIES[target].table, decoded.uuid);
   } else {
-    found = await tx`SELECT 1 FROM record_registry WHERE id = ${decoded.uuid} AND object_id = ${schema.objects.get(target)!.id}`;
+    found = await registeredRecordExists(tx, decoded.uuid, schema.objects.get(target)!.id);
   }
-  if (found.length === 0) throw unprocessable(`"${field}": ${target} ${publicId} was not found`, { field });
+  if (!found) throw unprocessable(`"${field}": ${target} ${publicId} was not found`, { field });
   return decoded.uuid;
 }
 
@@ -88,9 +93,7 @@ export async function serialize(tx: Tx, ctx: Ctx, schema: Schema, obj: ObjectMet
   const linkFields = fields.filter((f) => f.type === "relation" && !f.column_name);
   const links = new Map<string, Map<string, string[]>>();
   if (linkFields.length) {
-    const rs = await tx<{ field_id: string; from_id: string; to_id: string }[]>`
-      SELECT field_id, from_id, to_id FROM record_links
-      WHERE from_id = ANY(${rows.map((r) => r.id)}::uuid[]) AND field_id = ANY(${linkFields.map((f) => f.id)}::uuid[])`;
+    const rs = await recordLinksFrom(tx, rows.map((r) => r.id), linkFields.map((f) => f.id));
     for (const l of rs) {
       const byField = links.get(l.from_id) ?? new Map<string, string[]>();
       byField.set(l.field_id, [...(byField.get(l.field_id) ?? []), l.to_id]);
@@ -157,17 +160,7 @@ const MERGE_HOPS = 10;
  * when B was later merged into C. The last one is where its references are now.
  */
 export async function mergeChains(tx: Tx, ids: string[]): Promise<Map<string, string[]>> {
-  const found = await tx<{ start: string; chain: string[] }[]>`
-    WITH RECURSIVE hop AS (
-      SELECT m.merged AS start, m.survivor_id AS cur, ARRAY[m.survivor_id] AS chain
-      FROM (SELECT survivor_id, unnest(merged_ids) AS merged FROM merges WHERE tenant_id = app.tenant_id() AND merged_ids && ${ids}::uuid[]) m
-      WHERE m.merged = ANY (${ids}::uuid[])
-      UNION ALL
-      SELECT h.start, n.survivor_id, h.chain || n.survivor_id FROM hop h
-      JOIN merges n ON n.tenant_id = app.tenant_id() AND n.merged_ids @> ARRAY[h.cur]
-      WHERE cardinality(h.chain) < ${MERGE_HOPS} AND NOT n.survivor_id = ANY (h.chain)
-    )
-    SELECT DISTINCT ON (start) start, chain FROM hop ORDER BY start, cardinality(chain) DESC`;
+  const found = await mergeChainRows(tx, ids, MERGE_HOPS);
   return new Map(found.map((f) => [f.start, f.chain]));
 }
 
@@ -178,11 +171,8 @@ export async function mergeChains(tx: Tx, ids: string[]): Promise<Map<string, st
  * without copying a value into their subject. One query for the links, one per related object.
  */
 async function attachRelated(tx: Tx, ctx: Ctx, schema: Schema, obj: ObjectMeta, rows: Row[], out: RecordOut[], opts: SerializeOpts) {
-  const [table, key] = obj.api_name === "activity" ? ["activity_associations", "activity_id"] : ["task_associations", "task_id"];
-  const assoc = await tx<{ owner_id: string; record_id: string; object_id: string }[]>`
-    SELECT a.${tx(key)} AS owner_id, a.record_id, rr.object_id FROM ${tx(table)} a
-    JOIN record_registry rr ON rr.tenant_id = a.tenant_id AND rr.id = a.record_id
-    WHERE a.${tx(key)} = ANY(${rows.map((r) => r.id)}::uuid[])`;
+  const [table, key] = obj.api_name === "activity" ? ["activity_associations", "activity_id"] as const : ["task_associations", "task_id"] as const;
+  const assoc = await associationsOf(tx, table, key, rows.map((r) => r.id));
   const names = new Map<string, string>();
   if (!opts.shallow) {
     const byObject = new Map<string, string[]>();
@@ -209,9 +199,9 @@ async function attachRelated(tx: Tx, ctx: Ctx, schema: Schema, obj: ObjectMeta, 
 
 export async function fetchRows(tx: Tx, obj: ObjectMeta, ids: string[], forUpdate = false): Promise<Row[]> {
   if (obj.is_system) {
-    return tx.unsafe<Row[]>(`SELECT * FROM ${quoteIdent(obj.table_name!)} WHERE id = ANY($1::uuid[])${forUpdate ? " FOR UPDATE" : ""}`, [ids]);
+    return standardRowsById(tx, obj.table_name!, ids, forUpdate);
   }
-  return tx.unsafe<Row[]>(`SELECT * FROM records WHERE object_id = $1 AND id = ANY($2::uuid[])${forUpdate ? " FOR UPDATE" : ""}`, [obj.id, ids]);
+  return customRowsById(tx, obj.id, ids, forUpdate);
 }
 
 function parseRecordId(obj: ObjectMeta, publicId: string): string {
@@ -289,14 +279,11 @@ async function checkUnique(tx: Tx, obj: ObjectMeta, p: Prepared, selfId: string 
   for (const f of obj.fields) {
     if (!f.is_unique || f.column_name || !Object.hasOwn(p.json, f.storage_key) || p.json[f.storage_key] === null) continue;
     // Serialises writers of this field until commit. A preview (an import dry run) commits nothing, so it only reads.
-    if (!txState()?.preview) await tx`SELECT pg_advisory_xact_lock(hashtext(${`unique:${f.id}`}))`;
+    if (!txState()?.preview) await lockUniqueField(tx, f.id);
     const { json } = storageColumns(obj);
     const table = obj.table_name ?? "records";
-    const rows = await tx.unsafe(
-      `SELECT id FROM ${quoteIdent(table)} WHERE ${quoteIdent(json)}->>$1 = $2 AND archived_at IS NULL${obj.is_system ? "" : " AND object_id = $4"} AND id IS DISTINCT FROM $3::uuid LIMIT 1`,
-      obj.is_system ? [f.storage_key, String(p.json[f.storage_key]), selfId] : [f.storage_key, String(p.json[f.storage_key]), selfId, obj.id],
-    );
-    if (rows.length) throw conflict(`Another ${obj.api_name} already has ${f.api_name} = ${String(p.values[f.api_name])}`, { field: f.api_name });
+    const taken = await jsonValueTaken(tx, { table, json, key: f.storage_key, value: String(p.json[f.storage_key]), selfId, objectId: obj.is_system ? null : obj.id });
+    if (taken) throw conflict(`Another ${obj.api_name} already has ${f.api_name} = ${String(p.values[f.api_name])}`, { field: f.api_name });
   }
 }
 
@@ -400,20 +387,17 @@ export async function createRecord(tx: Tx, ctx: Ctx, objectName: string, input: 
 
   try {
     if (!obj.is_system) {
-      await tx`INSERT INTO record_registry (tenant_id, id, object_id) VALUES (${ctx.tenantId}, ${id}, ${obj.id})`;
+      await registerRecord(tx, ctx.tenantId, id, obj.id);
       cols.set("object_id", obj.id);
       if (obj.owned && !cols.has("owner_id")) cols.set("owner_id", actorUserId(ctx));
     }
     const names = ["tenant_id", "id", ...cols.keys()];
     const params = [ctx.tenantId, id, ...cols.values()];
     const placeholders = names.map((n, i) => `$${i + 1}${n === json || n === enc ? "::jsonb" : n === "domains" ? "::text[]" : ""}`);
-    await tx.unsafe(
-      `INSERT INTO ${quoteIdent(obj.table_name ?? "records")} (${names.map(quoteIdent).join(", ")}) VALUES (${placeholders.join(", ")})`,
-      params as never[],
-    );
+    await insertRecordRow(tx, obj.table_name ?? "records", names, placeholders, params);
     for (const [f, ids] of prepared.links) {
       for (const to of ids) {
-        await tx`INSERT INTO record_links (tenant_id, field_id, from_id, to_id, created_by) VALUES (${ctx.tenantId}, ${f.id}, ${id}, ${to}, ${ctx.actor.id})`;
+        await insertRecordLink(tx, { tenantId: ctx.tenantId, fieldId: f.id, fromId: id, toId: to, createdBy: ctx.actor.id });
       }
     }
   } catch (e) {
@@ -527,14 +511,11 @@ export async function updateRecord(
   const names = [...cols.keys()];
   const sets = names.map((n, i) => `${quoteIdent(n)} = $${i + 1}${n === json || n === enc ? "::jsonb" : n === "domains" ? "::text[]" : ""}`);
   try {
-    await tx.unsafe(
-      `UPDATE ${quoteIdent(obj.table_name ?? "records")} SET ${sets.join(", ")}, version = version + 1 WHERE id = $${names.length + 1}`,
-      [...cols.values(), id] as never[],
-    );
+    await updateRecordRow(tx, obj.table_name ?? "records", sets, [...cols.values(), id]);
     for (const [f, ids] of prepared.links) {
-      await tx`DELETE FROM record_links WHERE field_id = ${f.id} AND from_id = ${id}`;
+      await clearRecordLinks(tx, f.id, id);
       for (const to of ids) {
-        await tx`INSERT INTO record_links (tenant_id, field_id, from_id, to_id, created_by) VALUES (${ctx.tenantId}, ${f.id}, ${id}, ${to}, ${ctx.actor.id})`;
+        await insertRecordLink(tx, { tenantId: ctx.tenantId, fieldId: f.id, fromId: id, toId: to, createdBy: ctx.actor.id });
       }
     }
   } catch (e) {
@@ -556,7 +537,7 @@ export async function archiveRecord(tx: Tx, ctx: Ctx, objectName: string, public
   const [current] = await fetchRows(tx, obj, [id], true);
   if (!current) throw notFound(`${obj.label} ${publicId}`);
   if (!current.archived_at) {
-    await tx.unsafe(`UPDATE ${quoteIdent(obj.table_name ?? "records")} SET archived_at = now(), version = version + 1, updated_by = $2 WHERE id = $1`, [id, ctx.actor.id]);
+    await archiveRecordRow(tx, obj.table_name ?? "records", id, ctx.actor.id);
     await audit(tx, ctx, { action: `${obj.api_name}.archived`, objectType: obj.api_name, recordId: id });
     await emit(tx, ctx, { type: `${obj.api_name}.archived`, objectType: obj.api_name, recordId: id });
   }
@@ -595,10 +576,10 @@ export async function restoreRecord(tx: Tx, ctx: Ctx, objectName: string, public
   for (const f of uniqueFields(obj)) {
     const raw = f.column_name ? current[f.column_name] : ((current[json] ?? {}) as Record<string, unknown>)[f.storage_key];
     if (raw === null || raw === undefined || f.sensitivity === "restricted") continue;
-    if (!txState()?.preview) await tx`SELECT pg_advisory_xact_lock(hashtext(${`unique:${f.id}`}))`;
-    const taken = await tx.unsafe(heldElsewhereSql(table, f.column_name ?? json, !f.column_name, !obj.is_system),
-      [f.column_name ? raw : String(raw), id, ...(f.column_name ? [] : [f.storage_key]), ...(obj.is_system ? [] : [obj.id])] as never[]);
-    if (taken.length) {
+    if (!txState()?.preview) await lockUniqueField(tx, f.id);
+    const taken = await valueHeldElsewhere(tx, heldElsewhereSql(table, f.column_name ?? json, !f.column_name, !obj.is_system),
+      [f.column_name ? raw : String(raw), id, ...(f.column_name ? [] : [f.storage_key]), ...(obj.is_system ? [] : [obj.id])]);
+    if (taken) {
       // The value is never quoted. Naming a field the caller can't read would still say a value matches, so it isn't named.
       const named = fieldAccess(ctx, obj, f) !== "none" ? `${obj.api_name}.${f.api_name}` : "a unique field this key can't read";
       throw conflict(`${obj.label} ${publicId} can't be restored: another ${obj.api_name} that is not archived has the same value in ${named}. Change one of them first`,
@@ -607,8 +588,7 @@ export async function restoreRecord(tx: Tx, ctx: Ctx, objectName: string, public
   }
   const full = (await serialize(tx, internalReader(ctx), schema, obj, [current], { includeHidden: true }))[0]!;
   try {
-    await tx.unsafe(`UPDATE ${quoteIdent(table)} SET archived_at = NULL, search_text = $3, version = version + 1, updated_by = $2 WHERE id = $1`,
-      [id, ctx.actor.id, searchText(obj, full)]);
+    await restoreRecordRow(tx, table, id, ctx.actor.id, searchText(obj, full));
   } catch (e) {
     translateDbError(e, obj);
   }
@@ -658,9 +638,9 @@ export async function queryRecords(tx: Tx, ctx: Ctx, q: QueryInput, opts: Serial
   let rows: Row[];
   let count: number | undefined;
   try {
-    rows = await tx.unsafe<Row[]>(compiled.text, compiled.params as never[]);
+    rows = await compiledRows(tx, compiled.text, compiled.params);
     // Same filter and access as the page, without the cursor; capped, so never an unbounded count(*).
-    if (q.count) count = (await tx.unsafe<{ n: number }[]>(compiled.countText, compiled.countParams as never[]))[0]!.n;
+    if (q.count) count = await compiledCount(tx, compiled.countText, compiled.countParams);
   } catch (e) {
     // The compiler checks values, so this is a backstop: a value Postgres cannot cast is the caller's error.
     if (typeof (e as { code?: string }).code === "string" && (e as { code: string }).code.startsWith("22")) {

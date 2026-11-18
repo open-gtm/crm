@@ -7,6 +7,7 @@ import { CATALOG, type FieldType, type JsonShape, type SelectValue, type Sensiti
 import { ratingMax, TYPE_INFO } from "./fieldtypes.js";
 import type { Ctx } from "./context.js";
 import { actorRef } from "./webhooks.js";
+import { schemaChangesSince, type DriftRow } from "./queries/schema.js";
 import { addStage, createPipeline, listPipelines, reorderStages, updatePipeline, updateStage } from "./pipelines.js";
 import {
   addField, archiveField, confirmToken, createObject, isModuleOn, loadSchema, lockSchema, retypeField, SAFE_RETYPES, setModules, updateField,
@@ -489,9 +490,6 @@ export async function runSchemaDocument(tx: Tx, ctx: Ctx, doc: SchemaDoc, check:
 
 const DRIFT_LIMIT = 500;
 
-type DriftRow = { version: string; changed_at: Date; actor_type: string; actor_id: string | null; surface: string; change_type: string;
-  object_id: string | null; field_id: string | null; before: Record<string, unknown> | null; after: Record<string, unknown> | null;
-  object_name: string | null; field_name: string | null };
 
 /** The names a schema change touched, before and after, as Run.added keys them. */
 function namesOf(r: DriftRow): string[] {
@@ -508,13 +506,7 @@ function namesOf(r: DriftRow): string[] {
 }
 
 async function driftSince(tx: Tx, since: number, run: Pick<Run, "touched" | "added">): Promise<{ entries: DriftEntry[]; truncated: boolean }> {
-  const rows = await tx<DriftRow[]>`
-    SELECT sc.version::text, sc.changed_at, sc.actor_type, sc.actor_id, sc.surface, sc.change_type, sc.object_id, sc.field_id, sc.before, sc.after,
-           o.api_name AS object_name, f.api_name AS field_name
-    FROM schema_changes sc
-    LEFT JOIN objects o ON o.tenant_id = sc.tenant_id AND o.id = sc.object_id
-    LEFT JOIN fields f ON f.tenant_id = sc.tenant_id AND f.id = sc.field_id
-    WHERE sc.version > ${since} ORDER BY sc.version LIMIT ${DRIFT_LIMIT + 1}`;
+  const rows = await schemaChangesSince(tx, since, DRIFT_LIMIT + 1);
   const entries = rows.slice(0, DRIFT_LIMIT).map((r) => {
     const pipeline = typeof r.after?.pipeline === "string" ? r.after.pipeline : null;
     // By ID: this run changes what was changed. By name: it adds (or renames to) a name that was archived, renamed or created.

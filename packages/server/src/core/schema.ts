@@ -14,6 +14,11 @@ import {
 import type { Ctx } from "./context.js";
 import { emit } from "./events.js";
 import { ADDRESS_PART_NAMES, FIELD_TYPES, fieldRulesProblem, isFieldType, PERCENT, ratingMax, TYPE_INFO } from "./fieldtypes.js";
+import {
+  archivedObjectNames, archiveFieldRow, bumpSchemaVersion, countFieldsEver, countLinkingRecords, insertCustomField, insertCustomObject, insertSchemaChange,
+  insertStandardField, insertStandardObject, liveFields, liveObjects, lockWorkspaceSchema, retypeFieldRow, schemaHead, setWorkspaceModules, updateFieldRow,
+  updateObjectRow, viewsOfObject,
+} from "./queries/schema.js";
 
 export interface FieldMeta {
   id: string;
@@ -100,7 +105,7 @@ export const cachedSchemaToken = (tenantId: string): string | undefined => cache
  * every change makes anyway, so foreign-key checks on the row are not blocked.
  */
 export async function lockSchema(tx: Tx): Promise<void> {
-  await tx`SELECT 1 FROM tenants FOR NO KEY UPDATE`;
+  await lockWorkspaceSchema(tx);
 }
 
 /**
@@ -108,8 +113,7 @@ export async function lockSchema(tx: Tx): Promise<void> {
  * committed yet, so it is kept with the transaction (txState), never in the shared cache.
  */
 export async function loadSchema(tx: Tx): Promise<Schema> {
-  const [t] = await tx<{ tenant_id: string; schema_version: string; schema_token: string; currency: string; modules: string[] }[]>`
-    SELECT tenant_id, schema_version::text, schema_token::text, currency, modules FROM tenants`;
+  const t = await schemaHead(tx);
   if (!t) throw notFound("Workspace");
   const version = Number(t.schema_version);
   const own = txState()?.ownSchemas;
@@ -117,13 +121,8 @@ export async function loadSchema(tx: Tx): Promise<Schema> {
   const hit = mine ? own!.get(t.schema_token) as Schema | undefined : cache.get(t.tenant_id);
   if (hit && hit.token === t.schema_token) return hit;
 
-  const objects = await tx<Omit<ObjectMeta, "fields" | "byName">[]>`
-    SELECT id, api_name, label, plural_label, description, id_prefix, module, is_system, table_name, display_field, owned, hidden
-    FROM objects WHERE archived_at IS NULL`;
-  const fields = await tx<(FieldMeta & { create_only?: boolean })[]>`
-    SELECT id, object_id, api_name, storage_key, label, description, type, is_system, column_name, read_only, required,
-           is_unique, default_value, validation, options, sensitivity, hidden, position
-    FROM fields WHERE archived_at IS NULL ORDER BY position, created_at`;
+  const objects = await liveObjects(tx);
+  const fields = await liveFields(tx);
 
   const schema: Schema = { version, token: t.schema_token, currency: t.currency, modules: t.modules, objects: new Map(), byPrefix: new Map(), byId: new Map() };
   for (const o of objects) {
@@ -160,19 +159,14 @@ export const isModuleOn = (schema: Schema, obj: ObjectMeta) => !obj.module || sc
 export async function seedStandardObjects(tx: Tx, tenantId: string): Promise<void> {
   for (const o of CATALOG) {
     const objectId = uuidv7();
-    await tx`
-      INSERT INTO objects (tenant_id, id, api_name, label, plural_label, description, id_prefix, module, is_system, table_name, owned)
-      VALUES (${tenantId}, ${objectId}, ${o.api_name}, ${o.label}, ${o.plural_label}, ${o.description}, ${o.id_prefix},
-              ${o.module}, true, ${o.table}, ${o.owned})`;
+    await insertStandardObject(tx, { tenantId, id: objectId, apiName: o.api_name, label: o.label, pluralLabel: o.plural_label, description: o.description,
+      idPrefix: o.id_prefix, module: o.module, table: o.table, owned: o.owned });
     let position = 0;
     for (const f of o.fields) {
       const options = { ...(f.options ?? {}), ...(f.create_only ? { create_only: true } : {}) };
-      await tx`
-        INSERT INTO fields (tenant_id, id, object_id, api_name, storage_key, label, description, type, is_system, column_name,
-                            read_only, required, options, sensitivity, position)
-        VALUES (${tenantId}, ${uuidv7()}, ${objectId}, ${f.api_name}, ${`sys_${f.column}`}, ${f.label}, ${f.description ?? ""},
-                ${f.type}, true, ${f.column}, ${f.read_only ?? false}, ${f.required ?? false}, ${tx.json(options as never)},
-                ${f.sensitivity ?? "standard"}, ${position++})`;
+      await insertStandardField(tx, { tenantId, id: uuidv7(), objectId, apiName: f.api_name, storageKey: `sys_${f.column}`, label: f.label,
+        description: f.description ?? "", type: f.type, column: f.column, readOnly: f.read_only ?? false, required: f.required ?? false, options,
+        sensitivity: f.sensitivity ?? "standard", position: position++ });
     }
   }
 }
@@ -303,16 +297,11 @@ function newPrefix(schema: Schema, apiName: string, requested?: string, archived
 
 /** Bumps the schema version and logs the change (schema_changes, audit, event). Every schema write goes through here. */
 export async function recordChange(tx: Tx, ctx: Ctx, change: Change & { object_id?: string; field_id?: string }): Promise<number> {
-  const [row] = await tx<{ schema_version: string; schema_token: string }[]>`
-    UPDATE tenants SET schema_version = schema_version + 1 RETURNING schema_version::text, schema_token::text`;
-  const version = Number(row!.schema_version);
-  txState()?.ownSchemas.set(row!.schema_token, undefined);
-  await tx`
-    INSERT INTO schema_changes (tenant_id, version, actor_type, actor_id, surface, change_type, object_id, field_id, before, after)
-    VALUES (${ctx.tenantId}, ${version}, ${ctx.actor.type}, ${ctx.actor.id}, ${ctx.surface}, ${change.change},
-            ${change.object_id ?? null}, ${change.field_id ?? null},
-            ${change.before === undefined ? null : tx.json(change.before as never)},
-            ${change.after === undefined ? null : tx.json(change.after as never)})`;
+  const row = await bumpSchemaVersion(tx);
+  const version = Number(row.schema_version);
+  txState()?.ownSchemas.set(row.schema_token, undefined);
+  await insertSchemaChange(tx, { tenantId: ctx.tenantId, version, actorType: ctx.actor.type, actorId: ctx.actor.id, surface: ctx.surface, change: change.change,
+    objectId: change.object_id ?? null, fieldId: change.field_id ?? null, before: change.before, after: change.after });
   await audit(tx, ctx, { action: `schema.${change.change}`, objectType: change.object, details: { field: change.field, version } });
   await emit(tx, ctx, { type: `schema.${change.change}`, objectType: change.object, data: { field: change.field, version } });
   return version;
@@ -321,14 +310,10 @@ export async function recordChange(tx: Tx, ctx: Ctx, change: Change & { object_i
 async function insertField(tx: Tx, ctx: Ctx, obj: { id: string }, input: FieldInput, position: number): Promise<string> {
   const id = uuidv7();
   const storageKey = `f_${randomBytes(5).toString("hex")}`;
-  await tx`
-    INSERT INTO fields (tenant_id, id, object_id, api_name, storage_key, label, description, type, required, is_unique,
-                        default_value, validation, options, sensitivity, hidden, position, created_by)
-    VALUES (${ctx.tenantId}, ${id}, ${obj.id}, ${input.api_name}, ${storageKey}, ${input.label ?? titleCase(input.api_name)},
-            ${input.description ?? ""}, ${input.type}, ${input.required ?? false}, ${input.unique ?? false},
-            ${input.default === undefined ? null : tx.json(input.default as never)},
-            ${tx.json((input.validation ?? {}) as never)}, ${tx.json((input.options ?? {}) as never)},
-            ${input.sensitivity ?? "standard"}, ${input.hidden ?? false}, ${position}, ${ctx.actor.id})`;
+  await insertCustomField(tx, { tenantId: ctx.tenantId, id, objectId: obj.id, apiName: input.api_name, storageKey, label: input.label ?? titleCase(input.api_name),
+    description: input.description ?? "", type: input.type, required: input.required ?? false, unique: input.unique ?? false,
+    defaultValue: input.default, validation: input.validation ?? {}, options: input.options ?? {},
+    sensitivity: input.sensitivity ?? "standard", hidden: input.hidden ?? false, position, createdBy: ctx.actor.id });
   return id;
 }
 
@@ -348,7 +333,7 @@ export async function createObject(tx: Tx, ctx: Ctx, input: ObjectInput, dryRun:
   if (schema.objects.has(input.api_name)) throw conflict(`Object "${input.api_name}" already exists`);
   if (RESERVED_NAMES.has(input.api_name)) throw unprocessable(`"${input.api_name}" is reserved`);
   // An archived object (from an uninstalled schema pack) keeps its name and ID prefix, so reinstalling the pack restores it.
-  const archived = await tx<{ api_name: string; id_prefix: string }[]>`SELECT api_name, id_prefix FROM objects WHERE archived_at IS NOT NULL`;
+  const archived = await archivedObjectNames(tx);
   if (archived.some((a) => a.api_name === input.api_name)) throw conflict(`Object "${input.api_name}" exists, archived (an uninstalled pack's object); choose another name`);
   checkText({ label: input.label, plural_label: input.plural_label, description: input.description });
   if ([...schema.objects.values()].filter((o) => !o.is_system).length >= MAX_CUSTOM_OBJECTS) {
@@ -382,10 +367,8 @@ export async function createObject(tx: Tx, ctx: Ctx, input: ObjectInput, dryRun:
   if (dryRun) return { dry_run: true, schema_version: schema.version, changes };
 
   const objectId = uuidv7();
-  await tx`
-    INSERT INTO objects (tenant_id, id, api_name, label, plural_label, description, id_prefix, display_field, owned, created_by)
-    VALUES (${ctx.tenantId}, ${objectId}, ${input.api_name}, ${draft.label}, ${draft.plural_label}, ${draft.description},
-            ${prefix}, ${displayField}, ${draft.owned}, ${ctx.actor.id})`;
+  await insertCustomObject(tx, { tenantId: ctx.tenantId, id: objectId, apiName: input.api_name, label: draft.label, pluralLabel: draft.plural_label,
+    description: draft.description, idPrefix: prefix, displayField, owned: draft.owned, createdBy: ctx.actor.id });
   let version = await recordChange(tx, ctx, { ...changes[0]!, object_id: objectId });
   let position = 0;
   for (const f of fields) {
@@ -401,8 +384,7 @@ export async function addField(tx: Tx, ctx: Ctx, objectName: string, input: Fiel
   const obj = getObject(schema, objectName);
   validateFieldInput(schema, input, obj);
   if (obj.fields.length >= MAX_FIELDS) throw unprocessable(`An object can have at most ${MAX_FIELDS} fields`);
-  const [ever] = await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM fields WHERE object_id = ${obj.id}`;
-  if ((ever?.n ?? 0) >= MAX_FIELDS_EVER) throw unprocessable(`This object has reached ${MAX_FIELDS_EVER} fields, archived ones included`);
+  if ((await countFieldsEver(tx, obj.id)) >= MAX_FIELDS_EVER) throw unprocessable(`This object has reached ${MAX_FIELDS_EVER} fields, archived ones included`);
   const change: Change = { change: "field_added", object: obj.api_name, field: input.api_name, after: fieldSummary(input) };
   if (input.required) change.warning = "Existing records have no value for this field; it is enforced on new and updated records.";
   if (dryRun) return { dry_run: true, schema_version: schema.version, changes: [change] };
@@ -533,19 +515,18 @@ export async function updateField(tx: Tx, ctx: Ctx, objectName: string, fieldNam
   if (Object.keys(after).length === 0) return { dry_run: dryRun, schema_version: schema.version, changes: [] };
   if (dryRun) return { dry_run: true, schema_version: schema.version, changes: [change] };
 
-  await tx`
-    UPDATE fields SET
-      api_name = ${(after.api_name as string) ?? field.api_name},
-      label = ${(after.label as string) ?? field.label},
-      description = ${(after.description as string) ?? field.description},
-      hidden = ${(after.hidden as boolean) ?? field.hidden},
-      required = ${(after.required as boolean) ?? field.required},
-      sensitivity = ${(after.sensitivity as string) ?? field.sensitivity},
-      default_value = ${"default" in after ? tx.json(after.default as never) : field.default_value === null ? null : tx.json(field.default_value as never)},
-      validation = ${tx.json(((after.validation as object) ?? field.validation) as never)},
-      options = ${tx.json(newOptions as never)},
-      updated_at = now()
-    WHERE id = ${field.id}`;
+  await updateFieldRow(tx, {
+    id: field.id,
+    apiName: (after.api_name as string) ?? field.api_name,
+    label: (after.label as string) ?? field.label,
+    description: (after.description as string) ?? field.description,
+    hidden: (after.hidden as boolean) ?? field.hidden,
+    required: (after.required as boolean) ?? field.required,
+    sensitivity: (after.sensitivity as string) ?? field.sensitivity,
+    defaultValue: "default" in after ? { json: after.default } : field.default_value === null ? null : { json: field.default_value },
+    validation: (after.validation as object) ?? field.validation,
+    options: newOptions,
+  });
   const version = await recordChange(tx, ctx, { ...change, object_id: obj.id, field_id: field.id });
   return { dry_run: false, schema_version: version, changes: [change] };
 }
@@ -572,7 +553,7 @@ export async function archiveField(tx: Tx, ctx: Ctx, objectName: string, fieldNa
   if (opts.confirm !== token) {
     throw badRequest("Archiving a field needs confirmation: run it with dry_run first and pass back its confirm_token");
   }
-  await tx`UPDATE fields SET archived_at = now() WHERE id = ${field.id}`;
+  await archiveFieldRow(tx, field.id);
   const version = await recordChange(tx, ctx, { ...change, object_id: obj.id, field_id: field.id });
   return { dry_run: false, schema_version: version, changes: [change] };
 }
@@ -580,8 +561,7 @@ export async function archiveField(tx: Tx, ctx: Ctx, objectName: string, fieldNa
 /** Records holding a value in `field` (relations: records linking somewhere). */
 export async function countValues(tx: Tx, obj: ObjectMeta, field: FieldMeta): Promise<number> {
   if (field.type === "relation") {
-    const [r] = await tx<{ n: number }[]>`SELECT count(DISTINCT from_id)::int AS n FROM record_links WHERE field_id = ${field.id}`;
-    return r?.n ?? 0;
+    return countLinkingRecords(tx, field.id);
   }
   const col = obj.is_system ? (field.sensitivity === "restricted" ? "custom_encrypted" : "custom") : (field.sensitivity === "restricted" ? "encrypted" : "data");
   const table = obj.table_name ?? "records";
@@ -655,9 +635,7 @@ export async function retypeField(
     throw badRequest(rewrites ? "Converting stored values needs confirmation: run it with dry_run first and pass back its confirm_token"
       : "Saved views would stop working: run it with dry_run first, read which, and pass back its confirm_token");
   }
-  await tx`UPDATE fields SET type = ${type}, default_value = ${newDefault === null ? null : tx.json(newDefault as never)},
-             options = ${tx.json(newOptions as never)}, validation = ${tx.json(newValidation as never)}, updated_at = now()
-           WHERE id = ${field.id}`;
+  await retypeFieldRow(tx, { id: field.id, type, defaultValue: newDefault, options: newOptions, validation: newValidation });
   if (rewrites) {
     const col = quoteIdent(storageColumn(obj));
     const value = type === "currency" ? `to_jsonb(round((${col}->>$1)::numeric * 100))` : `jsonb_build_array(${col}->$1)`;
@@ -683,8 +661,7 @@ export async function retypeField(
  */
 async function viewsBrokenByRetype(tx: Tx, obj: ObjectMeta, field: FieldMeta, type: FieldType): Promise<{ shared: string[]; personal: number; why: string[] }> {
   const info = TYPE_INFO[type];
-  const rows = await tx<{ name: string; shared: boolean; definition: { where?: unknown; sort?: { field?: unknown }[]; group_by?: { field?: unknown }[] } }[]>`
-    SELECT name, shared, definition FROM views WHERE object_id = ${obj.id} ORDER BY name LIMIT 1000`;
+  const rows = await viewsOfObject(tx, obj.id);
   const why = new Set<string>();
   const ops = (w: unknown, depth: number): boolean => {
     if (typeof w !== "object" || w === null || depth > 10) return false;
@@ -752,11 +729,9 @@ export async function updateObject(tx: Tx, ctx: Ctx, objectName: string, patch: 
   const change: Change = { change: "object_updated", object: obj.api_name, before, after };
   if (Object.keys(after).length === 0) return { dry_run: dryRun, schema_version: schema.version, changes: [] };
   if (dryRun) return { dry_run: true, schema_version: schema.version, changes: [change] };
-  await tx`
-    UPDATE objects SET label = ${(after.label as string) ?? obj.label}, plural_label = ${(after.plural_label as string) ?? obj.plural_label},
-      description = ${(after.description as string) ?? obj.description}, hidden = ${(after.hidden as boolean) ?? obj.hidden},
-      display_field = ${(after.display_field as string) ?? obj.display_field}, updated_at = now()
-    WHERE id = ${obj.id}`;
+  await updateObjectRow(tx, { id: obj.id, label: (after.label as string) ?? obj.label, pluralLabel: (after.plural_label as string) ?? obj.plural_label,
+    description: (after.description as string) ?? obj.description, hidden: (after.hidden as boolean) ?? obj.hidden,
+    displayField: (after.display_field as string) ?? obj.display_field });
   const version = await recordChange(tx, ctx, { ...change, object_id: obj.id });
   return { dry_run: false, schema_version: version, changes: [change] };
 }
@@ -777,7 +752,7 @@ export async function setModules(tx: Tx, ctx: Ctx, modules: string[], dryRun: bo
   }
   const change: Change = { change: "modules_updated", object: "workspace", before: schema.modules, after: modules };
   if (dryRun) return { dry_run: true, schema_version: schema.version, changes: [change] };
-  await tx`UPDATE tenants SET modules = ${modules}`;
+  await setWorkspaceModules(tx, modules);
   const version = await recordChange(tx, ctx, change);
   return { dry_run: false, schema_version: version, changes: [change] };
 }
