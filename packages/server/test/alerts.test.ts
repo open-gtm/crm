@@ -8,7 +8,7 @@ import { withTenant } from "../src/db/tx.js";
 import { decodeId } from "../src/lib/ids.js";
 import { setMailer, type OutgoingEmail } from "../src/providers/mailer.js";
 import { deliverDue, processEvents } from "../src/worker/events.js";
-import { call, create, newWorkspace, type Workspace } from "./helpers.js";
+import { call, create, newWorkspace, validate, type Schema, type Workspace } from "./helpers.js";
 
 process.env.WEBHOOK_ALLOW_INSECURE_TARGETS = "true";
 
@@ -305,5 +305,92 @@ describe("personal alerts, digests and the notify action", () => {
     await drain(ws);
     const items = await inbox(ws.keys.ops);
     expect(items.map((n) => n.title)).toEqual(["New account: Umbrella"]);
+  });
+});
+
+describe("typed responses of the notification, alert, webhook and event routes", () => {
+  it("real responses match what the routes declare", async () => {
+    const ws = await newWorkspace("Typed");
+    const doc = (await call("GET", "/v1/openapi.json", { key: ws.keys.admin })).json as Schema;
+    const declared = (template: string, method: string, status: number) =>
+      (doc.paths as Record<string, Record<string, { responses: Record<string, { content: Record<string, { schema: Schema }> }> }>>)[template]![method.toLowerCase()]!
+        .responses[String(status)]!.content["application/json"]!.schema;
+    const check = async (key: string, method: string, template: string, path: string, body: unknown, status: number, headers?: Record<string, string>) => {
+      const res = await call(method, path, { key, body, headers });
+      expect(res.status, `${method} ${path} ${JSON.stringify(res.json)}`).toBe(status);
+      expect(validate(doc, declared(template, method, status), res.json), `${method} ${path}`).toEqual([]);
+      return res.json;
+    };
+    const { admin, ops } = ws.keys;
+
+    const hook = (await check(admin, "POST", "/v1/webhooks", "/v1/webhooks", { url: `${base}/typed`, description: "Typed" }, 201)).data;
+    expect(hook.secret).toMatch(/^whsec_/);
+    const viaMcp = (await check(admin, "POST", "/v1/webhooks", "/v1/webhooks", { url: `${base}/typed-mcp` }, 201, { "x-hlcrm-surface": "admin-mcp" })).data;
+    expect(viaMcp).toMatchObject({ secret: null, secret_note: expect.any(String) });
+    const me = (await call("GET", "/v1/me", { key: ops })).json.actor.id;
+    await create(ops, "task", { title: "Late task", assignee: me, due_at: later(-2).toISOString() });
+    const vip = { name: "Typed VIP", description: "A VIP changed.", object: "contact", trigger: { type: "event", event: "contact.updated" },
+      condition: { field: "job_title", op: "eq", value: "CEO" }, severity: "critical", webhooks: [hook.id] };
+    const rule = (await check(admin, "POST", "/v1/alerts", "/v1/alerts", vip, 201)).alert;
+    const c = await create(ops, "contact", { first_name: "Tia", email: `${uniq("tia")}@example.com` });
+    await call("PATCH", `/v1/objects/contact/records/${c.id}`, { key: ops, body: { job_title: "CEO" } });
+    await drain(ws);
+
+    // The inbox, the attention summary (with an overdue task) and one notification's state changes.
+    const inboxPage = await check(ops, "GET", "/v1/me/notifications", "/v1/me/notifications?state=all", undefined, 200);
+    expect(inboxPage.data.length).toBeGreaterThan(0);
+    const n = inboxPage.data[0].id as string;
+    const attention = (await check(ops, "GET", "/v1/me/attention", "/v1/me/attention", undefined, 200)).data;
+    expect(attention.items.length).toBeGreaterThan(0);
+    expect(attention.overdue_tasks.length).toBeGreaterThan(0);
+    expect((await check(ops, "GET", "/v1/me/notifications/{id}", `/v1/me/notifications/${n}`, undefined, 200)).data.deliveries.length).toBeGreaterThan(0);
+    await check(ops, "POST", "/v1/me/notifications/{id}/acknowledge", `/v1/me/notifications/${n}/acknowledge`, undefined, 200);
+    await check(ops, "POST", "/v1/me/notifications/{id}/snooze", `/v1/me/notifications/${n}/snooze`, { until: later(1).toISOString() }, 200);
+    await check(ops, "POST", "/v1/me/notifications/{id}/resolve", `/v1/me/notifications/${n}/resolve`, undefined, 200);
+    await check(ops, "GET", "/v1/me/notification-preferences", "/v1/me/notification-preferences", undefined, 200);
+    await check(ops, "PATCH", "/v1/me/notification-preferences", "/v1/me/notification-preferences", { quiet_hours: { start: "22:00", end: "07:00" } }, 200);
+
+    // Personal alerts.
+    const mine = { name: "My big deals", object: "deal", trigger: { type: "event", event: "deal.created" }, condition: { field: "amount", op: "gte", value: 5000 } };
+    await check(ops, "POST", "/v1/me/alerts", "/v1/me/alerts", { ...mine, dry_run: true }, 200);
+    const personal = (await check(ops, "POST", "/v1/me/alerts", "/v1/me/alerts", mine, 201)).alert;
+    await check(ops, "GET", "/v1/me/alerts", "/v1/me/alerts", undefined, 200);
+    await check(ops, "POST", "/v1/me/alerts/backtest", "/v1/me/alerts/backtest", mine, 200);
+    await check(ops, "PATCH", "/v1/me/alerts/{id}", `/v1/me/alerts/${personal.id}`, { severity: "info", dry_run: true }, 200);
+    await check(ops, "PATCH", "/v1/me/alerts/{id}", `/v1/me/alerts/${personal.id}`, { severity: "info" }, 200);
+    await check(ops, "DELETE", "/v1/me/alerts/{id}", `/v1/me/alerts/${personal.id}`, undefined, 200);
+
+    // Workspace alerts: an event rule (event backtest) and a time rule (deadline backtest).
+    const untouched = { name: "Untouched", object: "deal", trigger: { type: "inactive", days: 14 } };
+    expect((await check(admin, "POST", "/v1/alerts", "/v1/alerts", { ...untouched, dry_run: true }, 200)).backtest).toHaveProperty("would_fire_on_save");
+    const bt = (await check(admin, "POST", "/v1/alerts/backtest", "/v1/alerts/backtest", vip, 200)).data.backtest;
+    expect(bt.samples.length).toBeGreaterThan(0);
+    await check(admin, "POST", "/v1/alerts/backtest", "/v1/alerts/backtest", untouched, 200);
+    expect((await check(admin, "GET", "/v1/alerts", "/v1/alerts", undefined, 200)).data.length).toBeGreaterThan(0);
+    await check(admin, "GET", "/v1/alerts/{id}", `/v1/alerts/${rule.id}`, undefined, 200);
+    await check(admin, "PATCH", "/v1/alerts/{id}", `/v1/alerts/${rule.id}`, { cooldown_hours: 12 }, 200);
+
+    // Webhooks and their deliveries.
+    expect((await check(admin, "GET", "/v1/webhooks", "/v1/webhooks", undefined, 200)).data.length).toBe(2);
+    await check(admin, "GET", "/v1/webhooks/{id}", `/v1/webhooks/${hook.id}`, undefined, 200);
+    await check(admin, "PATCH", "/v1/webhooks/{id}", `/v1/webhooks/${hook.id}`, { description: "Typed, changed" }, 200);
+    await check(admin, "GET", "/v1/webhooks/{id}/secret", `/v1/webhooks/${hook.id}/secret`, undefined, 200);
+    await check(admin, "POST", "/v1/webhooks/{id}/rotate-secret", `/v1/webhooks/${hook.id}/rotate-secret`, { overlap_hours: 1 }, 200);
+    const test = (await check(admin, "POST", "/v1/webhooks/{id}/test", `/v1/webhooks/${hook.id}/test`, undefined, 202)).data;
+    await drain(ws);
+    const deliveries = (await check(admin, "GET", "/v1/webhooks/{id}/deliveries", `/v1/webhooks/${hook.id}/deliveries`, undefined, 200)).data;
+    expect(deliveries.length).toBeGreaterThan(1);
+    await check(admin, "GET", "/v1/webhook-deliveries/{id}", `/v1/webhook-deliveries/${test.delivery.id}`, undefined, 200);
+    await check(admin, "POST", "/v1/webhook-deliveries/{id}/replay", `/v1/webhook-deliveries/${deliveries[0].id}/replay`, undefined, 202);
+
+    // The event log, as an ops key sees it.
+    expect((await check(ops, "GET", "/v1/events", "/v1/events?limit=50", undefined, 200)).data.length).toBeGreaterThan(0);
+
+    // Archiving answers with the archived object.
+    expect((await check(admin, "DELETE", "/v1/alerts/{id}", `/v1/alerts/${rule.id}`, undefined, 200)).data.status).toBe("archived");
+    expect((await check(admin, "DELETE", "/v1/webhooks/{id}", `/v1/webhooks/${hook.id}`, undefined, 200)).data.status).toBe("archived");
+
+    // The checker itself catches drift.
+    expect(validate(doc, declared("/v1/me/attention", "GET", 200), { data: { ...attention, counts: { critical: "1" } } }).length).toBeGreaterThan(0);
   });
 });

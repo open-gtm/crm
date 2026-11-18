@@ -1,8 +1,10 @@
 /**
  * Response shapes the routes declare, as JSON Schema (OpenAPI 3.1). Every route names one (a test
- * fails otherwise), and a test checks real responses of the main record routes against what they
- * declare, so the document a typed client is generated from can't silently drift from the server.
+ * fails otherwise), and tests check real responses of the routes against what they declare, so the
+ * document a typed client is generated from can't silently drift from the server.
  * Shapes are open (additionalProperties) where the server may add fields later without breaking clients.
+ * A property that is free-form by design (event data, a stored filter, a field's value) stays open and
+ * says so in its description.
  */
 
 export type JsonSchema = Record<string, unknown>;
@@ -22,6 +24,8 @@ export const nullable = (s: JsonSchema): JsonSchema => ({ anyOf: [s, { type: "nu
 const str: JsonSchema = { type: "string" };
 const int: JsonSchema = { type: "integer" };
 const bool: JsonSchema = { type: "boolean" };
+const time: JsonSchema = { type: "string", format: "date-time" };
+export const enumOf = (...values: string[]): JsonSchema => ({ type: "string", enum: values });
 const anyObject: JsonSchema = { type: "object", additionalProperties: true };
 export const object = (properties: Record<string, JsonSchema>, required: string[] = Object.keys(properties)): JsonSchema =>
   ({ type: "object", properties, required, additionalProperties: true });
@@ -34,6 +38,30 @@ export const strict = (properties: Record<string, JsonSchema>, required: string[
 export const data = (s: JsonSchema = anyObject, status?: number): ResponseSpec => ({ schema: object({ data: s }), ...(status ? { status } : {}) });
 export const dataList = (items: JsonSchema = anyObject): ResponseSpec => data(list(items));
 export const plain = (s: JsonSchema, status?: number): ResponseSpec => ({ schema: s, ...(status ? { status } : {}) });
+
+/** A notification as its recipient may see it now (core/notifications.ts publicNotification). */
+const notification = {
+  id: str, severity: enumOf("info", "warning", "critical"), title: str, body: nullable(str),
+  state: enumOf("unread", "acknowledged", "snoozed", "resolved"),
+  snoozed_until: { ...nullable(time), description: "While snoozed: when it comes back (a snooze that has run out reads as unread)" },
+  fire_count: int, first_fired_at: time, last_fired_at: time,
+  source: object({ type: enumOf("alert", "automation"), id: str, name: nullable(str) }),
+  record: { ...nullable(object({ id: str, object: str, display_name: { type: "string", description: "\"(not available)\" when the record can't be read" } })),
+    description: "The record it is about, or null" },
+};
+
+/** A webhook endpoint (core/webhooks.ts publicWebhook). The signing secret is never part of it. */
+const webhook = {
+  id: str, url: str, description: nullable(str), events: { ...list(str), description: "Subscribed event patterns (\"deal.*\", \"*.created\", \"*\")" },
+  include_restricted: bool, enabled: bool,
+  status: { ...enumOf("active", "paused", "disabled", "archived"), description: "paused: deliveries are held after repeated failures, until paused_until" },
+  consecutive_failures: int, paused_until: nullable(time),
+  previous_secret_valid_until: { ...nullable(time), description: "After a rotation: until when the old secret also signs" },
+  created_at: time, updated_at: time,
+};
+
+/** A record an alert would have fired for, and when. */
+const alertSample = object({ record: str, display_name: { ...nullable(str), description: "null when the caller can't read the record" }, at: time });
 
 /** Components every document has. The authenticated document replaces Record with one schema per object. */
 export const BASE_SCHEMAS: Record<string, JsonSchema> = {
@@ -157,6 +185,65 @@ export const BASE_SCHEMAS: Record<string, JsonSchema> = {
   SchedulePreview: strict({ summary: str, timezone: str, next_runs: list(str) }),
   Suppression: strict({ suppressed: bool, recipient: { type: "string", description: "A keyed hash of the mailbox, never the address" },
     since: nullable(str), reason: nullable(str), removed: bool }, ["suppressed", "recipient"]),
+  Notification: object(notification),
+  NotificationDetail: object({
+    ...notification,
+    deliveries: { ...list(object({
+      channel: enumOf("email"), mode: enumOf("immediate", "digest"), status: enumOf("pending", "sent", "failed", "skipped"), attempts: int,
+      scheduled_for: { ...nullable(time), description: "While pending: when it is due to go out" }, last_error: nullable(str), sent_at: nullable(time),
+    })), description: "Its email deliveries, oldest first (none when the recipient's preferences turn its severity off)" },
+  }),
+  NotificationPreferences: object({
+    email: { ...object({ info: enumOf("off", "immediate", "digest"), warning: enumOf("off", "immediate", "digest"), critical: enumOf("off", "immediate", "digest") }),
+      description: "Per severity: email at once, in the daily digest, or not at all" },
+    digest_hour: { type: "integer", minimum: 0, maximum: 23 }, timezone: { type: "string", description: "An IANA time zone name" },
+    quiet_hours: { ...nullable(object({ start: str, end: str })), description: "HH:MM to HH:MM local time when non-critical emails wait, or null" },
+  }),
+  Alert: object({
+    id: str, scope: enumOf("workspace", "personal"), owner: { ...nullable(str), description: "A personal alert's member (usr_…); null for a workspace alert" },
+    name: str, description: nullable(str), object: str,
+    trigger: { type: "object", additionalProperties: true, properties: { type: enumOf("event", "inactive", "field_passed") }, required: ["type"],
+      description: "{type: event, event, changed_fields?} | {type: inactive, days} | {type: field_passed, field, offset_hours?}" },
+    condition: { description: "A filter in the query format, or null" },
+    severity: enumOf("info", "warning", "critical"),
+    recipients: object({ record_owner: bool, users: list(str) }), webhooks: list(str), cooldown_hours: nullable(int), enabled: bool,
+    status: enumOf("enabled", "disabled", "archived"),
+    deadlines: { ...nullable(enumOf("ready", "building")), description: "Time rules: whether their deadlines have been computed yet; null for event rules" },
+    version: int, created_at: time, updated_at: time,
+  }),
+  AlertBacktest: {
+    description: "How often a rule would have fired recently, with up to 10 samples. Event rules replay the event history; time rules count records already past their deadline",
+    anyOf: [
+      object({ window_days: int, would_fire: int, records: int, samples: list(alertSample), approximate: bool, note: str, truncated: bool }),
+      object({ window_days: int, would_fire_on_save: int, became_due_in_window: int, samples: list(alertSample), approximate: bool, note: str, truncated: bool }),
+    ],
+  },
+  AlertWrite: object({
+    dry_run: bool, summary: str, warnings: list(str), backtest: ref("AlertBacktest"),
+    alert: { ...ref("Alert"), description: "The alert as saved; absent on a dry run" },
+  }, ["dry_run", "summary", "warnings", "backtest"]),
+  Webhook: object(webhook),
+  WebhookWithSecret: object({
+    ...webhook,
+    secret: { ...nullable(str), description: "The signing secret, shown this once; null through MCP" },
+    secret_note: { type: "string", description: "Through MCP: where to get the secret instead" },
+  }, [...Object.keys(webhook), "secret"]),
+  WebhookDelivery: object({
+    id: str, webhook_id: str, event_id: nullable(str), event_type: str,
+    trigger: { ...enumOf("subscription", "automation", "replay", "test"), description: "What queued it: an event subscription, an automation or alert rule, a replay or a test" },
+    automation_id: nullable(str), status: enumOf("pending", "succeeded", "dead"), attempts: int,
+    next_attempt_at: nullable(time), last_attempt_at: nullable(time), last_status_code: nullable(int), last_error: nullable(str),
+    last_duration_ms: nullable(int), replay_of: { ...nullable(str), description: "On a replay: the delivery it copies" },
+    created_at: time, delivered_at: nullable(time),
+    payload: { type: "object", additionalProperties: true,
+      description: "The body sent: the event (id, type, occurred_at, object, record_id, actor, data) with the record and automation, as queued. Open by design: event data differs per event type. Restricted values are never shown" },
+  }),
+  AutomationTest: object({
+    matched: { type: "boolean", description: "false when the record doesn't match the condition (nothing would happen)" }, explanation: str,
+    actions: { type: "array", items: anyObject, description: "Each step that would run, with its (redacted) inputs and what it would do" },
+    stopped: { type: "string", description: "When a stop step would end the run: its reason" },
+    error: { type: "string", description: "When a step would fail: why" },
+  }, ["matched", "explanation", "actions"]),
 };
 
 /** The responses map of one operation: the declared success, and problem documents for everything else. */
@@ -168,7 +255,7 @@ export function responsesFor(spec: ResponseSpec | undefined): Record<string, unk
 }
 
 /** Scalar shapes for route declarations. */
-export const S = { str, int, bool, obj: anyObject, any: {} as JsonSchema, strs: list(str) };
+export const S = { str, int, bool, obj: anyObject, any: {} as JsonSchema, strs: list(str), time };
 
 /** A create that answers 201, or 200 for its dry run. */
 export const createdOrDry = (s: JsonSchema = anyObject): ResponseSpec => ({ schema: s, status: 201, alsoStatus: 200 });
@@ -197,4 +284,25 @@ export const R = {
   automationSettings: data(ref("AutomationSettings")),
   schedulePreview: data(ref("SchedulePreview")),
   suppression: data(ref("Suppression")),
+  notification: data(ref("NotificationDetail")),
+  notificationPreferences: data(ref("NotificationPreferences")),
+  attention: data(object({
+    generated_at: time,
+    counts: { ...object({ critical: int, warning: int, info: int, unread: int, snoozed: int }), description: "Open notifications per severity (not counting snoozed ones), unread, and snoozed" },
+    items: { ...list(object({ ...notification, why: { ...nullable(str), description: "The alert's or automation's description" }, next_step: str })),
+      description: "Up to 25 open notifications, most severe first" },
+    overdue_tasks: { ...nullable(list(object({ id: str, title: str, due_at: time, priority: enumOf("low", "normal", "high", "urgent") }, ["id"]))),
+      description: "My overdue open tasks (up to 10), with the fields I can read; null when the list would reveal fields I can't read (see overdue_tasks_note)" },
+    overdue_tasks_note: str,
+    guidance: str,
+  }, ["generated_at", "counts", "items", "overdue_tasks", "guidance"])),
+  alert: data(ref("Alert")),
+  alerts: dataList(ref("Alert")),
+  alertBacktest: data(object({ summary: str, warnings: list(str), backtest: ref("AlertBacktest") })),
+  alertWrite: plain(ref("AlertWrite")),
+  webhook: data(ref("Webhook")),
+  webhooks: dataList(ref("Webhook")),
+  webhookWithSecret: data(ref("WebhookWithSecret")),
+  webhookDelivery: data(ref("WebhookDelivery")),
+  automationTest: data(ref("AutomationTest")),
 };
