@@ -3,8 +3,8 @@
  * fails otherwise), and tests check real responses of the routes against what they declare, so the
  * document a typed client is generated from can't silently drift from the server.
  * Shapes are open (additionalProperties) where the server may add fields later without breaking clients.
- * A property that is free-form by design (event data, a stored filter, a field's value) stays open and
- * says so in its description.
+ * data() and dataList() take the shape they wrap. A property that is free-form by design (event data,
+ * a stored filter, a field's value) stays open and says so in its description.
  */
 
 export type JsonSchema = Record<string, unknown>;
@@ -35,8 +35,8 @@ export const strict = (properties: Record<string, JsonSchema>, required: string[
   ({ type: "object", properties, required, additionalProperties: false });
 
 /** `{ data: … }`, the envelope of every JSON response except pages with extra keys and a few operation results. */
-export const data = (s: JsonSchema = anyObject, status?: number): ResponseSpec => ({ schema: object({ data: s }), ...(status ? { status } : {}) });
-export const dataList = (items: JsonSchema = anyObject): ResponseSpec => data(list(items));
+export const data = (s: JsonSchema, status?: number): ResponseSpec => ({ schema: object({ data: s }), ...(status ? { status } : {}) });
+export const dataList = (items: JsonSchema): ResponseSpec => data(list(items));
 export const plain = (s: JsonSchema, status?: number): ResponseSpec => ({ schema: s, ...(status ? { status } : {}) });
 
 /** A notification as its recipient may see it now (core/notifications.ts publicNotification). */
@@ -284,7 +284,10 @@ export function responsesFor(spec: ResponseSpec | undefined): Record<string, unk
   return { [String(spec.status ?? 200)]: ok, ...(spec.alsoStatus ? { [String(spec.alsoStatus)]: { ...ok, description: "Success (a dry run)" } } : {}), default: problem };
 }
 
-/** Scalar shapes for route declarations. */
+/**
+ * Scalar shapes for route declarations. `any` is any JSON value: only for a value that is free-form by design
+ * (a field's value before and after a change, whatever its type), never for a whole response or object.
+ */
 export const S = { str, int, bool, obj: anyObject, any: {} as JsonSchema, strs: list(str), time };
 
 /** A create that answers 201, or 200 for its dry run. */
@@ -303,9 +306,6 @@ export const R = {
   restored: plain(object({ data: ref("Record"), warnings: list(object({ field: str, message: str })) })),
   view: data(ref("View")),
   views: dataList(ref("View")),
-  any: data(),
-  anyData: data({}),
-  anyList: dataList(),
   object: plain(anyObject),
   automation: data(ref("Automation")),
   automations: dataList(ref("Automation")),
