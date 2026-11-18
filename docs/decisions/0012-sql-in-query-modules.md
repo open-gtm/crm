@@ -13,8 +13,7 @@ SQL stays in tagged templates, but each domain directory keeps it in one query m
 - Each query is one exported function. It takes the transaction (or pool) first and plain typed arguments after, and returns typed rows, or the one row, count or boolean every caller wants. It is named for what it does in domain terms (`revokeSessionsOf`, `countPasswordAttempt`), not after the SQL.
 - Row types are declared in the module. Optional conditions stay postgres.js fragments inside the function, chosen by its arguments.
 - The calling code keeps its checks, errors, audit entries and the order of statements in its transaction. Moving a query never changes its SQL.
-- A query that a handler needs from a directory not yet converted goes in a small module next to the core file it belongs with (`core/events-queries.ts`, `core/audit-queries.ts`), until that directory is converted.
-- In converted directories ESLint refuses a tagged template or `.unsafe()` outside the query module (`no-restricted-syntax` in `eslint.config.js`, run by `pnpm lint` in CI).
+- ESLint refuses a tagged template or `.unsafe()` outside the query modules (`no-restricted-syntax` in `eslint.config.js`, run by `pnpm lint` in CI).
 
 ## Why not raw .sql files
 
@@ -30,7 +29,12 @@ Adopting a typed-SQL generator, such as pgtyped, that checks queries and their r
 
 ## Migration
 
-Incremental, one or a few directories per pull request, adding each to the ESLint rule's `files` as it lands.
+Done directory by directory, each pull request moving the statements of a set of files without changing their text.
 
-- Done: `auth/` (every query, including the five `.unsafe()` calls that spliced the flow column list, now a fragment), and the queries written in handlers in `api/` and `web/`.
-- Remaining, counted as tagged templates and `.unsafe()` calls, fragments included: `core/` (about 400, including the run-time generated queries), `oauth/` (about 65), `worker/` (about 16) and `db/` (about 8, the role checks and migration runner).
+- `auth/`, and the queries written in handlers in `api/` and `web/`.
+- `oauth/`, `worker/` and `db/` (the tenant wrapper's `set_config`, the startup role checks and the migration runner).
+- `core/`, in `core/queries/` with one module per domain.
+
+Twelve statements stay beside the code that builds them, in `core/schema.ts`, `core/ops.ts`, `core/duplicates.ts`, `core/bulk.ts` and `core/describe.ts`. Each splices SQL built at run time (compiler output, a retype rewrite, the search-text expression) straight into its template, where the Semgrep rules on `.unsafe()` can see what is spliced; moving only the call would hide that. Each carries an `eslint-disable-line` comment naming this ADR.
+
+The ESLint rule now covers all of `packages/server/src` outside the query modules.

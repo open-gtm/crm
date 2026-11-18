@@ -272,7 +272,7 @@ async function searchVisible(tx: Tx, ctx: Ctx, schema: Schema, obj: ObjectMeta, 
   // Reviewed: `window` is built from a quoted table name and a constant, `doc` from the query compiler's
   // column expressions, and `per` is an integer clamped to 1–25 by the caller. Every value is a bound parameter.
   // nosemgrep: hlcrm-no-interpolated-sql-in-unsafe
-  return tx.unsafe<{ id: string }[]>(
+  return tx.unsafe<{ id: string }[]>( // eslint-disable-line no-restricted-syntax -- SQL built at run time, kept beside its builder (ADR 0012)
     `SELECT r.* FROM (${window}) r WHERE ${doc} ILIKE $1 ORDER BY similarity(${doc}, $2) DESC, r.id LIMIT ${per}`,
     obj.is_system ? [like, term] : [like, term, obj.id]);
 }
@@ -300,14 +300,14 @@ export async function search(tx: Tx, ctx: Ctx, q: string, objects?: string[], li
       out.push(...(await serialize(tx, ctx, schema, obj, await searchVisible(tx, ctx, schema, obj, like, term, per))));
       continue;
     }
-    const rows = await tx.unsafe<{ id: string }[]>(
+    const rows = await tx.unsafe<{ id: string }[]>( // eslint-disable-line no-restricted-syntax -- SQL built at run time, kept beside its builder (ADR 0012)
       `SELECT * FROM ${quoteIdent(obj.table_name!)} WHERE archived_at IS NULL AND search_text ILIKE $1
        ORDER BY similarity(search_text, $2) DESC, id LIMIT ${per}`, [like, term]);
     out.push(...(await serialize(tx, ctx, schema, obj, rows)));
   }
   const custom = candidates.filter((o) => !o.is_system && !hasHiddenFields(ctx, o));
   if (custom.length) {
-    const rows = await tx.unsafe<{ id: string; object_id: string }[]>(
+    const rows = await tx.unsafe<{ id: string; object_id: string }[]>( // eslint-disable-line no-restricted-syntax -- SQL built at run time, kept beside its builder (ADR 0012)
       `SELECT * FROM (
          SELECT r.*, row_number() OVER (PARTITION BY r.object_id ORDER BY similarity(r.search_text, $2) DESC, r.id) AS __rank
          FROM records r WHERE r.archived_at IS NULL AND r.search_text ILIKE $1 AND r.object_id = ANY($3::uuid[])

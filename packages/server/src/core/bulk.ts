@@ -94,7 +94,7 @@ async function matching(tx: Tx, ctx: Ctx, schema: Schema, obj: ObjectMeta, where
   if (opts.excluding) conds.push(`NOT r.id = ANY(${c.param(opts.excluding, "uuid[]")})`);
   const select = `SELECT r.id FROM ${quoteIdent(obj.table_name ?? "records")} r WHERE ${conds.join(" AND ")} ORDER BY r.id LIMIT ${opts.limit}`;
   try {
-    if (opts.count) return (await tx.unsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM (${select}) x`, c.params as never[]))[0]!.n;
+    if (opts.count) return (await tx.unsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM (${select}) x`, c.params as never[]))[0]!.n; // eslint-disable-line no-restricted-syntax -- SQL built at run time, kept beside its builder (ADR 0012)
     return (await matchingIds(tx, select, c.params)).map((r) => r.id);
   } catch (e) {
     if (typeof (e as { code?: string }).code === "string" && (e as { code: string }).code.startsWith("22")) throw unprocessable("A filter value is not valid for its field");

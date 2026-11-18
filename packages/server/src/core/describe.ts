@@ -115,7 +115,7 @@ export async function schemaSummary(tx: Tx, ctx: Ctx) {
   // `records` and are counted in one query, however many there are.
   const counts = new Map<string, number>();
   for (const o of visible.filter((x) => x.is_system)) {
-    const [c] = await tx.unsafe<{ n: number }[]>(
+    const [c] = await tx.unsafe<{ n: number }[]>( // eslint-disable-line no-restricted-syntax -- SQL built at run time, kept beside its builder (ADR 0012)
       `SELECT count(*)::int AS n FROM (SELECT 1 FROM ${quoteIdent(o.table_name!)} WHERE archived_at IS NULL LIMIT ${COUNT_CAP + 1}) s`);
     counts.set(o.id, c?.n ?? 0);
   }
