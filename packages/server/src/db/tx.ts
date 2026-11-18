@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { db, type Tx } from "./pool.js";
+import { setTenant } from "./queries.js";
 
 /**
  * What code inside a withTenant transaction needs to know about that transaction (savepoints
@@ -19,7 +20,7 @@ export const txState = (): TxState | undefined => state.getStore();
  */
 export async function withTenant<T>(tenantId: string, fn: (tx: Tx) => Promise<T>): Promise<T> {
   return state.run({ ownSchemas: new Map(), preview: false }, () => db().begin(async (tx) => {
-    await tx`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+    await setTenant(tx, tenantId);
     return fn(tx);
   }) as Promise<T>);
 }
