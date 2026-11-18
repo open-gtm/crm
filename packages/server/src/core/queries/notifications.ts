@@ -107,34 +107,39 @@ export interface NotificationRow {
   rule_description?: string | null;
 }
 
-/**
- * A NotificationRow's columns and joins: the notification, and the name and description of the alert rule
- * or automation that fired it. Spliced into .unsafe() text, which numbers its own parameters. Exported for
- * the inbox list, which still runs its own statement in notifications.ts (myNotifications).
- */
-export const NOTIFICATION_SELECT = `n.*, COALESCE(r.name, a.name) AS rule_name, COALESCE(r.description, a.description) AS rule_description
+/** A notification with the name and description of the alert rule or automation it came from: the select list and joins every read below shares. */
+const notificationSelect = (tx: Tx) => tx`n.*, COALESCE(r.name, a.name) AS rule_name, COALESCE(r.description, a.description) AS rule_description
   FROM notifications n LEFT JOIN alert_rules r ON r.tenant_id = n.tenant_id AND r.id = n.rule_id
   LEFT JOIN automations a ON a.tenant_id = n.tenant_id AND a.id = n.automation_id`;
 
 /** One of a member's notifications, locked. */
 export async function memberNotificationForUpdate(tx: Tx, id: string, userId: string): Promise<NotificationRow | undefined> {
-  const [n] = await tx.unsafe<NotificationRow[]>(`SELECT ${NOTIFICATION_SELECT} WHERE n.id = $1 AND n.user_id = $2 FOR UPDATE OF n`, [id, userId]);
+  const [n] = await tx<NotificationRow[]>`SELECT ${notificationSelect(tx)} WHERE n.id = ${id} AND n.user_id = ${userId} FOR UPDATE OF n`;
   return n;
 }
 
 export async function notificationById(tx: Tx, id: string): Promise<NotificationRow | undefined> {
-  const [n] = await tx.unsafe<NotificationRow[]>(`SELECT ${NOTIFICATION_SELECT} WHERE n.id = $1`, [id]);
+  const [n] = await tx<NotificationRow[]>`SELECT ${notificationSelect(tx)} WHERE n.id = ${id}`;
   return n;
+}
+
+/** A page of a member's notifications in the given states, newest first; `severity` and `beforeId` narrow it when not null. */
+export async function memberNotifications(tx: Tx, userId: string, states: string[], severity: string | null, beforeId: string | null, limit: number): Promise<NotificationRow[]> {
+  return tx<NotificationRow[]>`
+    SELECT ${notificationSelect(tx)}
+    WHERE n.user_id = ${userId} AND n.state = ANY(${states}::text[]) AND (${severity}::text IS NULL OR n.severity = ${severity})
+      AND (${beforeId}::uuid IS NULL OR n.id < ${beforeId})
+    ORDER BY n.id DESC LIMIT ${limit}`;
 }
 
 /** A member's open notifications that need attention (snoozes that ended included), most severe first, at most 25. */
 export async function attentionNotifications(tx: Tx, userId: string): Promise<NotificationRow[]> {
-  return tx.unsafe<NotificationRow[]>(
-    `SELECT ${NOTIFICATION_SELECT}
-     WHERE n.user_id = $1 AND (n.state IN ('unread', 'acknowledged') OR (n.state = 'snoozed' AND n.snoozed_until <= now()))
-     ORDER BY CASE n.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
-              CASE WHEN n.state = 'acknowledged' THEN 1 ELSE 0 END, n.last_fired_at DESC
-     LIMIT 25`, [userId]);
+  return tx<NotificationRow[]>`
+    SELECT ${notificationSelect(tx)}
+    WHERE n.user_id = ${userId} AND (n.state IN ('unread', 'acknowledged') OR (n.state = 'snoozed' AND n.snoozed_until <= now()))
+    ORDER BY CASE n.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+             CASE WHEN n.state = 'acknowledged' THEN 1 ELSE 0 END, n.last_fired_at DESC
+    LIMIT 25`;
 }
 
 /** A member's open notifications counted by severity (snoozed ones apart), unread and snoozed. */

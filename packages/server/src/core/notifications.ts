@@ -9,7 +9,7 @@ import { canObject, canReadField, hasHiddenFields } from "./access.js";
 import type { Ctx } from "./context.js";
 import {
   acknowledgeNotification, activeMemberRoles, activeUserByEmail, activeUserById, attentionNotifications, claimDueDeliveries, currentWorkspaceName,
-  deliveriesOfNotification, endEmailDelivery, insertNotification, markEmailSent, memberNotificationForUpdate, NOTIFICATION_SELECT, notificationById,
+  deliveriesOfNotification, endEmailDelivery, insertNotification, markEmailSent, memberNotificationForUpdate, memberNotifications, notificationById,
   openNotificationCounts, openNotificationForUpdate, overdueTasksOf, queueEmailDelivery, refireNotification, resolvedSince, resolveNotification,
   savePrefs, scheduleEmailRetry, skipPendingDeliveries, snoozeNotification, storedPrefs,
   type ClaimedDeliveryRow, type MemberRole, type NotificationRow,
@@ -261,12 +261,7 @@ export async function myNotifications(tx: Tx, ctx: Ctx, q: { state?: string; sev
   const limit = Math.min(Math.max(q.limit ?? 50, 1), 200);
   const states = q.state === "open" || !q.state ? ["unread", "acknowledged", "snoozed"] : q.state === "all" ? ["unread", "acknowledged", "snoozed", "resolved"] : [q.state];
   const before = q.before ? decodeId(q.before) : null;
-  const rows = await tx.unsafe<NotificationRow[]>(
-    `SELECT ${NOTIFICATION_SELECT}
-     WHERE n.user_id = $1 AND n.state = ANY($2::text[]) AND ($3::text IS NULL OR n.severity = $3) AND ($4::uuid IS NULL OR n.id < $4)
-     ORDER BY n.id DESC LIMIT ${limit}`,
-    [userId, states, q.severity ?? null, before?.uuid ?? null],
-  );
+  const rows = await memberNotifications(tx, userId, states, q.severity ?? null, before?.uuid ?? null, limit);
   const data = [];
   for (const r of rows) data.push(await publicNotification(tx, ctx, r));
   return { data, next_before: rows.length === limit ? data[data.length - 1]!.id : null };
