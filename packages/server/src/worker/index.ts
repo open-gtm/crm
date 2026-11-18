@@ -11,6 +11,7 @@ import { pruneSessions } from "../auth/sessions.js";
 import { pruneSignInFlows } from "../auth/signin.js";
 import { pruneClients } from "../oauth/clients.js";
 import { pruneGrants } from "../oauth/grants.js";
+import { deleteOldIdempotencyKeys, enterWorkspace } from "./queries.js";
 
 /**
  * Background worker: processes outbox events (automations and webhook subscriptions), runs queued
@@ -79,8 +80,8 @@ export function startWorker(): () => void {
   loop("idempotency-expiry", 3_600_000, async () => {
     for (const t of await tenantIds(db())) {
       await db().begin(async (tx) => {
-        await tx`SELECT set_config('app.tenant_id', ${t}, true)`;
-        await tx`DELETE FROM idempotency_keys WHERE created_at < now() - interval '24 hours'`;
+        await enterWorkspace(tx, t);
+        await deleteOldIdempotencyKeys(tx);
       }).catch((e: Error) => logger.error({ job: "idempotency-expiry", tenantId: t, err: e.message }, "retention job failed"));
     }
     // Ended sessions and expired sign-in steps (codes, links, SSO state, workspace choices); OAuth (ADR 0010):
