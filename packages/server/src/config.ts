@@ -41,6 +41,12 @@ const Env = z.object({
   SESSION_ABSOLUTE_TIMEOUT_HOURS: z.coerce.number().int().min(1).max(2_160).default(168),
   /** Whether members may sign in with a password at all. Each workspace's owner can also turn it off. */
   PASSWORD_SIGN_IN: z.enum(["true", "false"]).default("true").transform((v) => v === "true"),
+  /**
+   * How hard to guess a new password must be, as zxcvbn rates it: 0 (the estimate is off) to 4. The default,
+   * 3, is about 10^8 guesses or more. 4 (about 10^10) also refuses a word with a year and punctuation, and
+   * short phrases. Below 3 is weaker than recommended for a password used on its own.
+   */
+  PASSWORD_MIN_STRENGTH: z.coerce.number().int().min(0).max(4).default(3),
   /** Check new passwords against Have I Been Pwned (only the first 5 hex characters of the SHA-1 leave the server). */
   PASSWORD_BREACH_CHECK: z.enum(["true", "false"]).default("false").transform((v) => v === "true"),
   /** Single sign-on through one OpenID Connect provider. Off unless issuer, client ID and secret are all set. */

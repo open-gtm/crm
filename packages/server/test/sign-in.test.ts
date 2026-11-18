@@ -562,6 +562,31 @@ describe("passwords", () => {
     }
   });
 
+  it("PASSWORD_MIN_STRENGTH moves the bar: 4 refuses a word with a year, 0 turns the estimate off", () => {
+    const withBar = (bar: string, check: () => void) => {
+      process.env.PASSWORD_MIN_STRENGTH = bar;
+      resetConfig();
+      try {
+        check();
+      } finally {
+        delete process.env.PASSWORD_MIN_STRENGTH;
+        resetConfig();
+      }
+    };
+    expect(passwordProblem("Summer2026!!!")).toBeNull();
+    expect(passwordProblem("password1234")).toBe("This password is too easy to guess");
+    withBar("4", () => {
+      expect(passwordProblem("Summer2026!!!")).toBe("This password is too easy to guess");
+      expect(passwordProblem("lantern-orbit-maple-quartz")).toBeNull();
+    });
+    withBar("0", () => {
+      expect(passwordProblem("password1234")).toBeNull();
+      expect(passwordProblem("short")).toMatch(/at least 12/);
+      expect(passwordProblem("aaaaaaaaaaaaaaaa")).toMatch(/repeats/);
+    });
+    withBar("5", () => expect(() => passwordProblem("lantern-orbit-maple-quartz")).toThrow(/Invalid configuration/));
+  });
+
   it("sets a first password after a recent sign-in, refuses weak ones, and signs in with it", async () => {
     const m = await member();
     const b = await signedIn(m.email);

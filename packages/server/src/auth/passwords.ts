@@ -141,7 +141,6 @@ export const PASSWORD_MAX = 256;
  * ESTIMATE_MAX UTF-16 code units are estimated, which keeps a check to a few milliseconds.
  */
 const ESTIMATE_MAX = 256;
-const STRONG_ENOUGH = 3; // of 0 to 4: about 10^8 guesses or more
 let estimator: ZxcvbnFactory | undefined;
 const strength = (pw: string, userInputs: string[]) => {
   estimator ??= new ZxcvbnFactory({
@@ -170,7 +169,8 @@ export function passwordProblem(pw: string, context: { email?: string | null; wo
   const ws = context.workspaceName?.toLowerCase().replace(/\s+/g, "") ?? "";
   if (ws.length >= 3 && lower.replace(/\s+/g, "").includes(ws)) return "Don't include the workspace name in your password";
   const userInputs = [local, context.email ?? "", context.workspaceName ?? "", ws].filter((s) => s.length >= 3);
-  if (strength(pw, userInputs) < STRONG_ENOUGH) return "This password is too easy to guess";
+  const required = config().PASSWORD_MIN_STRENGTH; // of 0 to 4; 0 turns the estimate off
+  if (required > 0 && strength(pw, userInputs) < required) return "This password is too easy to guess";
   return null;
 }
 
