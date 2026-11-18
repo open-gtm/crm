@@ -9,7 +9,14 @@ import { audit } from "./audit.js";
 import { conditionMatches, triggerObject } from "./automations.js";
 import { systemCtx, without, type Ctx } from "./context.js";
 import { emit } from "./events.js";
-import { notifyUser, receivers, requireUser, resolveUsers, type Severity } from "./notifications.js";
+import { notifyUser, receivers, requireUser, resolveUsers } from "./notifications.js";
+import {
+  activityLinks, advanceBackfill, archiveRuleRow, compiledRecordIds, computedDeadlines, countLiveRules, dropDeadline, dropDeadlines, dropRuleDeadlines,
+  dueDeadlines, enabledInactiveRulesOn, enabledRulesOn, finishBackfill, insertRule, liveRules, moveDeadline, personalRulesOf, ruleById, rulesToBackfill,
+  ruleWebhooks, updateRule, upsertDeadline, type RuleRow,
+} from "./queries/alerts.js";
+import { recordEventsSince } from "./queries/events.js";
+import { wakeSnoozed } from "./queries/notifications.js";
 import { Compiler, compileQuery, targetFor, type Where } from "./query.js";
 import { getRecord, type RecordOut } from "./records.js";
 import { getObject, loadSchema, quoteIdent, type ObjectMeta, type Schema } from "./schema.js";
@@ -30,7 +37,7 @@ const Trigger = z.discriminatedUnion("type", [
   z.object({ type: z.literal("inactive"), days: z.number().int().min(1).max(365) }),
   z.object({ type: z.literal("field_passed"), field: z.string(), offset_hours: z.number().int().min(-8760).max(8760).optional() }),
 ]);
-type TriggerT = z.infer<typeof Trigger>;
+export type TriggerT = z.infer<typeof Trigger>;
 
 export const AlertInput = z.object({
   name: z.string().min(1).max(200),
@@ -47,13 +54,6 @@ export const AlertInput = z.object({
   mine_only: z.boolean().optional(),
 });
 export type AlertInputT = z.infer<typeof AlertInput>;
-
-interface RuleRow {
-  id: string; scope: "workspace" | "personal"; owner_user_id: string | null; name: string; description: string | null; object: string;
-  kind: "event" | "time"; trigger: TriggerT; condition: Where | null; severity: Severity;
-  recipients: { record_owner?: boolean; users?: string[] }; webhooks: string[]; cooldown_hours: number | null; enabled: boolean;
-  backfill_cursor: string | null; backfilled_at: Date | null; version: number; created_at: Date; updated_at: Date; archived_at: Date | null;
-}
 
 /** The field that names who is responsible for a record: owner, or a task's assignee. */
 export function ownerField(obj: ObjectMeta): string | null {
@@ -238,7 +238,7 @@ function dueQuery(schema: Schema, obj: ObjectMeta, t: TriggerT, sel: { ids: stri
 
 async function computeDue(tx: Tx, schema: Schema, obj: ObjectMeta, t: TriggerT, sel: Parameters<typeof dueQuery>[3]) {
   const q = dueQuery(schema, obj, t, sel);
-  return tx.unsafe<{ id: string; due: Date | null }[]>(q.text, q.params as never[]);
+  return computedDeadlines(tx, q.text, q.params);
 }
 
 async function syncDeadlines(tx: Tx, tenantId: string, schema: Schema, rule: RuleRow, obj: ObjectMeta, ids: string[]): Promise<void> {
@@ -246,29 +246,27 @@ async function syncDeadlines(tx: Tx, tenantId: string, schema: Schema, rule: Rul
   const rows = await computeDue(tx, schema, obj, rule.trigger, { ids });
   const withDue = rows.filter((r) => r.due);
   for (const r of withDue) {
-    await tx`INSERT INTO rule_deadlines (tenant_id, rule_id, record_id, due_at) VALUES (${tenantId}, ${rule.id}, ${r.id}, ${r.due})
-             ON CONFLICT (tenant_id, rule_id, record_id) DO UPDATE SET due_at = EXCLUDED.due_at`;
+    await upsertDeadline(tx, tenantId, rule.id, r.id, r.due);
   }
   const keep = new Set(withDue.map((r) => r.id));
   const drop = ids.filter((i) => !keep.has(i));
-  if (drop.length) await tx`DELETE FROM rule_deadlines WHERE rule_id = ${rule.id} AND record_id = ANY(${drop}::uuid[])`;
+  if (drop.length) await dropDeadlines(tx, rule.id, drop);
 }
 
 const BACKFILL_BATCH = 1000;
 
 /** Builds deadlines for new or changed time rules, one keyset page per rule per call. */
 async function backfill(tx: Tx, tenantId: string, schema: Schema): Promise<void> {
-  const rules = await tx<RuleRow[]>`SELECT * FROM alert_rules WHERE kind = 'time' AND backfilled_at IS NULL AND archived_at IS NULL`;
+  const rules = await rulesToBackfill(tx);
   for (const rule of rules) {
     const obj = schema.objects.get(rule.object);
     if (!obj) continue;
     const page = await computeDue(tx, schema, obj, rule.trigger, { after: rule.backfill_cursor, limit: BACKFILL_BATCH });
     for (const r of page.filter((x) => x.due)) {
-      await tx`INSERT INTO rule_deadlines (tenant_id, rule_id, record_id, due_at) VALUES (${tenantId}, ${rule.id}, ${r.id}, ${r.due})
-               ON CONFLICT (tenant_id, rule_id, record_id) DO UPDATE SET due_at = EXCLUDED.due_at`;
+      await upsertDeadline(tx, tenantId, rule.id, r.id, r.due);
     }
-    if (page.length < BACKFILL_BATCH) await tx`UPDATE alert_rules SET backfilled_at = now(), backfill_cursor = NULL WHERE id = ${rule.id}`;
-    else await tx`UPDATE alert_rules SET backfill_cursor = ${page[page.length - 1]!.id} WHERE id = ${rule.id}`;
+    if (page.length < BACKFILL_BATCH) await finishBackfill(tx, rule.id);
+    else await advanceBackfill(tx, rule.id, page[page.length - 1]!.id);
   }
 }
 
@@ -319,13 +317,13 @@ async function fire(tx: Tx, tenantId: string, schema: Schema, rule: RuleRow, obj
  */
 export async function handleEventForAlerts(tx: Tx, tenantId: string, e: EventRow): Promise<void> {
   if (!e.object_type || !e.record_id || e.type.startsWith("alert.") || e.type.startsWith("schema.")) return;
-  const rules = await tx<RuleRow[]>`SELECT * FROM alert_rules WHERE enabled AND archived_at IS NULL AND object = ${e.object_type}`;
+  const rules = await enabledRulesOn(tx, e.object_type);
   const schema = await loadSchema(tx);
   const obj = schema.objects.get(e.object_type);
   if (obj && rules.length) {
     for (const rule of rules) {
       if (rule.kind === "time") {
-        if (e.type.endsWith(".archived")) await tx`DELETE FROM rule_deadlines WHERE rule_id = ${rule.id} AND record_id = ${e.record_id}`;
+        if (e.type.endsWith(".archived")) await dropDeadline(tx, rule.id, e.record_id);
         else await syncDeadlines(tx, tenantId, schema, rule, obj, [e.record_id]);
         continue;
       }
@@ -339,14 +337,11 @@ export async function handleEventForAlerts(tx: Tx, tenantId: string, e: EventRow
   }
   if (e.type === "activity.created") {
     // A logged activity counts as touching every record it is about.
-    const linked = await tx<{ record_id: string; object_id: string }[]>`
-      SELECT aa.record_id, rr.object_id FROM activity_associations aa
-      JOIN record_registry rr ON rr.tenant_id = aa.tenant_id AND rr.id = aa.record_id WHERE aa.activity_id = ${e.record_id}`;
+    const linked = await activityLinks(tx, e.record_id);
     for (const l of linked) {
       const target = schema.byId.get(l.object_id);
       if (!target) continue;
-      const inactive = await tx<RuleRow[]>`
-        SELECT * FROM alert_rules WHERE enabled AND archived_at IS NULL AND object = ${target.api_name} AND trigger->>'type' = 'inactive'`;
+      const inactive = await enabledInactiveRulesOn(tx, target.api_name);
       for (const rule of inactive) await syncDeadlines(tx, tenantId, schema, rule, target, [l.record_id]);
     }
   }
@@ -357,8 +352,7 @@ export async function alertWebhooks(tx: Tx, e: EventRow): Promise<string[]> {
   if (e.type !== "alert.fired") return [];
   const d = decodeId(String((e.data.alert as { id?: string } | undefined)?.id ?? ""));
   if (!d) return [];
-  const [r] = await tx<{ webhooks: string[] }[]>`SELECT webhooks FROM alert_rules WHERE id = ${d.uuid}`;
-  return r?.webhooks ?? [];
+  return (await ruleWebhooks(tx, d.uuid)) ?? [];
 }
 
 const SCHEDULER_BATCH = 500;
@@ -371,29 +365,26 @@ const SCHEDULER_BATCH = 500;
  */
 export async function runScheduler(tenantId: string, now = new Date()): Promise<{ fired: number; checked: number }> {
   return withTenant(tenantId, async (tx) => {
-    await tx`UPDATE notifications SET state = 'unread', snoozed_until = NULL WHERE state = 'snoozed' AND snoozed_until <= ${now}`;
+    await wakeSnoozed(tx, now);
     const schema = await loadSchema(tx);
     await backfill(tx, tenantId, schema);
-    const due = await tx<{ rule_id: string; record_id: string }[]>`
-      SELECT d.rule_id, d.record_id FROM rule_deadlines d
-      JOIN alert_rules r ON r.tenant_id = d.tenant_id AND r.id = d.rule_id AND r.enabled AND r.archived_at IS NULL
-      WHERE d.due_at <= ${now} ORDER BY d.due_at LIMIT ${SCHEDULER_BATCH} FOR UPDATE OF d SKIP LOCKED`;
+    const due = await dueDeadlines(tx, now, SCHEDULER_BATCH);
     let fired = 0;
     const byRule = new Map<string, string[]>();
     for (const d of due) byRule.set(d.rule_id, [...(byRule.get(d.rule_id) ?? []), d.record_id]);
     for (const [ruleId, ids] of byRule) {
-      const [rule] = await tx<RuleRow[]>`SELECT * FROM alert_rules WHERE id = ${ruleId}`;
+      const rule = await ruleById(tx, ruleId);
       const obj = rule ? schema.objects.get(rule.object) : undefined;
       if (!rule || !obj || (obj.module && !schema.modules.includes(obj.module))) continue;
       const current = new Map((await computeDue(tx, schema, obj, rule.trigger, { ids })).map((r) => [r.id, r.due]));
       for (const id of ids) {
         const dueAt = current.get(id);
         if (!dueAt) {
-          await tx`DELETE FROM rule_deadlines WHERE rule_id = ${ruleId} AND record_id = ${id}`;
+          await dropDeadline(tx, ruleId, id);
           continue;
         }
         if (dueAt > now) { // the record changed since the deadline was set
-          await tx`UPDATE rule_deadlines SET due_at = ${dueAt} WHERE rule_id = ${ruleId} AND record_id = ${id}`;
+          await moveDeadline(tx, ruleId, id, dueAt);
           continue;
         }
         try {
@@ -406,9 +397,9 @@ export async function runScheduler(tenantId: string, now = new Date()): Promise<
           logger.error({ tenantId, rule: ruleId, err: (e as Error).message }, "alert evaluation failed");
         }
         if (rule.cooldown_hours) {
-          await tx`UPDATE rule_deadlines SET due_at = ${new Date(now.getTime() + rule.cooldown_hours * 3_600_000)} WHERE rule_id = ${ruleId} AND record_id = ${id}`;
+          await moveDeadline(tx, ruleId, id, new Date(now.getTime() + rule.cooldown_hours * 3_600_000));
         } else {
-          await tx`DELETE FROM rule_deadlines WHERE rule_id = ${ruleId} AND record_id = ${id}`;
+          await dropDeadline(tx, ruleId, id);
         }
       }
     }
@@ -428,7 +419,7 @@ async function matchingIds(tx: Tx, schema: Schema, obj: ObjectMeta, ids: string[
     const chunk = ids.slice(i, i + 200);
     const q = compileQuery(schema, { object: obj.api_name, include_archived: true, limit: 200,
       where: { and: [condition, { field: "id", op: "in", value: chunk.map((u) => encodeId(obj.id_prefix, u)) }] } });
-    for (const r of await tx.unsafe<{ id: string }[]>(q.text, q.params as never[])) out.add(r.id);
+    for (const r of await compiledRecordIds(tx, q.text, q.params)) out.add(r.id);
   }
   return out;
 }
@@ -451,9 +442,7 @@ async function backtest(tx: Tx, ctx: Ctx, v: Validated, input: AlertInputT, days
   const since = new Date(now.getTime() - days * 86_400_000);
   const t = input.trigger;
   if (t.type === "event") {
-    const events = await tx<{ record_id: string; occurred_at: Date; data: { after?: object } }[]>`
-      SELECT record_id, occurred_at, data FROM outbox_events WHERE type = ${t.event} AND occurred_at >= ${since} AND record_id IS NOT NULL
-      ORDER BY occurred_at DESC LIMIT ${BACKTEST_SCAN_LIMIT}`;
+    const events = await recordEventsSince(tx, t.event, since, BACKTEST_SCAN_LIMIT);
     const relevant = events.filter((e) => !t.changed_fields?.length || t.changed_fields.some((f) => f in (e.data.after ?? {})));
     const ok = await matchingIds(tx, schema, v.obj, [...new Set(relevant.map((e) => e.record_id))], v.condition);
     const hits = relevant.filter((e) => ok.has(e.record_id));
@@ -498,8 +487,7 @@ function parseRuleId(publicId: string): string {
 
 async function loadRule(tx: Tx, ctx: Ctx, publicId: string, scope: "any" | "personal", forUpdate = false): Promise<RuleRow> {
   const id = parseRuleId(publicId);
-  const [r] = forUpdate ? await tx<RuleRow[]>`SELECT * FROM alert_rules WHERE id = ${id} FOR UPDATE`
-    : await tx<RuleRow[]>`SELECT * FROM alert_rules WHERE id = ${id}`;
+  const r = await ruleById(tx, id, forUpdate);
   if (!r) throw notFound(`Alert ${publicId}`);
   if (scope === "personal" && (r.scope !== "personal" || r.owner_user_id !== ctx.actor.id)) throw notFound(`Alert ${publicId}`);
   return r;
@@ -512,16 +500,15 @@ export async function createAlert(tx: Tx, ctx: Ctx, input: AlertInputT, opts: Sa
   const days = Math.min(Math.max(opts.backtestDays ?? 30, 1), 90);
   const bt = await backtest(tx, ctx, v, input, days);
   if (opts.dryRun) return { dry_run: true, summary: v.summary, warnings: v.warnings, backtest: bt };
-  const [count] = await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM alert_rules WHERE archived_at IS NULL`;
-  if ((count?.n ?? 0) >= 500) throw conflict("A workspace can have at most 500 alert rules");
+  const count = await countLiveRules(tx);
+  if ((count ?? 0) >= 500) throw conflict("A workspace can have at most 500 alert rules");
   const id = uuidv7();
-  await tx`
-    INSERT INTO alert_rules (tenant_id, id, scope, owner_user_id, name, description, object, kind, trigger, condition, severity, recipients,
-                             webhooks, cooldown_hours, enabled, created_by)
-    VALUES (${ctx.tenantId}, ${id}, ${opts.scope}, ${opts.scope === "personal" ? requireUser(ctx) : null}, ${input.name}, ${input.description ?? null},
-            ${v.obj.api_name}, ${v.kind}, ${tx.json(input.trigger as never)}, ${v.condition ? tx.json(v.condition as never) : null},
-            ${input.severity ?? "warning"}, ${tx.json(v.recipients as never)}, ${v.webhooks}::uuid[], ${input.cooldown_hours ?? null},
-            ${input.enabled ?? true}, ${ctx.actor.id})`;
+  await insertRule(tx, {
+    tenantId: ctx.tenantId, id, scope: opts.scope, ownerUserId: opts.scope === "personal" ? requireUser(ctx) : null, name: input.name, description: input.description ?? null,
+    object: v.obj.api_name, kind: v.kind, trigger: input.trigger, condition: v.condition,
+    severity: input.severity ?? "warning", recipients: v.recipients, webhooks: v.webhooks, cooldownHours: input.cooldown_hours ?? null,
+    enabled: input.enabled ?? true, createdBy: ctx.actor.id,
+  });
   await audit(tx, ctx, { action: "alert.created", details: { alert: encodeId("alr", id), scope: opts.scope, object: v.obj.api_name, kind: v.kind } });
   return { dry_run: false, summary: v.summary, warnings: v.warnings, backtest: bt, alert: publicRule(await loadRule(tx, ctx, encodeId("alr", id), "any")) };
 }
@@ -543,14 +530,14 @@ export async function updateAlert(tx: Tx, ctx: Ctx, publicId: string, patch: Par
   const bt = await backtest(tx, ctx, v, next, Math.min(Math.max(opts.backtestDays ?? 30, 1), 90));
   if (opts.dryRun) return { dry_run: true, summary: v.summary, warnings: v.warnings, backtest: bt };
   const reshaped = JSON.stringify(next.trigger) !== JSON.stringify(cur.trigger) || next.object !== cur.object;
-  await tx`
-    UPDATE alert_rules SET name = ${next.name}, description = ${next.description ?? null}, object = ${v.obj.api_name}, kind = ${v.kind},
-      trigger = ${tx.json(next.trigger as never)}, condition = ${v.condition ? tx.json(v.condition as never) : null}, severity = ${next.severity ?? "warning"},
-      recipients = ${tx.json(v.recipients as never)}, webhooks = ${v.webhooks}::uuid[], cooldown_hours = ${next.cooldown_hours ?? null},
-      enabled = ${next.enabled ?? true}, version = version + 1,
-      backfilled_at = ${reshaped ? null : cur.backfilled_at}, backfill_cursor = ${reshaped ? null : cur.backfill_cursor}
-    WHERE id = ${cur.id}`;
-  if (reshaped) await tx`DELETE FROM rule_deadlines WHERE rule_id = ${cur.id}`;
+  await updateRule(tx, cur.id, {
+    name: next.name, description: next.description ?? null, object: v.obj.api_name, kind: v.kind,
+    trigger: next.trigger, condition: v.condition, severity: next.severity ?? "warning",
+    recipients: v.recipients, webhooks: v.webhooks, cooldownHours: next.cooldown_hours ?? null,
+    enabled: next.enabled ?? true,
+    backfilledAt: reshaped ? null : cur.backfilled_at, backfillCursor: reshaped ? null : cur.backfill_cursor,
+  });
+  if (reshaped) await dropRuleDeadlines(tx, cur.id);
   await audit(tx, ctx, { action: "alert.updated", details: { alert: publicId, fields: Object.keys(patch) } });
   return { dry_run: false, summary: v.summary, warnings: v.warnings, backtest: bt, alert: publicRule(await loadRule(tx, ctx, publicId, "any")) };
 }
@@ -558,8 +545,8 @@ export async function updateAlert(tx: Tx, ctx: Ctx, publicId: string, patch: Par
 export async function archiveAlert(tx: Tx, ctx: Ctx, publicId: string, scope: "workspace" | "personal") {
   const cur = await loadRule(tx, ctx, publicId, scope === "personal" ? "personal" : "any", true);
   if (!cur.archived_at) {
-    await tx`UPDATE alert_rules SET archived_at = now(), enabled = false WHERE id = ${cur.id}`;
-    await tx`DELETE FROM rule_deadlines WHERE rule_id = ${cur.id}`;
+    await archiveRuleRow(tx, cur.id);
+    await dropRuleDeadlines(tx, cur.id);
     await audit(tx, ctx, { action: "alert.archived", details: { alert: publicId } });
   }
   return publicRule(await loadRule(tx, ctx, publicId, "any"));
@@ -567,8 +554,8 @@ export async function archiveAlert(tx: Tx, ctx: Ctx, publicId: string, scope: "w
 
 export async function listAlerts(tx: Tx, ctx: Ctx, scope: "all" | "mine") {
   const rows = scope === "mine"
-    ? await tx<RuleRow[]>`SELECT * FROM alert_rules WHERE archived_at IS NULL AND scope = 'personal' AND owner_user_id = ${requireUser(ctx)} ORDER BY created_at`
-    : await tx<RuleRow[]>`SELECT * FROM alert_rules WHERE archived_at IS NULL ORDER BY scope DESC, created_at`;
+    ? await personalRulesOf(tx, requireUser(ctx))
+    : await liveRules(tx);
   return rows.map(publicRule);
 }
 
