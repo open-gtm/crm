@@ -4,7 +4,8 @@ import postgres from "postgres";
 import { ConfigError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
 
-const MIGRATIONS_DIR = new URL("./migrations/", import.meta.url);
+/** packages/server/migrations: the same two levels up from src/db and from the built dist/db, so nothing is copied at build time. */
+const MIGRATIONS_DIR = new URL("../../migrations/", import.meta.url);
 
 /**
  * Applies pending SQL migrations in order, each in its own transaction, then refreshes grants.
