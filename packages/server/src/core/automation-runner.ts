@@ -22,6 +22,16 @@ import { decryptValue } from "./encryption.js";
 import { emit } from "./events.js";
 import { JSON_LIMITS, TEXT_MAX } from "./fieldtypes.js";
 import { notifyUser, receivers, resolveUsers } from "./notifications.js";
+import {
+  activeMemberEmail, automationManagers, claimableRuns, countUsage, dueScheduledAutomations, finishRun, holdsRunLease, insertScheduledRun, leaseRun,
+  lockAutomationIfFree, markCapNotice, otherRunInProgress, queuedRunCount, saveRunProgress, scheduleRunCounts, type RunRow,
+} from "./queries/automation-runs.js";
+import {
+  automationById, automationSettings, clearAutomationFailures, clearNextRun, countAutomationFailure, isListedSuppressed, pauseAutomationRow, setNextRun,
+  type Settings,
+} from "./queries/automations.js";
+import { eventById } from "./queries/events.js";
+import { activeUserByEmail, currentWorkspaceName } from "./queries/notifications.js";
 import type { Where } from "./query.js";
 import { createRecord, getRecord, queryRecords, updateRecord, type RecordOut } from "./records.js";
 import { nextRun, type Schedule } from "./schedule.js";
@@ -45,7 +55,7 @@ import { buildRequest, enqueueDelivery, loadWebhook, policy, publicEvent, record
  */
 
 export interface StepResult { step: string; id?: string; action: string; ok: boolean; skipped?: string; detail: Record<string, unknown> }
-export interface Settings { paused_at: Date | null; paused_reason: string | null; external_email: boolean; timezone: string }
+export type { Settings };
 
 /**
  * A cap was reached: the run is recorded as skipped, not failed (it does not count towards the automatic
@@ -153,7 +163,7 @@ export const progressWrites = { vars: 0, results: 0 };
 // Settings, caps and suppression
 
 export async function loadSettings(tx: Tx): Promise<Settings> {
-  const [s] = await tx<Settings[]>`SELECT paused_at, paused_reason, external_email, timezone FROM automation_settings`;
+  const s = await automationSettings(tx);
   return s ?? { paused_at: null, paused_reason: null, external_email: false, timezone: "UTC" };
 }
 
@@ -163,11 +173,8 @@ export async function loadSettings(tx: Tx): Promise<Settings> {
  */
 export async function consume(tx: Tx, tenantId: string, bucket: string, cap: number, windowMs: number, what: string): Promise<void> {
   const start = new Date(Math.floor(Date.now() / windowMs) * windowMs);
-  const rows = cap <= 0 ? [] : await tx`
-    INSERT INTO automation_usage (tenant_id, bucket, window_start, n) VALUES (${tenantId}, ${bucket}, ${start}, 1)
-    ON CONFLICT (tenant_id, bucket, window_start) DO UPDATE SET n = automation_usage.n + 1 WHERE automation_usage.n < ${cap}
-    RETURNING n`;
-  if (rows.length === 0) throw new CapReached(`${what} (${cap}) reached`, bucket, start);
+  const counted = cap <= 0 ? false : await countUsage(tx, tenantId, bucket, start, cap);
+  if (!counted) throw new CapReached(`${what} (${cap}) reached`, bucket, start);
 }
 
 const HOUR = 3_600_000;
@@ -198,8 +205,7 @@ export function addressProblem(s: string): string | null {
 
 export async function isSuppressed(tx: Tx, tenantId: string, email: string): Promise<boolean> {
   // The exact address too: an entry made before suppressions were keyed on the mailbox.
-  const [row] = await tx`SELECT 1 FROM email_suppressions WHERE address_hash IN (${mailboxHash(tenantId, email)}, ${addressHash(tenantId, email)}) LIMIT 1`;
-  return Boolean(row);
+  return isListedSuppressed(tx, mailboxHash(tenantId, email), addressHash(tenantId, email));
 }
 
 /** SMTP replies quote recipients ("550 <ann@x.com> rejected"); run logs and server logs never hold one. */
@@ -689,8 +695,7 @@ interface EmailPlan {
 const skipped = (label: string, skip: string): EmailPlan => ({ to: "", kind: "external", label, subject: "", text: "", hash: Buffer.alloc(0), skip });
 
 async function workspaceName(tx: Tx): Promise<string> {
-  const [ws] = await tx<{ name: string }[]>`SELECT name FROM tenants`;
-  return ws?.name ?? "hl-crm-db";
+  return (await currentWorkspaceName(tx)) ?? "hl-crm-db";
 }
 
 /**
@@ -719,12 +724,12 @@ async function prepareEmail(tx: Tx, env: Env, step: Extract<InnerStep, { type: "
     address = raw.trim();
     const problem = addressProblem(address);
     if (problem) return skipped(hashLabel(addressHash(env.tenantId, address)), problem);
-    const [m] = await tx<{ id: string }[]>`SELECT id FROM users WHERE email = ${address} AND disabled_at IS NULL`;
+    const m = await activeUserByEmail(tx, address);
     if (m) user = m.id;
   }
   const footer = `\n\n--\nSent by an automation of the ${await workspaceName(tx)} workspace (hl-crm-db).`;
   if (user) {
-    const [u] = await tx<{ email: string }[]>`SELECT email::text AS email FROM users WHERE id = ${user} AND disabled_at IS NULL`;
+    const u = await activeMemberEmail(tx, user);
     if (!u) throw unprocessable("The member to email is not active");
     const hash = addressHash(env.tenantId, u.email);
     const label = encodeId("usr", user);
@@ -931,21 +936,19 @@ export const storedResults = (s: RunState) => (s.omitted ? [...s.results, { step
 export async function afterRun(tx: Tx, tenantId: string, a: AutomationRow, status: string, f?: Failure | null): Promise<void> {
   if (f?.cap?.bucket && f.cap.window) await capNotice(tx, tenantId, a, f.cap.bucket, f.cap.window, f.reason);
   if (status === "succeeded") {
-    if (a.consecutive_failures) await tx`UPDATE automations SET consecutive_failures = 0 WHERE id = ${a.id}`;
+    if (a.consecutive_failures) await clearAutomationFailures(tx, a.id);
     return;
   }
   if (status !== "failed" || f?.kind === "data") return;
-  const [row] = await tx<{ consecutive_failures: number; paused_at: Date | null }[]>`
-    UPDATE automations SET consecutive_failures = consecutive_failures + 1 WHERE id = ${a.id} RETURNING consecutive_failures, paused_at`;
+  const row = await countAutomationFailure(tx, a.id);
   if (!row || row.paused_at || row.consecutive_failures < LIMITS.autoPauseAfter) return;
   const reason = `paused automatically after ${row.consecutive_failures} failed runs in a row`;
-  await tx`UPDATE automations SET paused_at = now(), paused_reason = ${reason}, next_run_at = NULL WHERE id = ${a.id}`;
+  await pauseAutomationRow(tx, a.id, reason);
   const ctx = systemCtx(tenantId, `auto-pause:${a.id}`);
   await audit(tx, ctx, { action: "automation.paused", details: { automation: encodeId("auto", a.id), reason, automatic: true } });
   await emit(tx, ctx, { type: "automation.paused", data: { automation: { id: encodeId("auto", a.id), name: a.name }, reason } });
   // Runs already queued are skipped, and events while it is paused are not replayed after it resumes: say how many runs that drops now.
-  const [q] = await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM automation_runs WHERE automation_id = ${a.id} AND status = 'queued'`;
-  const queued = q?.n ?? 0;
+  const queued = (await queuedRunCount(tx, a.id)) ?? 0;
   await notifyManagers(tx, tenantId, a, `Automation paused: ${a.name}`, `${reason}. ${queued} queued run${queued === 1 ? "" : "s"} will be skipped, and events `
     + `while it is paused are not run later. See its runs, fix it, then resume it (POST /v1/automations/${encodeId("auto", a.id)}/resume).`);
   logger.warn({ tenantId, automation: a.id }, "automation paused after repeated failures");
@@ -961,9 +964,7 @@ async function notifyManagers(tx: Tx, tenantId: string, a: Pick<AutomationRow, "
       return "contact"; // the trigger's object is gone
     }
   })();
-  const admins = await tx<{ id: string }[]>`
-    SELECT u.id FROM users u JOIN roles r ON r.tenant_id = u.tenant_id AND r.id = u.role_id
-    WHERE u.disabled_at IS NULL AND r.archived_at IS NULL AND 'automations:manage' = ANY (r.permissions)`;
+  const admins = await automationManagers(tx);
   for (const u of admins) await notifyUser(tx, tenantId, u.id, { source: { automation_id: a.id }, recordId: null, object, severity: "warning", title, body });
 }
 
@@ -972,8 +973,7 @@ async function notifyManagers(tx: Tx, tenantId: string, a: Pick<AutomationRow, "
  * (once per cap and window: a marker row in automation_usage). Later skips in the window only show in run history.
  */
 export async function capNotice(tx: Tx, tenantId: string, a: Pick<AutomationRow, "id" | "name" | "trigger">, bucket: string, window: Date, what: string): Promise<void> {
-  const [first] = await tx`INSERT INTO automation_usage (tenant_id, bucket, window_start, n) VALUES (${tenantId}, ${`notice:${bucket}`.slice(0, 100)}, ${window}, 1)
-                           ON CONFLICT DO NOTHING RETURNING 1`;
+  const first = await markCapNotice(tx, tenantId, `notice:${bucket}`.slice(0, 100), window);
   if (!first) return;
   await notifyManagers(tx, tenantId, a, `Automation cap reached: ${a.name}`,
     `${what}. Runs past it are skipped (shown as cap skips in its run history) until the window ends; raise the cap or spread the work out.`);
@@ -990,31 +990,25 @@ export async function capNotice(tx: Tx, tenantId: string, a: Pick<AutomationRow,
  */
 export async function scheduleDue(tenantId: string, now = new Date()): Promise<number> {
   return withTenant(tenantId, async (tx) => {
-    const due = await tx<AutomationRow[]>`
-      SELECT * FROM automations WHERE next_run_at <= ${now} AND archived_at IS NULL ORDER BY next_run_at LIMIT 100 FOR UPDATE SKIP LOCKED`;
+    const due = await dueScheduledAutomations(tx, now);
     if (due.length === 0) return 0;
     const settings = await loadSettings(tx);
     for (const a of due) {
       const t = triggerOf(a.trigger);
       if (t.type !== "schedule" || !a.enabled || a.paused_at) {
-        await tx`UPDATE automations SET next_run_at = NULL WHERE id = ${a.id}`;
+        await clearNextRun(tx, a.id);
         continue;
       }
       const tick = a.next_run_at!;
       if (!settings.paused_at) {
-        const [n] = await tx<{ open: number; hour: number }[]>`
-          SELECT count(*) FILTER (WHERE status IN ('queued', 'running'))::int AS open,
-                 count(*) FILTER (WHERE status <> 'skipped' AND started_at > now() - interval '1 hour')::int AS hour
-          FROM automation_runs WHERE automation_id = ${a.id}`;
+        const n = await scheduleRunCounts(tx, a.id);
         const capped = !n?.open && (n?.hour ?? 0) >= a.hourly_cap;
         const reason = n?.open ? "the previous run was still in progress" : capped ? `hourly cap (${a.hourly_cap}) reached` : null;
-        await tx`INSERT INTO automation_runs (tenant_id, id, automation_id, event_id, record_id, status, reason, depth, trigger_kind, scheduled_for, finished_at, usage)
-                 VALUES (${tenantId}, ${uuidv7()}, ${a.id}, NULL, NULL, ${reason ? "skipped" : "queued"}, ${reason}, 0, 'schedule', ${tick},
-                         ${reason ? new Date() : null}, ${tx.json((capped ? { cap: "hourly" } : {}) as never)})
-                 ON CONFLICT DO NOTHING`;
+        await insertScheduledRun(tx, { tenantId, id: uuidv7(), automationId: a.id, status: reason ? "skipped" : "queued", reason, scheduledFor: tick,
+          finishedAt: reason ? new Date() : null, usage: capped ? { cap: "hourly" } : {} });
         if (capped) await capNotice(tx, tenantId, a, `hourly:${a.id}`, hourStart(), reason!);
       }
-      await tx`UPDATE automations SET next_run_at = ${nextRun(t as Schedule, now, settings.timezone)} WHERE id = ${a.id}`;
+      await setNextRun(tx, a.id, nextRun(t as Schedule, now, settings.timezone));
     }
     return due.length;
   });
@@ -1022,16 +1016,6 @@ export async function scheduleDue(tenantId: string, now = new Date()): Promise<n
 
 /** The start of the current hour: the window of an automation's hourly_cap, for its cap notice. */
 export const hourStart = () => new Date(Math.floor(Date.now() / HOUR) * HOUR);
-
-interface Progress {
-  cursor?: string | null; loop?: RunState["loop"]; vars?: Record<string, unknown>; counters?: { executed?: number; http?: number; emails?: number };
-}
-
-interface RunRow {
-  id: string; automation_id: string; event_id: string | null; record_id: string | null; status: string; depth: number; trigger_kind: string;
-  scheduled_for: Date | null; input: { record?: string } | null; attempts: number; progress: Progress | null;
-  results: StepResult[]; requested_by: string | null;
-}
 
 /** The member who asked for a manual run (usr_… or svc_…), as an actor. */
 function requester(ref: string | null): { type: string; id: string } | null {
@@ -1046,19 +1030,13 @@ function requester(ref: string | null): { type: string; id: string } | null {
 export async function runQueuedOnce(tenantId: string): Promise<boolean> {
   const lease = randomUUID();
   const claimed = await withTenant(tenantId, async (tx) => {
-    const cands = await tx<{ id: string; automation_id: string }[]>`
-      SELECT id, automation_id FROM automation_runs
-      WHERE status = 'queued' OR (status = 'running' AND locked_until < now())
-      ORDER BY started_at, id LIMIT 10 FOR UPDATE SKIP LOCKED`;
+    const cands = await claimableRuns(tx);
     for (const c of cands) {
-      const [free] = await tx`SELECT 1 FROM automations WHERE id = ${c.automation_id} FOR UPDATE SKIP LOCKED`;
+      const free = await lockAutomationIfFree(tx, c.automation_id);
       if (!free) continue;
-      const [busy] = await tx`SELECT 1 FROM automation_runs WHERE automation_id = ${c.automation_id} AND status = 'running' AND locked_until >= now() AND id <> ${c.id} LIMIT 1`;
+      const busy = await otherRunInProgress(tx, c.automation_id, c.id);
       if (busy) continue;
-      const [row] = await tx<RunRow[]>`
-        UPDATE automation_runs SET status = 'running', attempts = attempts + 1, lease_token = ${lease}::uuid,
-          locked_until = now() + make_interval(secs => ${LEASE_SECONDS})
-        WHERE id = ${c.id} RETURNING *`;
+      const row = await leaseRun(tx, c.id, lease, LEASE_SECONDS);
       return row ?? null;
     }
     return null;
@@ -1072,22 +1050,17 @@ async function runClaimed(tenantId: string, run: RunRow, lease: string): Promise
   let auto: AutomationRow | null = null;
   const finish = async (status: string, reason: string | null, state: RunState | null, f: Failure | null = null) => {
     await withTenant(tenantId, async (tx) => {
-      const done = await tx`
-        UPDATE automation_runs SET status = ${status}, reason = ${reason}, results = ${tx.json((state ? storedResults(state) : run.results ?? []) as never)},
-          usage = ${tx.json(usageOf(state, f) as never)},
-          progress = NULL, lease_token = NULL, locked_until = NULL, finished_at = clock_timestamp()
-        WHERE id = ${run.id} AND lease_token = ${lease}::uuid RETURNING 1`;
-      if (done.length && auto) await afterRun(tx, tenantId, auto, status, f);
+      const done = await finishRun(tx, run.id, lease, { status, reason, results: state ? storedResults(state) : run.results ?? [], usage: usageOf(state, f) });
+      if (done && auto) await afterRun(tx, tenantId, auto, status, f);
     });
   };
   const setup = await withTenant(tenantId, async (tx) => {
-    const [a] = await tx<AutomationRow[]>`SELECT * FROM automations WHERE id = ${run.automation_id}`;
+    const a = await automationById(tx, run.automation_id);
     const settings = await loadSettings(tx);
     const schema = await loadSchema(tx);
     let event: EventRow | null = null;
     if (run.event_id) {
-      [event = null] = await tx<EventRow[]>`
-        SELECT id, type, object_type, record_id, occurred_at, actor_type, actor_id, surface, data, causation_depth, automation_id FROM outbox_events WHERE id = ${run.event_id}`;
+      event = (await eventById(tx, run.event_id)) ?? null;
     }
     return { a: a ?? null, settings, schema, event };
   });
@@ -1123,14 +1096,13 @@ async function runClaimed(tenantId: string, run: RunRow, lease: string): Promise
   // outputs only when one changed and the step log every RESULTS_EVERY steps or around a send: a long loop
   // rewrites a few hundred bytes per step, not its whole state. `||` keeps saved keys the update leaves out.
   const unit: Env["unit"] = (fn) => withTenant(tenantId, async (tx) => {
-    const [held] = await tx`SELECT 1 FROM automation_runs WHERE id = ${run.id} AND status = 'running' AND lease_token = ${lease}::uuid FOR UPDATE`;
+    const held = await holdsRunLease(tx, run.id, lease);
     if (!held) throw new LeaseLost("lease lost");
     const out = await fn(tx);
     const d = state.dirty;
     const results = d.results || d.steps >= RESULTS_EVERY;
     const saved = { ...progressOf(state), ...(d.vars ? { vars: state.vars } : {}) };
-    await tx`UPDATE automation_runs SET progress = COALESCE(progress, '{}'::jsonb) || ${tx.json(saved as never)},
-               results = ${results ? tx.json(storedResults(state) as never) : tx`results`}, locked_until = now() + make_interval(secs => ${LEASE_SECONDS}) WHERE id = ${run.id}`;
+    await saveRunProgress(tx, run.id, saved, results ? storedResults(state) : null, LEASE_SECONDS);
     if (d.vars) progressWrites.vars++;
     if (results) progressWrites.results++;
     state.dirty = { vars: false, results: false, steps: results ? 0 : d.steps };

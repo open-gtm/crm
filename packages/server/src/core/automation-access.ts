@@ -3,6 +3,7 @@ import { canObject, canReadField, fieldAccess, hasHiddenFields } from "./access.
 import { ownerField, ruleHiddenFrom } from "./alerts.js";
 import { recordObject, triggerOf, type AutomationRow, type InnerStep, type Step } from "./automation-defs.js";
 import type { Ctx } from "./context.js";
+import { roleOfServiceAccount, roleOfUser } from "./queries/automations.js";
 import type { Where } from "./query.js";
 import { contextForRole } from "./roles.js";
 import type { ObjectMeta, Schema } from "./schema.js";
@@ -236,10 +237,8 @@ export function writeDenied(ctx: Ctx, w: ReturnType<typeof writes>): string | nu
 /** A member's (user or service account) role as a context, or null for the system, automations and anyone gone. */
 export async function actorCtx(tx: Tx, tenantId: string, type: string | null, id: string | null): Promise<Ctx | null> {
   if (!id || (type !== "user" && type !== "service_account")) return null;
-  const [m] = type === "user"
-    ? await tx<{ id: string; key: string; permissions: string[]; access_version: string }[]>`
-        SELECT r.id, r.key, r.permissions, r.access_version::text FROM users u JOIN roles r ON r.tenant_id = u.tenant_id AND r.id = u.role_id WHERE u.id = ${id}`
-    : await tx<{ id: string; key: string; permissions: string[]; access_version: string }[]>`
-        SELECT r.id, r.key, r.permissions, r.access_version::text FROM service_accounts s JOIN roles r ON r.tenant_id = s.tenant_id AND r.id = s.role_id WHERE s.id = ${id}`;
+  const m = type === "user"
+    ? await roleOfUser(tx, id)
+    : await roleOfServiceAccount(tx, id);
   return m ? contextForRole(tx, { tenantId, requestId: "automation-actor" }, m as never) : null;
 }
