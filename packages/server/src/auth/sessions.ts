@@ -7,6 +7,10 @@ import { tenantIds } from "../core/auditchain.js";
 import { safeEqual } from "../lib/crypto.js";
 import { ApiError, forbidden, notFound } from "../lib/errors.js";
 import { decodeId, encodeId, uuidv7 } from "../lib/ids.js";
+import {
+  deleteEndedSessions, enterSessionWorkspace, enterWorkspace, insertSession, liveSessionsOf, memberRole, narrowToSessionToken, recordSignIn,
+  revokeSessionOf, revokeSessionsOf, sessionByTokenHash, touchSession, type SessionRow,
+} from "./queries.js";
 import { csrfToken, isToken, newToken, tokenHash } from "./tokens.js";
 
 /**
@@ -42,14 +46,10 @@ export async function createSession(tx: Tx, m: { tenantId: string; userId: strin
   const now = Date.now();
   const expiresAt = new Date(now + absoluteMs);
   const idleExpiresAt = new Date(Math.min(now + idleMs, now + absoluteMs));
-  const [row] = await tx<{ signed_in_at: Date }[]>`
-    INSERT INTO sessions (tenant_id, id, user_id, token_hash, method, idle_expires_at, expires_at, user_agent, client_address)
-    VALUES (${m.tenantId}, ${id}, ${m.userId}, ${tokenHash(token)}, ${method}, ${idleExpiresAt}, ${expiresAt},
-            ${meta.userAgent?.slice(0, 256) ?? null}, ${meta.address?.slice(0, 64) ?? null})
-    RETURNING signed_in_at`;
+  const row = await insertSession(tx, { tenantId: m.tenantId, id, userId: m.userId, tokenHash: tokenHash(token), method, idleExpiresAt, expiresAt,
+    userAgent: meta.userAgent?.slice(0, 256) ?? null, address: meta.address?.slice(0, 64) ?? null });
   // Any successful sign-in clears the password lockout: the person has shown they control the account.
-  await tx`INSERT INTO member_credentials (tenant_id, user_id, last_sign_in_at) VALUES (${m.tenantId}, ${m.userId}, now())
-           ON CONFLICT (tenant_id, user_id) DO UPDATE SET last_sign_in_at = now(), password_failures = 0, password_locked_until = NULL`;
+  await recordSignIn(tx, m.tenantId, m.userId);
   const session = { id, signedInAt: row!.signed_in_at, method };
   await audit(tx, webCtx(m.tenantId, m.userId, m.role, meta, session), { action: "auth.signed_in", objectType: "user", recordId: m.userId, details: { method } });
   return { id, token, expiresAt, idleExpiresAt, csrfToken: csrfToken(id) };
@@ -64,20 +64,16 @@ export async function resolveSession(token: string): Promise<Principal | null> {
   if (!isToken(token)) return null;
   const hash = tokenHash(token);
   return db().begin(async (tx) => {
-    await tx`SELECT set_config('app.session_lookup', ${hash.toString("hex")}, true)`;
-    const [s] = await tx<{ tenant_id: string; id: string; user_id: string; token_hash: Buffer; method: SignInMethod; signed_in_at: Date;
-      last_seen_at: Date; idle_expires_at: Date; expires_at: Date; revoked_at: Date | null }[]>`
-      SELECT tenant_id, id, user_id, token_hash, method, signed_in_at, last_seen_at, idle_expires_at, expires_at, revoked_at
-      FROM sessions WHERE token_hash = ${hash}`;
+    await narrowToSessionToken(tx, hash.toString("hex"));
+    const s = await sessionByTokenHash(tx, hash);
     const now = Date.now();
     if (!s || !safeEqual(s.token_hash, hash) || s.revoked_at || s.expires_at.getTime() <= now || s.idle_expires_at.getTime() <= now) return null;
-    await tx`SELECT set_config('app.session_lookup', '', true), set_config('app.tenant_id', ${s.tenant_id}, true)`;
+    await enterSessionWorkspace(tx, s.tenant_id);
     const owner = await keyOwner(tx, "user", s.user_id);
     if (!owner || owner.disabled_at || owner.archived_at) return null;
     // At most once a minute, so a busy browser doesn't write on every request.
     if (now - s.last_seen_at.getTime() >= 60_000) {
-      await tx`UPDATE sessions SET last_seen_at = now(), idle_expires_at = least(now() + make_interval(secs => ${lifetimes().idleMs / 1000}), expires_at)
-               WHERE id = ${s.id}`;
+      await touchSession(tx, s.id, lifetimes().idleMs / 1000);
     }
     return {
       tenantId: s.tenant_id, keyId: null, session: { id: s.id, signedInAt: s.signed_in_at, method: s.method },
@@ -101,9 +97,6 @@ export const requireSession = (ctx: Ctx): NonNullable<Ctx["session"]> => {
   return ctx.session;
 };
 
-interface SessionRow { id: string; method: string; signed_in_at: Date; last_seen_at: Date; idle_expires_at: Date; expires_at: Date;
-  user_agent: string | null; client_address: string | null; revoked_at: Date | null; revoked_reason: string | null }
-
 const view = (r: SessionRow, currentId?: string) => ({
   id: sessionPublicId(r.id), method: r.method, signed_in_at: r.signed_in_at.toISOString(), last_seen_at: r.last_seen_at.toISOString(),
   idle_expires_at: r.idle_expires_at.toISOString(), expires_at: r.expires_at.toISOString(), user_agent: r.user_agent, client_address: r.client_address,
@@ -112,10 +105,7 @@ const view = (r: SessionRow, currentId?: string) => ({
 
 /** A member's sessions that still work, newest first. */
 export async function listSessions(tx: Tx, userId: string, currentId?: string) {
-  const rows = await tx<SessionRow[]>`
-    SELECT id, method, signed_in_at, last_seen_at, idle_expires_at, expires_at, user_agent, client_address, revoked_at, revoked_reason
-    FROM sessions WHERE user_id = ${userId} AND revoked_at IS NULL AND expires_at > now() AND idle_expires_at > now()
-    ORDER BY signed_in_at DESC LIMIT 200`;
+  const rows = await liveSessionsOf(tx, userId);
   return rows.map((r) => view(r, currentId));
 }
 
@@ -123,17 +113,14 @@ export type RevokeReason = "signed_out" | "revoked" | "revoked_by_admin" | "othe
 
 /** Revokes a member's sessions (all, or all but `exceptId`). Returns how many were still live. */
 export async function revokeUserSessions(tx: Tx, userId: string, reason: RevokeReason, exceptId?: string): Promise<number> {
-  const rows = await tx`UPDATE sessions SET revoked_at = now(), revoked_reason = ${reason}
-                        WHERE user_id = ${userId} AND revoked_at IS NULL AND expires_at > now() ${exceptId ? tx`AND id <> ${exceptId}` : tx``} RETURNING id`;
-  return rows.length;
+  return revokeSessionsOf(tx, userId, reason, exceptId);
 }
 
 /** Revokes one of `userId`'s sessions by public ID. Not found for anyone else's (or an unknown) session. */
 export async function revokeOne(tx: Tx, ctx: Ctx, userId: string, publicId: string, reason: RevokeReason) {
   const d = decodeId(publicId);
   if (!d || d.prefix !== "ses") throw notFound("Session");
-  const [row] = await tx<{ id: string }[]>`UPDATE sessions SET revoked_at = coalesce(revoked_at, now()), revoked_reason = coalesce(revoked_reason, ${reason})
-                                           WHERE id = ${d.uuid} AND user_id = ${userId} RETURNING id`;
+  const row = await revokeSessionOf(tx, d.uuid, userId, reason);
   if (!row) throw notFound("Session");
   await audit(tx, ctx, { action: reason === "signed_out" ? "auth.signed_out" : "auth.session_revoked", objectType: "user", recordId: userId,
     details: { revoked_session: publicId, reason } });
@@ -148,8 +135,7 @@ export async function revokeOne(tx: Tx, ctx: Ctx, userId: string, publicId: stri
  */
 export async function assertMayManageSignInOf(tx: Tx, ctx: Ctx, userId: string) {
   if (!can(ctx, "members:manage")) throw forbidden("Managing other members' sign-in needs the members:manage permission");
-  const [m] = await tx<{ role: string; permissions: string[] }[]>`
-    SELECT r.key AS role, r.permissions FROM users u JOIN roles r ON r.tenant_id = u.tenant_id AND r.id = u.role_id WHERE u.id = ${userId}`;
+  const m = await memberRole(tx, userId);
   if (!m) throw notFound("Member");
   if (ctx.actor.type === "user" && ctx.actor.id === userId) return;
   if (m.role === OWNER_ROLE && ctx.actor.role !== OWNER_ROLE) throw forbidden("Only an owner can see or change an owner's sign-in");
@@ -162,9 +148,8 @@ export async function pruneSessions(): Promise<number> {
   let n = 0;
   for (const t of await tenantIds(db())) {
     n += await db().begin(async (tx) => {
-      await tx`SELECT set_config('app.tenant_id', ${t}, true)`;
-      const rows = await tx`DELETE FROM sessions WHERE least(expires_at, idle_expires_at, coalesce(revoked_at, 'infinity')) < now() - interval '1 day' RETURNING 1`;
-      return rows.length;
+      await enterWorkspace(tx, t);
+      return deleteEndedSessions(tx);
     }) as number;
   }
   return n;

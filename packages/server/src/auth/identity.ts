@@ -1,6 +1,7 @@
 import { db } from "../db/pool.js";
 import { withTenant } from "../db/tx.js";
 import { encodeId } from "../lib/ids.js";
+import { identityMembers, narrowToIdentity, signInMember } from "./queries.js";
 
 /**
  * Finding a person's memberships before any workspace is known (ADR 0009). Members are rows per
@@ -48,10 +49,8 @@ export async function lookupIdentity(kind: "email" | "oidc", value: string, tena
   const v = kind === "email" ? canonicalEmail(value) : value;
   if (!v || v.length > 800) return { candidates: [], more: false };
   return db().begin(async (tx) => {
-    await tx`SELECT set_config('app.identity_kind', ${kind}, true), set_config('app.identity_lookup', ${v}, true)`;
-    const rows = await tx<{ tenant_id: string; user_id: string }[]>`
-      SELECT tenant_id, user_id FROM sign_in_identities WHERE kind = ${kind} AND value = ${v} ${tenant ? tx`AND tenant_id = ${tenant}` : tx``}
-      ORDER BY address IS NOT DISTINCT FROM ${kind === "email" ? value.trim() : null} DESC, tenant_id, user_id LIMIT ${MAX_CANDIDATES + 1}`;
+    await narrowToIdentity(tx, kind, v);
+    const rows = await identityMembers(tx, { kind, value: v, tenant, exactAddress: kind === "email" ? value.trim() : null, limit: MAX_CANDIDATES + 1 });
     return { candidates: rows.slice(0, MAX_CANDIDATES).map((r) => ({ t: r.tenant_id, u: r.user_id })), more: rows.length > MAX_CANDIDATES };
   }) as Promise<{ candidates: Candidate[]; more: boolean }>;
 }
@@ -80,16 +79,7 @@ export async function activeMemberships(candidates: Candidate[]): Promise<Member
   for (const c of candidates.slice(0, MAX_CANDIDATES)) {
     if (seen.has(`${c.t}:${c.u}`)) continue;
     seen.add(`${c.t}:${c.u}`);
-    const m = await withTenant(c.t, async (tx) => {
-      const [r] = await tx<{ email: string; name: string; role: string; workspace: string; password_sign_in: boolean; password_hash: string | null;
-        sso_sign_in: boolean; sso_allowed_domains: string[]; oidc_issuer: string | null; oidc_subject: string | null }[]>`
-        SELECT u.email::text, u.name, r.key AS role, t.name AS workspace, t.password_sign_in, c.password_hash, t.sso_sign_in, t.sso_allowed_domains,
-               c.oidc_issuer, c.oidc_subject
-        FROM users u JOIN roles r ON r.tenant_id = u.tenant_id AND r.id = u.role_id CROSS JOIN tenants t
-        LEFT JOIN member_credentials c ON c.tenant_id = u.tenant_id AND c.user_id = u.id
-        WHERE u.id = ${c.u} AND u.disabled_at IS NULL AND r.archived_at IS NULL`;
-      return r;
-    });
+    const m = await withTenant(c.t, (tx) => signInMember(tx, c.u));
     if (!m) continue;
     out.push({
       tenantId: c.t, userId: c.u, workspace: { id: encodeId("ws", c.t), name: m.workspace }, email: m.email, name: m.name, role: m.role,
