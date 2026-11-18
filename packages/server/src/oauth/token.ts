@@ -11,6 +11,11 @@ import { resourceFor } from "./authorize.js";
 import { LIMITS, hit } from "../auth/limits.js";
 import { keyOwner, memberAccess, type Owner } from "../core/keys.js";
 import { createGrant, grantPublicId, issueTokens, oauthCtx, revokeGrant, tokenScopes } from "./grants.js";
+import {
+  codeForUpdate, codeLocation, grantForUpdate, grantMemberAndClient, markCodeUsed, markGrantUsed, markTokenRevoked, markTokenUsed, narrowToAssertion,
+  narrowToSecretLookup, recordAssertion, refreshTokenForUpdate, sessionStillValid, setCodeGrant, tokenForRevocation, tokenLocation, workspaceAllowsApps,
+  workspaceOAuthScopes,
+} from "./queries.js";
 import { ACCESS_TOKEN_PATTERN, CODE_PATTERN, REFRESH_TOKEN_PATTERN, expandScopes, isScope, secretHash } from "./scopes.js";
 
 /**
@@ -137,8 +142,8 @@ async function verifyAssertion(client: Client, assertion: string, caller: string
   if (typeof payload.jti !== "string" || payload.jti.length > 200) throw new TokenError("invalid_client", "The client assertion needs a jti", 401);
   const jti = sha256(`${client.clientId}\n${payload.jti}`);
   const fresh = await db().begin(async (tx) => {
-    await tx`SELECT set_config('app.oauth_jti', ${jti.toString("hex")}, true)`;
-    return (await tx`INSERT INTO oauth_assertions (jti_hash, expires_at) VALUES (${jti}, ${new Date(exp + 60_000)}) ON CONFLICT DO NOTHING RETURNING 1`).length > 0;
+    await narrowToAssertion(tx, jti.toString("hex"));
+    return recordAssertion(tx, jti, new Date(exp + 60_000));
   });
   if (!fresh) throw new TokenError("invalid_client", "This client assertion was already used", 401);
 }
@@ -160,7 +165,7 @@ function chargeProven(client: Client, tenantId: string, meta: Meta): void {
 
 /** The scopes a new token can use now, as its MCP requests will compute them (grants.ts tokenScopes, then the role): what the response reports. */
 async function effectiveScope(tx: Tx, tenantId: string, owner: Owner, asked: string[] | null, granted: string[]): Promise<string> {
-  const [w] = await tx<{ oauth_scopes: string[] }[]>`SELECT oauth_scopes FROM tenants`;
+  const w = await workspaceOAuthScopes(tx);
   const access = await memberAccess(tx, tenantId, owner, tokenScopes(asked, granted, w?.oauth_scopes ?? []));
   return expandScopes(access.scopes).join(" ");
 }
@@ -168,16 +173,15 @@ async function effectiveScope(tx: Tx, tenantId: string, owner: Owner, asked: str
 /** Finds which workspace a code or token hash belongs to, through its lookup policy. */
 async function lookupTenant(setting: "app.oauth_code_lookup" | "app.oauth_token_lookup", table: "oauth_codes" | "oauth_tokens", hash: Buffer) {
   return db().begin(async (tx) => {
-    await tx`SELECT set_config(${setting}, ${hash.toString("hex")}, true)`;
-    const [row] = table === "oauth_codes" ? await tx<{ tenant_id: string; id: string }[]>`SELECT tenant_id, id FROM oauth_codes WHERE code_hash = ${hash}`
-      : await tx<{ tenant_id: string; id: string }[]>`SELECT tenant_id, id FROM oauth_tokens WHERE token_hash = ${hash}`;
+    await narrowToSecretLookup(tx, setting, hash.toString("hex"));
+    const row = table === "oauth_codes" ? await codeLocation(tx, hash) : await tokenLocation(tx, hash);
     return row ?? null;
   }) as Promise<{ tenant_id: string; id: string } | null>;
 }
 
 /** The member still active and the workspace still allowing apps, in the workspace's transaction. */
 async function stillAllowed(tx: Tx, userId: string) {
-  const [w] = await tx<{ oauth_apps: boolean }[]>`SELECT oauth_apps FROM tenants`;
+  const w = await workspaceAllowsApps(tx);
   const owner = await keyOwner(tx, "user", userId);
   return w?.oauth_apps && owner && !owner.disabled_at && !owner.archived_at ? { role: owner.role, owner } : null;
 }
@@ -194,10 +198,7 @@ export async function exchangeCode(client: Client, f: Fields, meta: Meta): Promi
   if (!found) throw invalidGrant("The code is not valid, has expired or was already used");
   chargeProven(client, found.tenant_id, meta);
   const outcome = await withTenant(found.tenant_id, async (tx) => {
-    const [c] = await tx<{ id: string; code_hash: Buffer; user_id: string; session_id: string; client_id: string; client_name: string; client_kind: string;
-      redirect_uri: string; code_challenge: string; resource: string; scopes: string[]; expires_at: Date; used_at: Date | null; grant_id: string | null }[]>`
-      SELECT id, code_hash, user_id, session_id, client_id, client_name, client_kind, redirect_uri, code_challenge, resource, scopes, expires_at, used_at, grant_id
-      FROM oauth_codes WHERE id = ${found.id} FOR UPDATE`;
+    const c = await codeForUpdate(tx, found.id);
     if (!c || !safeEqual(c.code_hash, hash)) return { error: invalidGrant("The code is not valid") };
     if (c.used_at) {
       // A code used twice was intercepted, or replayed: whatever the first use got is revoked (RFC 9700 §4.5).
@@ -214,16 +215,15 @@ export async function exchangeCode(client: Client, f: Fields, meta: Meta): Promi
     const computed = Buffer.from(sha256(f.code_verifier!).toString("base64url"));
     if (!safeEqual(computed, Buffer.from(c.code_challenge))) return { error: invalidGrant("code_verifier doesn't match the code_challenge") };
     if (resource && oauthSettings()!.resources[resource] !== c.resource) return { error: new TokenError("invalid_target", "resource doesn't match the authorization request") };
-    const [s] = await tx<{ ok: boolean }[]>`SELECT revoked_at IS NULL AND expires_at > now() AND idle_expires_at > now() AS ok FROM sessions WHERE id = ${c.session_id}`;
+    const s = await sessionStillValid(tx, c.session_id);
     const member = await stillAllowed(tx, c.user_id);
     // The person who approved signed out (or was signed out) before the app redeemed the code.
     if (!s?.ok || !member) return { error: invalidGrant("The approval is no longer valid; connect again") };
-    const used = await tx`UPDATE oauth_codes SET used_at = now() WHERE id = ${c.id} AND used_at IS NULL RETURNING 1`;
-    if (!used.length) return { error: invalidGrant("The code was already used") };
+    if (!(await markCodeUsed(tx, c.id))) return { error: invalidGrant("The code was already used") };
     const ctx = { ...oauthCtx(found.tenant_id, c.user_id, member.role, meta.requestId, { id: "", clientId: c.client_id }) };
     const grant = await createGrant(tx, ctx, { userId: c.user_id, sessionId: c.session_id, clientId: c.client_id, clientName: c.client_name, clientKind: c.client_kind,
       redirectUri: c.redirect_uri, scopes: c.scopes, resource: c.resource });
-    await tx`UPDATE oauth_codes SET grant_id = ${grant.id} WHERE id = ${c.id}`;
+    await setCodeGrant(tx, c.id, grant.id);
     const tokens = await issueTokens(tx, found.tenant_id, grant, null);
     await audit(tx, { ...ctx, oauth: { grantId: grant.id, clientId: c.client_id } }, { action: "oauth.token_issued", objectType: "user", recordId: c.user_id,
       details: { grant: grantPublicId(grant.id), client_id: c.client_id, scopes: c.scopes, resource: c.resource, ...(grant.replaced.length ? { replaced: grant.replaced } : {}) } });
@@ -246,11 +246,9 @@ export async function refresh(client: Client, f: Fields, meta: Meta): Promise<To
   if (!found) throw invalidGrant("The refresh token is not valid or has expired");
   chargeProven(client, found.tenant_id, meta);
   const outcome = await withTenant(found.tenant_id, async (tx) => {
-    const [t] = await tx<{ grant_id: string; kind: string; token_hash: Buffer; expires_at: Date; used_at: Date | null; revoked_at: Date | null }[]>`
-      SELECT grant_id, kind, token_hash, expires_at, used_at, revoked_at FROM oauth_tokens WHERE id = ${found.id} FOR UPDATE`;
+    const t = await refreshTokenForUpdate(tx, found.id);
     if (!t || t.kind !== "refresh" || !safeEqual(t.token_hash, hash)) return { error: invalidGrant("The refresh token is not valid") };
-    const [g] = await tx<{ id: string; user_id: string; client_id: string; scopes: string[]; resource: string; expires_at: Date; revoked_at: Date | null }[]>`
-      SELECT id, user_id, client_id, scopes, resource, expires_at, revoked_at FROM oauth_grants WHERE id = ${t.grant_id} FOR UPDATE`;
+    const g = await grantForUpdate(tx, t.grant_id);
     if (!g) return { error: invalidGrant("The refresh token is not valid") };
     // Another client presenting this token learns nothing and changes nothing.
     if (g.client_id !== client.clientId) return { error: invalidGrant("The refresh token was issued to another client") };
@@ -270,8 +268,8 @@ export async function refresh(client: Client, f: Fields, meta: Meta): Promise<To
     if (asked && asked.some((s) => !held.has(s as Scope))) return { error: new TokenError("invalid_scope", "A refresh can't add scopes; approve the app again for more") };
     const member = await stillAllowed(tx, g.user_id);
     if (!member) return { error: invalidGrant("The refresh token has expired or was revoked") };
-    await tx`UPDATE oauth_tokens SET used_at = now() WHERE id = ${found.id}`;
-    await tx`UPDATE oauth_grants SET last_used_at = now() WHERE id = ${g.id}`;
+    await markTokenUsed(tx, found.id);
+    await markGrantUsed(tx, g.id);
     const scopes = asked ? expandScopes(asked).filter((s) => asked.includes(s)) : null;
     const tokens = await issueTokens(tx, found.tenant_id, g, scopes);
     await audit(tx, oauthCtx(found.tenant_id, g.user_id, member.role, meta.requestId, { id: g.id, clientId: g.client_id }),
@@ -295,13 +293,12 @@ export async function revokeToken(client: Client, f: Fields, meta: Meta): Promis
   const found = await lookupTenant("app.oauth_token_lookup", "oauth_tokens", hash);
   if (!found) return;
   await withTenant(found.tenant_id, async (tx) => {
-    const [t] = await tx<{ grant_id: string; kind: string; token_hash: Buffer; revoked_at: Date | null }[]>`
-      SELECT grant_id, kind, token_hash, revoked_at FROM oauth_tokens WHERE id = ${found.id} FOR UPDATE`;
+    const t = await tokenForRevocation(tx, found.id);
     if (!t || !safeEqual(t.token_hash, hash)) return;
-    const [g] = await tx<{ user_id: string; client_id: string }[]>`SELECT user_id, client_id FROM oauth_grants WHERE id = ${t.grant_id}`;
+    const g = await grantMemberAndClient(tx, t.grant_id);
     if (!g || g.client_id !== client.clientId) return;
     const changed = t.kind === "refresh" ? await revokeGrant(tx, t.grant_id, "revoked")
-      : (await tx`UPDATE oauth_tokens SET revoked_at = now() WHERE id = ${found.id} AND revoked_at IS NULL RETURNING 1`).length > 0;
+      : await markTokenRevoked(tx, found.id);
     if (!changed) return;
     const owner = await keyOwner(tx, "user", g.user_id);
     await audit(tx, oauthCtx(found.tenant_id, g.user_id, owner?.role ?? "member", meta.requestId, { id: t.grant_id, clientId: g.client_id }),

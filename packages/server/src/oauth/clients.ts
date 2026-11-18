@@ -5,6 +5,11 @@ import { logger } from "../lib/logger.js";
 import { BlockedTargetError, checkUrl, safeRequest, type FetchResult } from "../lib/outbound.js";
 import { config } from "../config.js";
 import { LIMITS, hit } from "../auth/limits.js";
+import {
+  allowClientPrune, clientExists, countHostDocuments, countLiveDocuments, countLiveRegistrations, deleteExpiredAssertions, deleteExpiredDocuments,
+  deleteLapsedClients, evictLeastRecentDocument, evictOldestUnusedRegistration, insertRegistration, markClientUsed, narrowToClient, openClientRegistry,
+  storedClientRow, upsertDocument, type ClientRow,
+} from "./queries.js";
 
 /**
  * OAuth clients (ADR 0010). Two kinds, and no allowlist: any client that registers or presents a
@@ -104,24 +109,19 @@ export const redirectHost = (uri: string): string => {
 
 // --- Database --------------------------------------------------------------------------------------
 
-interface ClientRow { client_id: string; kind: Client["kind"]; client_name: string; client_uri: string | null; redirect_uris: string[];
-  application_type: Client["applicationType"]; token_endpoint_auth_method: Client["authMethod"]; jwks_uri: string | null; expires_at: Date }
-
 const fromRow = (r: ClientRow, stored = true): Client => ({ clientId: r.client_id, kind: r.kind, name: r.client_name, clientUri: r.client_uri, redirectUris: r.redirect_uris,
   applicationType: r.application_type, authMethod: r.token_endpoint_auth_method, jwksUri: r.jwks_uri, stored });
 
 /** A transaction that sees only the client named (the client_lookup policy). */
 function withClient<T>(clientId: string, fn: (tx: Tx) => Promise<T>): Promise<T> {
   return db().begin(async (tx) => {
-    await tx`SELECT set_config('app.oauth_client', ${clientId}, true)`;
+    await narrowToClient(tx, clientId);
     return fn(tx);
   }) as Promise<T>;
 }
 
 async function storedClient(clientId: string): Promise<ClientRow | null> {
-  return withClient(clientId, async (tx) => (await tx<ClientRow[]>`
-    SELECT client_id, kind, client_name, client_uri, redirect_uris, application_type, token_endpoint_auth_method, jwks_uri, expires_at
-    FROM oauth_clients WHERE client_id = ${clientId}`)[0] ?? null);
+  return withClient(clientId, (tx) => storedClientRow(tx, clientId));
 }
 
 /**
@@ -145,9 +145,7 @@ export async function resolveClient(clientId: unknown, opts: { allowStale?: bool
 /** Records that a client was used for a grant: a registration then lives at least as long as its refresh tokens can. */
 export async function touchClient(clientId: string): Promise<void> {
   const days = config().OAUTH_REFRESH_TOKEN_DAYS + 1;
-  await withClient(clientId, (tx) => tx`UPDATE oauth_clients SET last_used_at = now(),
-    expires_at = CASE WHEN kind = 'registered' THEN greatest(expires_at, now() + make_interval(days => ${days})) ELSE expires_at END
-    WHERE client_id = ${clientId}`);
+  await withClient(clientId, (tx) => markClientUsed(tx, clientId, days));
 }
 
 // --- Client ID metadata documents ----------------------------------------------------------------
@@ -412,31 +410,23 @@ export function parseDocument(url: string, doc: unknown): Client | string {
 async function cacheDocument(c: Client, seconds: number): Promise<void> {
   try {
     await db().begin(async (tx) => {
-      await tx`SELECT set_config('app.oauth_registry', 'on', true), set_config('app.oauth_client', ${c.clientId}, true)`;
-      const [exists] = await tx`SELECT 1 FROM oauth_clients WHERE client_id = ${c.clientId}`;
+      await openClientRegistry(tx, c.clientId);
+      const exists = await clientExists(tx, c.clientId);
       if (!exists) {
         const prefix = `${new URL(c.clientId).origin}/`;
-        const lru = (sameHost: boolean) => tx`DELETE FROM oauth_clients WHERE id IN (SELECT id FROM oauth_clients WHERE kind = 'metadata_document'
-          ${sameHost ? tx`AND starts_with(client_id, ${prefix})` : tx``} ORDER BY expires_at <= now() DESC, coalesce(last_used_at, created_at) LIMIT 1)`;
-        const [host] = await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM oauth_clients WHERE kind = 'metadata_document' AND starts_with(client_id, ${prefix})`;
-        if (host!.n >= MAX_DOCUMENTS_PER_HOST) await lru(true);
+        const lru = (sameHost: boolean) => evictLeastRecentDocument(tx, sameHost ? prefix : null);
+        const host = await countHostDocuments(tx, prefix);
+        if (host >= MAX_DOCUMENTS_PER_HOST) await lru(true);
         else {
-          const [all] = await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM oauth_clients WHERE kind = 'metadata_document' AND expires_at > now()`;
-          if (all!.n >= MAX_CACHED_DOCUMENTS) {
-            const expired = await tx`DELETE FROM oauth_clients WHERE id IN (SELECT id FROM oauth_clients WHERE kind = 'metadata_document' AND expires_at <= now()
-              ORDER BY expires_at LIMIT 100) RETURNING 1`;
-            if (!expired.length) await lru(false);
-            logger.warn({ event: "oauth_client_cache_full", evicted: expired.length || 1 }, "client document cache full; made room");
+          const all = await countLiveDocuments(tx);
+          if (all >= MAX_CACHED_DOCUMENTS) {
+            const expired = await deleteExpiredDocuments(tx);
+            if (!expired) await lru(false);
+            logger.warn({ event: "oauth_client_cache_full", evicted: expired || 1 }, "client document cache full; made room");
           }
         }
       }
-      await tx`INSERT INTO oauth_clients (id, client_id, kind, client_name, client_uri, redirect_uris, application_type, token_endpoint_auth_method, jwks_uri, expires_at)
-               VALUES (${uuidv7()}, ${c.clientId}, 'metadata_document', ${c.name}, ${c.clientUri}, ${c.redirectUris}, ${c.applicationType}, ${c.authMethod},
-                       ${c.jwksUri}, now() + make_interval(secs => ${seconds}))
-               ON CONFLICT (client_id) DO UPDATE SET client_name = EXCLUDED.client_name, client_uri = EXCLUDED.client_uri, redirect_uris = EXCLUDED.redirect_uris,
-                 application_type = EXCLUDED.application_type, token_endpoint_auth_method = EXCLUDED.token_endpoint_auth_method, jwks_uri = EXCLUDED.jwks_uri,
-                 expires_at = EXCLUDED.expires_at
-               WHERE oauth_clients.kind = 'metadata_document'`;
+      await upsertDocument(tx, uuidv7(), c, seconds);
     });
   } catch (e) {
     logger.warn({ event: "oauth_client_cache_failed", err: (e as Error).message }, "could not cache a client metadata document");
@@ -509,20 +499,14 @@ export async function registerClient(body: unknown): Promise<Client & { issuedAt
   const id = uuidv7();
   const clientId = encodeId("oac", id);
   const issuedAt = await db().begin(async (tx) => {
-    await tx`SELECT set_config('app.oauth_registry', 'on', true), set_config('app.oauth_client', ${clientId}, true)`;
-    const [count] = await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM oauth_clients WHERE kind = 'registered' AND expires_at > now()`;
-    if (count!.n >= MAX_REGISTRATIONS) {
-      const evicted = await tx`DELETE FROM oauth_clients WHERE id IN (SELECT id FROM oauth_clients WHERE kind = 'registered' AND last_used_at IS NULL
-        AND created_at < now() - make_interval(mins => ${EVICT_AFTER_MINUTES}) ORDER BY created_at LIMIT 1) RETURNING 1`;
-      if (!evicted.length) throw new ClientError("temporarily_unavailable", "This server has as many registered apps as it keeps; try again later");
+    await openClientRegistry(tx, clientId);
+    const count = await countLiveRegistrations(tx);
+    if (count >= MAX_REGISTRATIONS) {
+      const evicted = await evictOldestUnusedRegistration(tx, EVICT_AFTER_MINUTES);
+      if (!evicted) throw new ClientError("temporarily_unavailable", "This server has as many registered apps as it keeps; try again later");
       logger.warn({ event: "oauth_registry_full" }, "client registry full; the oldest unused registration was removed");
     }
-    const [row] = await tx<{ created_at: Date }[]>`
-      INSERT INTO oauth_clients (id, client_id, kind, client_name, client_uri, redirect_uris, application_type, token_endpoint_auth_method, expires_at)
-      VALUES (${id}, ${clientId}, 'registered', ${name}, ${clientUri}, ${redirectUris}, ${applicationType}, 'none',
-              now() + make_interval(hours => ${UNUSED_REGISTRATION_HOURS}))
-      RETURNING created_at`;
-    return row!.created_at;
+    return insertRegistration(tx, { id, clientId, name, clientUri, redirectUris, applicationType, hours: UNUSED_REGISTRATION_HOURS });
   }) as Date;
   return { clientId, kind: "registered", name, clientUri, redirectUris, applicationType, authMethod: "none", jwksUri: null, issuedAt };
 }
@@ -530,9 +514,9 @@ export async function registerClient(body: unknown): Promise<Client & { issuedAt
 /** Deletes lapsed registrations, stale cached documents and used assertion IDs. The worker runs this hourly. */
 export async function pruneClients(): Promise<number> {
   return db().begin(async (tx) => {
-    await tx`SELECT set_config('app.oauth_prune', 'on', true)`;
-    const a = await tx`DELETE FROM oauth_clients WHERE expires_at < now() - CASE WHEN kind = 'registered' THEN interval '0' ELSE interval '1 day' END RETURNING 1`;
-    const b = await tx`DELETE FROM oauth_assertions WHERE expires_at < now() RETURNING 1`;
-    return a.length + b.length;
+    await allowClientPrune(tx);
+    const a = await deleteLapsedClients(tx);
+    const b = await deleteExpiredAssertions(tx);
+    return a + b;
   }) as Promise<number>;
 }
