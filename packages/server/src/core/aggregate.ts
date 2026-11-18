@@ -8,6 +8,7 @@ import type { Ctx } from "./context.js";
 import { Compiler, targetFor, type Where } from "./query.js";
 import { fetchRows, serialize } from "./records.js";
 import { getObject, loadSchema, quoteIdent, type FieldMeta, type ObjectMeta, type Schema } from "./schema.js";
+import { aggregateRows, entityNames } from "./queries/records.js";
 
 /**
  * Counts and totals per group, for boards and summaries. One SQL statement does the grouping, under the
@@ -182,7 +183,7 @@ export async function aggregate(tx: Tx, ctx: Ctx, input: AggregateInput) {
 
   let rows: Record<string, unknown>[];
   try {
-    rows = await tx.unsafe<Record<string, unknown>[]>(text, c.params as never[]);
+    rows = await aggregateRows(tx, text, c.params);
   } catch (e) {
     if (typeof (e as { code?: string }).code === "string" && (e as { code: string }).code.startsWith("22")) throw unprocessable("A filter value is not valid for its field");
     throw e;
@@ -240,7 +241,7 @@ async function keyNames(tx: Tx, ctx: Ctx, schema: Schema, fields: FieldMeta[], r
     const to = f.options.to!;
     if (isEntity(to)) {
       if (!uuids.length) continue;
-      const found = await tx.unsafe<{ id: string; name: string }[]>(`SELECT id, name FROM ${quoteIdent(ENTITIES[to].table)} WHERE id = ANY($1::uuid[])`, [uuids]);
+      const found = await entityNames(tx, ENTITIES[to].table, uuids);
       for (const r of found) out.set(encodeId(ENTITIES[to].prefix, r.id), r.name);
       continue;
     }
