@@ -5,7 +5,8 @@ import YAML from "yaml";
 import type { Context } from "../context.js";
 import { CliError, EXIT, usage } from "../errors.js";
 import { clean, type Out } from "../output.js";
-import { PACK_TEMPLATE, readPack, summarize, type PackPayload } from "../packfile.js";
+import { packTemplate, readPack, summarize, type PackPayload } from "../packfile.js";
+import { SHORT_NUMBER } from "../patterns.js";
 import type { Act } from "../program.js";
 import { describeChange, type SchemaDoc } from "../schemafile.js";
 
@@ -114,7 +115,7 @@ function configOnly(where: unknown, fields: Map<string, FieldInfo>, depth = 0): 
   return values.every((v) => {
     if (["single_select", "multi_select", "status"].includes(f.type)) return typeof v === "string" && f.keys.includes(v);
     if (f.type === "boolean") return v === true || v === false || v === "true" || v === "false";
-    if (f.type === "rating") return (typeof v === "number" || (typeof v === "string" && /^\d{1,2}$/.test(v))) && Number.isInteger(Number(v)) && Number(v) >= 1 && Number(v) <= f.max;
+    if (f.type === "rating") return (typeof v === "number" || (typeof v === "string" && SHORT_NUMBER.test(v))) && Number.isInteger(Number(v)) && Number(v) >= 1 && Number(v) <= f.max;
     return false;
   });
 }
@@ -209,9 +210,10 @@ export function registerPack(program: Command, act: Act, collect: (v: string, p?
     .action(act(async (ctx, dir: string) => {
       if (existsSync(dir) && readdirSync(dir).length) throw usage(`${dir} exists and is not empty`);
       mkdirSync(dir, { recursive: true });
-      for (const [file, text] of Object.entries(PACK_TEMPLATE)) writeFileSync(join(dir, file), text, { flag: "wx" });
-      if (ctx.g.json) return ctx.out.data({ dir, files: Object.keys(PACK_TEMPLATE) });
-      ctx.out.line(`Wrote ${Object.keys(PACK_TEMPLATE).join(", ")} to ${dir}. Edit them, then: crm pack validate ${dir} and crm pack plan ${dir}`);
+      const template = packTemplate();
+      for (const [file, text] of Object.entries(template)) writeFileSync(join(dir, file), text, { flag: "wx" });
+      if (ctx.g.json) return ctx.out.data({ dir, files: Object.keys(template) });
+      ctx.out.line(`Wrote ${Object.keys(template).join(", ")} to ${dir}. Edit them, then: crm pack validate ${dir} and crm pack plan ${dir}`);
     }));
 
   pack.command("validate <dir>")

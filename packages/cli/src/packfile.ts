@@ -1,7 +1,8 @@
-import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync } from "node:fs";
 import { join } from "node:path";
 import YAML from "yaml";
 import { CliError, EXIT } from "./errors.js";
+import { PACK_NAME, PACK_VERSION } from "./patterns.js";
 
 /**
  * Reading schema packs from disk (docs/packs.md). A pack is a folder holding pack.yaml (the manifest) and
@@ -132,8 +133,8 @@ export function readPack(path: string): PackPayload {
 /** The checks that need no server: the manifest's shape, and that it lists exactly the parts the pack holds. */
 export function checkPack(p: PackPayload): void {
   const m = p.manifest;
-  if (typeof m.name !== "string" || !/^[a-z][a-z0-9-]{1,62}$/.test(m.name)) throw invalid("name must be 2 to 63 lowercase letters, digits and hyphens");
-  if (typeof m.version !== "string" || !/^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(m.version)) throw invalid("version must be MAJOR.MINOR.PATCH, e.g. 1.0.0");
+  if (typeof m.name !== "string" || !PACK_NAME.test(m.name)) throw invalid("name must be 2 to 63 lowercase letters, digits and hyphens");
+  if (typeof m.version !== "string" || !PACK_VERSION.test(m.version)) throw invalid("version must be MAJOR.MINOR.PATCH, e.g. 1.0.0");
   if (!Array.isArray(m.parts) || m.parts.length === 0) throw invalid("parts must list what the pack holds: schema, roles, views");
   for (const part of m.parts as unknown[]) {
     if (part === "automations") throw invalid("Packs can't carry automations in this version");
@@ -157,38 +158,10 @@ export function summarize(p: PackPayload): Record<string, number> {
   };
 }
 
-export const PACK_TEMPLATE = {
-  "pack.yaml": `# A schema pack: a manifest and the parts it lists. Format and safety notes: docs/packs.md
-name: my-pack
-version: 0.1.0
-description: What this pack sets up, in a sentence.
-min_server_version: 0.1.0
-modules: [core]
-parts: [schema, views]
-license: MIT
-`,
-  "schema.yaml": `# The schema document format (docs/cli.md), without IDs: objects, their fields, and pipelines.
-objects:
-  - name: project
-    label: Project
-    plural_label: Projects
-    id_prefix: proj
-    display_field: name
-    owned: true
-    fields:
-      - { name: name, type: text, required: true }
-      - { name: client, type: relation, relation: { to: account } }
-      - { name: site, type: address }
-      - { name: progress, type: percent }
-      - { name: estimate, type: duration }
-      - { name: health, type: rating, max: 5 }
-`,
-  "views.yaml": `# Shared views, by object and name.
-views:
-  - name: Healthy projects
-    object: project
-    where: { field: health, op: gte, value: 4 }
-    sort: [{ field: progress, dir: desc }]
-    columns: [name, client, progress, health]
-`,
-} as const;
+const TEMPLATE_DIR = new URL("../templates/pack/", import.meta.url);
+const TEMPLATE_FILES = ["pack.yaml", "schema.yaml", "views.yaml"] as const;
+
+/** The example pack `crm pack init` writes: the files in templates/pack, by name. */
+export function packTemplate(): Record<string, string> {
+  return Object.fromEntries(TEMPLATE_FILES.map((name) => [name, readFileSync(new URL(name, TEMPLATE_DIR), "utf8")]));
+}

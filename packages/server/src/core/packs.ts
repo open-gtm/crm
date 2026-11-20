@@ -72,7 +72,12 @@ export interface PackView { name: string; object: string; where?: Where; sort?: 
 export interface Pack { manifest: PackManifest; schema?: { objects?: DocObject[]; pipelines?: DocPipeline[] }; roles?: PackRole[]; views?: PackView[] }
 
 /** Bounds on what one pack can ask for, so a hostile pack can't make one request do unbounded work. */
-export const PACK_LIMITS = { objects: 30, fieldsPerObject: 100, fields: 600, pipelines: 5, roles: 20, views: 50, description: 1_000 } as const;
+export const PACK_LIMITS = {
+  objects: 30, fieldsPerObject: 100, fields: 600, pipelines: 5, stagesPerPipeline: 30, roles: 20, views: 50,
+  description: 1_000, version: 20, license: 100, modules: 10, module: 20, parts: 5, part: 20, idPrefix: 8,
+  roleKey: 40, roleName: 100, permissionsPerRole: 20, permission: 40,
+  viewName: 100, viewSortKeys: 3, viewColumns: 100, viewGroupKeys: 2,
+} as const;
 /**
  * What a pack's roles may grant: record work and shared views. Roles that manage members, keys, roles,
  * webhooks, automations, alerts, the schema or the audit log are a workspace's own decision, not a pack's.
@@ -142,7 +147,7 @@ export function validatePack(pack: Pack): void {
   if (typeof m.name !== "string" || !NAME.test(m.name)) throw unprocessable("manifest.name must be 2 to 63 lowercase letters, digits and hyphens, starting with a letter");
   if (typeof m.version !== "string" || !SEMVER.test(m.version)) throw unprocessable("manifest.version must be MAJOR.MINOR.PATCH, e.g. 1.0.0");
   plainText(m.description, "manifest.description", PACK_LIMITS.description);
-  plainText(m.license, "manifest.license", 100);
+  plainText(m.license, "manifest.license", PACK_LIMITS.license);
   if (m.min_server_version !== undefined) {
     if (!SEMVER.test(m.min_server_version)) throw unprocessable("manifest.min_server_version must be MAJOR.MINOR.PATCH");
     if (SEMVER.test(SERVER_VERSION) && compareVersions(SERVER_VERSION, m.min_server_version) < 0) {

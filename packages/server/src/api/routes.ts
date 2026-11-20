@@ -23,6 +23,7 @@ import { memberName } from "../auth/queries.js";
 import { requireRecentSignIn } from "../auth/sessions.js";
 import { invitationUnavailable, reserveInvitation, sendInvitation } from "../auth/signin.js";
 import { encodeId } from "../lib/ids.js";
+import { TEXT_MAX } from "../lib/limits.js";
 import { SERVER_VERSION } from "../lib/version.js";
 import { route } from "./registry.js";
 import { createdOrDry, data, dataList, enumOf, list, nullable, object, plain, R, ref, S, secretOmitted } from "./responses.js";
@@ -36,7 +37,7 @@ const FieldInput = z.object({
   api_name: z.string(),
   label: z.string().optional(),
   type: FieldType,
-  description: z.string().max(2000).optional(),
+  description: z.string().max(TEXT_MAX.description).optional(),
   required: z.boolean().optional(),
   unique: z.boolean().optional(),
   default: z.unknown().optional(),
@@ -181,7 +182,7 @@ route({
   method: "POST", path: "/v1/objects", scope: "admin", tag: "schema", summary: "Create a custom object, with its fields",
   response: createdOrDry(),
   body: DryRun.extend({
-    api_name: z.string(), label: z.string().optional(), plural_label: z.string().optional(), description: z.string().max(2000).optional(),
+    api_name: z.string(), label: z.string().optional(), plural_label: z.string().optional(), description: z.string().max(TEXT_MAX.description).optional(),
     id_prefix: z.string().optional(), display_field: z.string().optional(), owned: z.boolean().optional(),
     fields: z.array(FieldInput).max(200).optional(),
   }),

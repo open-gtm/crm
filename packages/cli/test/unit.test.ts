@@ -457,3 +457,15 @@ describe("schema plan exit codes", () => {
     expect(t.out()).toContain("can't be told");
   });
 });
+
+describe("pack init", () => {
+  it("writes the template files from templates/pack, and they pass validate", async () => {
+    const t = fakeRuntime();
+    const dir = join(t.dir, "my-pack");
+    expect(await run(["pack", "init", dir], t.rt)).toBe(EXIT.ok);
+    for (const file of ["pack.yaml", "schema.yaml", "views.yaml"]) {
+      expect(readFileSync(join(dir, file), "utf8")).toBe(readFileSync(new URL(`../templates/pack/${file}`, import.meta.url), "utf8"));
+    }
+    expect(await run(["pack", "validate", dir], t.rt)).toBe(EXIT.ok);
+  });
+});

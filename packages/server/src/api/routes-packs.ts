@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Ctx, Permission } from "../core/context.js";
 import { forbidden } from "../lib/errors.js";
+import { TEXT_MAX } from "../lib/limits.js";
 import { applyPack, listPacks, PACK_LIMITS, uninstallPack, type Pack } from "../core/packs.js";
 import { route } from "./registry.js";
 import { dataList, list, nullable, object, plain, S } from "./responses.js";
@@ -12,36 +13,36 @@ import { DocField } from "./routes-schemadoc.js";
  * A pack as the CLI sends it. Strict everywhere: a pack is untrusted input, so an unknown property is an
  * error rather than ignored. No IDs: a pack names things; the server records which IDs it owns.
  */
-const Name = z.string().min(1).max(200);
+const Name = z.string().min(1).max(TEXT_MAX.name);
 const PackField = DocField.omit({ id: true, standard: true, read_only: true }).strict();
 const PackObject = z.object({
-  name: Name, label: z.string().max(200).optional(), plural_label: z.string().max(200).optional(), description: z.string().max(2000).optional(),
-  id_prefix: z.string().max(8).optional(), display_field: z.string().max(63).optional(), owned: z.boolean().optional(), hidden: z.boolean().optional(),
+  name: Name, label: z.string().max(TEXT_MAX.name).optional(), plural_label: z.string().max(TEXT_MAX.name).optional(), description: z.string().max(TEXT_MAX.description).optional(),
+  id_prefix: z.string().max(PACK_LIMITS.idPrefix).optional(), display_field: z.string().max(TEXT_MAX.identifier).optional(), owned: z.boolean().optional(), hidden: z.boolean().optional(),
   fields: z.array(PackField).max(PACK_LIMITS.fieldsPerObject).optional(),
 }).strict();
 const PackPipeline = z.object({
   name: Name,
   stages: z.array(z.object({ name: Name, category: z.enum(["open", "won", "lost"]).optional(), probability: z.number().min(0).max(100).nullable().optional() }).strict())
-    .min(1).max(30),
+    .min(1).max(PACK_LIMITS.stagesPerPipeline),
 }).strict();
 const RuleAction = z.boolean().nullable().optional();
 const PackRole = z.object({
-  key: z.string().max(40), name: z.string().max(100), description: z.string().max(PACK_LIMITS.description).optional(),
-  permissions: z.array(z.string().max(40)).max(20),
-  objects: z.record(z.string().max(63), z.object({ read: RuleAction, write: RuleAction, archive: RuleAction }).strict()).optional(),
-  fields: z.record(z.string().max(63), z.record(z.string().max(63), z.enum(["none", "read"]))).optional(),
+  key: z.string().max(PACK_LIMITS.roleKey), name: z.string().max(PACK_LIMITS.roleName), description: z.string().max(PACK_LIMITS.description).optional(),
+  permissions: z.array(z.string().max(PACK_LIMITS.permission)).max(PACK_LIMITS.permissionsPerRole),
+  objects: z.record(z.string().max(TEXT_MAX.identifier), z.object({ read: RuleAction, write: RuleAction, archive: RuleAction }).strict()).optional(),
+  fields: z.record(z.string().max(TEXT_MAX.identifier), z.record(z.string().max(TEXT_MAX.identifier), z.enum(["none", "read"]))).optional(),
 }).strict();
 const PackView = z.object({
-  name: z.string().min(1).max(100), object: z.string().max(63), where: z.unknown().optional(),
-  sort: z.array(z.object({ field: z.string().max(200), dir: z.enum(["asc", "desc"]).optional() }).strict()).max(3).optional(),
-  columns: z.array(z.string().max(200)).max(100).optional(),
-  group_by: z.array(z.object({ field: z.string().max(200), bucket: z.enum(["day", "week", "month", "quarter", "year"]).optional() }).strict()).max(2).optional(),
+  name: z.string().min(1).max(PACK_LIMITS.viewName), object: z.string().max(TEXT_MAX.identifier), where: z.unknown().optional(),
+  sort: z.array(z.object({ field: z.string().max(TEXT_MAX.fieldPath), dir: z.enum(["asc", "desc"]).optional() }).strict()).max(PACK_LIMITS.viewSortKeys).optional(),
+  columns: z.array(z.string().max(TEXT_MAX.fieldPath)).max(PACK_LIMITS.viewColumns).optional(),
+  group_by: z.array(z.object({ field: z.string().max(TEXT_MAX.fieldPath), bucket: z.enum(["day", "week", "month", "quarter", "year"]).optional() }).strict()).max(PACK_LIMITS.viewGroupKeys).optional(),
 }).strict();
 export const PackBody = z.object({
   manifest: z.object({
-    name: z.string().max(63), version: z.string().max(20), description: z.string().max(PACK_LIMITS.description).optional(),
-    min_server_version: z.string().max(20).optional(), modules: z.array(z.string().max(20)).max(10).optional(),
-    parts: z.array(z.string().max(20)).max(5), license: z.string().max(100).optional(),
+    name: z.string().max(TEXT_MAX.identifier), version: z.string().max(PACK_LIMITS.version), description: z.string().max(PACK_LIMITS.description).optional(),
+    min_server_version: z.string().max(PACK_LIMITS.version).optional(), modules: z.array(z.string().max(PACK_LIMITS.module)).max(PACK_LIMITS.modules).optional(),
+    parts: z.array(z.string().max(PACK_LIMITS.part)).max(PACK_LIMITS.parts), license: z.string().max(PACK_LIMITS.license).optional(),
   }).strict(),
   schema: z.object({
     objects: z.array(PackObject).max(PACK_LIMITS.objects).optional(), pipelines: z.array(PackPipeline).max(PACK_LIMITS.pipelines).optional(),
@@ -132,7 +133,7 @@ route({
   cost: (b) => packCost(b.pack),
   response: plain(object(PlanShape, PLAN_REQUIRED)),
   body: Checked(z.object({
-    pack: PackBody, ...PlanOptions, plan_token: z.string().max(2_000).optional(),
+    pack: PackBody, ...PlanOptions, plan_token: z.string().max(TEXT_MAX.token).optional(),
     confirm_data_changes: z.boolean().optional(), confirm_access_changes: z.boolean().optional(),
   }).strict()),
   handler: async ({ tx, ctx, body, headers }) => {
@@ -164,7 +165,7 @@ route({
     in_use: list(object({ kind: { type: "string", enum: ["automation", "alert"] }, id: S.str, name: S.str, uses: S.strs })),
     warning: S.str, confirm_token: S.str,
   }, ["dry_run", "pack", "records", "values", "changes", "notes", "in_use"])),
-  body: z.object({ dry_run: z.boolean().optional(), confirm_token: z.string().max(2_000).optional(), confirm_records: z.boolean().optional() }).strict(),
+  body: z.object({ dry_run: z.boolean().optional(), confirm_token: z.string().max(TEXT_MAX.token).optional(), confirm_records: z.boolean().optional() }).strict(),
   handler: async ({ tx, ctx, params, body, headers }) => {
     assertNotApp(ctx, headers, "uninstall");
     return { body: await uninstallPack(tx, ctx, params.name!, { dryRun: body.dry_run ?? true, confirmToken: body.confirm_token, confirmRecords: body.confirm_records }) };

@@ -1,0 +1,15 @@
+# The schema document format (docs/cli.md), without IDs: objects, their fields, and pipelines.
+objects:
+  - name: project
+    label: Project
+    plural_label: Projects
+    id_prefix: proj
+    display_field: name
+    owned: true
+    fields:
+      - { name: name, type: text, required: true }
+      - { name: client, type: relation, relation: { to: account } }
+      - { name: site, type: address }
+      - { name: progress, type: percent }
+      - { name: estimate, type: duration }
+      - { name: health, type: rating, max: 5 }

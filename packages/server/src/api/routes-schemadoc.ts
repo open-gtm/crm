@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TEXT_MAX } from "../lib/limits.js";
 import { applySchema, exportSchema, planSchema, SCHEMA_FORMAT, type SchemaDoc } from "../core/schemadoc.js";
 import { FIELD_TYPES } from "../core/fieldtypes.js";
 import { route } from "./registry.js";
@@ -8,12 +9,12 @@ import { parseIfMatch } from "./routes.js";
 // --- Schema-as-code: export, plan and apply one document (see core/schemadoc.ts) -------------
 
 const FieldType = z.enum(FIELD_TYPES);
-const Name = z.string().min(1).max(200);
+const Name = z.string().min(1).max(TEXT_MAX.name);
 const Id = z.string().max(40).optional();
 
 /** Strict, so a misspelt property in a hand-written document is an error rather than silently ignored. */
 export const DocField = z.object({
-  id: Id, name: Name, type: FieldType, label: z.string().optional(), description: z.string().max(2000).optional(),
+  id: Id, name: Name, type: FieldType, label: z.string().optional(), description: z.string().max(TEXT_MAX.description).optional(),
   required: z.boolean().optional(), unique: z.boolean().optional(), hidden: z.boolean().optional(),
   sensitivity: z.enum(["standard", "confidential", "restricted"]).optional(), default: z.unknown().optional(),
   validation: z.object({ min: z.number().optional(), max: z.number().optional(), max_length: z.number().int().positive().optional(),
@@ -30,7 +31,7 @@ const Document = z.object({
   schema_version: z.number().int().nonnegative().optional(),
   modules: z.array(z.string()).max(20).optional(),
   objects: z.array(z.object({
-    id: Id, name: Name, label: z.string().optional(), plural_label: z.string().optional(), description: z.string().max(2000).optional(),
+    id: Id, name: Name, label: z.string().optional(), plural_label: z.string().optional(), description: z.string().max(TEXT_MAX.description).optional(),
     id_prefix: z.string().optional(), display_field: z.string().optional(), owned: z.boolean().optional(), hidden: z.boolean().optional(),
     standard: z.boolean().optional(), module: z.string().optional(), fields: z.array(DocField).max(300).optional(),
   }).strict()).max(150).optional(),
