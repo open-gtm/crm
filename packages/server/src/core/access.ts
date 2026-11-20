@@ -3,6 +3,7 @@ import { forbidden } from "../lib/errors.js";
 import {
   RECORD_ACTIONS, without, type Ctx, type FieldLimit, type ObjectRule, type Permission, type RecordAccess, type RecordAction,
 } from "./context.js";
+import { roleRuleRows } from "./queries/roles.js";
 import type { FieldMeta, ObjectMeta, Schema } from "./schema.js";
 
 /**
@@ -32,10 +33,7 @@ export async function loadRoleRules(tx: Tx, tenantId: string, roleId: string, ac
   const version = String(accessVersion);
   const hit = cache.get(key);
   if (hit && hit.version === version) return hit.rules;
-  const rows = await tx<{ kind: "o" | "f"; id: string; can_read: boolean | null; can_write: boolean | null; can_archive: boolean | null; access: FieldLimit | null }[]>`
-    SELECT 'o' AS kind, object_id AS id, can_read, can_write, can_archive, NULL::text AS access FROM role_object_permissions WHERE role_id = ${roleId}
-    UNION ALL
-    SELECT 'f', field_id, NULL, NULL, NULL, access FROM role_field_permissions WHERE role_id = ${roleId}`;
+  const rows = await roleRuleRows(tx, roleId);
   const rules: RoleRules = { objects: new Map(), fields: new Map() };
   for (const r of rows) {
     if (r.kind === "o") rules.objects.set(r.id, { read: r.can_read, write: r.can_write, archive: r.can_archive });

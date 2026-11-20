@@ -14,6 +14,25 @@ export default tseslint.config(
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
     },
   },
+  // SQL lives in per-domain query modules (ADR 0012). Anywhere else in the server, a tagged template
+  // (tx`…`, sql`…`, db()`…`) or .unsafe() is refused. The few statements built at run time that stay
+  // beside their builders carry an eslint-disable-line comment saying so.
+  {
+    files: ["packages/server/src/**/*.ts"],
+    ignores: ["packages/server/src/**/queries.ts", "packages/server/src/**/queries/**"],
+    rules: {
+      "no-restricted-syntax": ["error",
+        {
+          selector: "TaggedTemplateExpression:not([tag.object.name='String'][tag.property.name='raw'])",
+          message: "Put SQL in the directory's query module (queries.ts or queries/), not inline. See docs/decisions/0012-sql-in-query-modules.md",
+        },
+        {
+          selector: "CallExpression[callee.property.name='unsafe']",
+          message: "Put SQL in the directory's query module (queries.ts or queries/), not inline. See docs/decisions/0012-sql-in-query-modules.md",
+        },
+      ],
+    },
+  },
   // The web UI (packages/web): browser globals, the rules of hooks, and accessibility checks on JSX.
   {
     files: ["packages/web/src/**/*.{ts,tsx}", "packages/web/test/**/*.{ts,tsx}"],

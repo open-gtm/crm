@@ -8,6 +8,12 @@ import { fieldAccess, hasHiddenFields } from "./access.js";
 import { audit } from "./audit.js";
 import { can, withRestricted as grantRestricted, without, type Ctx } from "./context.js";
 import { decryptValue, encryptValue } from "./encryption.js";
+import type { EventRow } from "./queries/events.js";
+import {
+  abandonDeliveriesOf, archiveWebhookRow, countLiveWebhooks, countWebhookFailure, deliveriesOf, deliveryById, insertDelivery, insertReplayDelivery,
+  insertTestDelivery, insertWebhook, liveWebhooks, markDeliveryFailed, markDeliverySucceeded, pendingTestDeliveries, resetWebhookFailures,
+  setWebhookSecret, updateWebhookSettings, webhookById, type DeliveryRow, type WebhookRow,
+} from "./queries/webhooks.js";
 import { getRecord, type RecordOut } from "./records.js";
 import { loadSchema } from "./schema.js";
 
@@ -25,12 +31,6 @@ export const MAX_ATTEMPTS = RETRY_DELAYS_S.length;
 const CIRCUIT_THRESHOLD = 10;
 const CIRCUIT_PAUSE_MS = 10 * 60 * 1000;
 const EVENT_PATTERN = /^(\*|[a-z][a-z0-9_]*\.\*|[a-z][a-z0-9_]*\.[a-z_]+|\*\.[a-z_]+)$/;
-
-interface WebhookRow {
-  id: string; url: string; description: string | null; events: string[]; include_restricted: boolean; secret: string;
-  previous_secret: string | null; previous_expires_at: Date | null; enabled: boolean; consecutive_failures: number;
-  circuit_open_until: Date | null; created_at: Date; updated_at: Date; archived_at: Date | null;
-}
 
 const newSecret = () => `whsec_${randomBytes(32).toString("base64")}`;
 
@@ -68,9 +68,7 @@ function parseWebhookId(publicId: string): string {
 
 export async function loadWebhook(tx: Tx, publicId: string, opts: { forUpdate?: boolean } = {}): Promise<WebhookRow> {
   const id = parseWebhookId(publicId);
-  const [w] = opts.forUpdate
-    ? await tx<WebhookRow[]>`SELECT * FROM webhooks WHERE id = ${id} FOR UPDATE`
-    : await tx<WebhookRow[]>`SELECT * FROM webhooks WHERE id = ${id}`;
+  const w = await webhookById(tx, id, opts.forUpdate);
   if (!w) throw notFound(`Webhook ${publicId}`);
   return w;
 }
@@ -109,21 +107,19 @@ export async function createWebhook(tx: Tx, ctx: Ctx, input: WebhookInput) {
   const url = validateUrl(input.url);
   const events = validateEvents(input.events ?? []);
   if (input.include_restricted) assertMayGrantRestricted(ctx);
-  const [count] = await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM webhooks WHERE archived_at IS NULL`;
-  if ((count?.n ?? 0) >= 50) throw conflict("A workspace can have at most 50 webhooks");
+  const count = await countLiveWebhooks(tx);
+  if ((count ?? 0) >= 50) throw conflict("A workspace can have at most 50 webhooks");
   const id = uuidv7();
   const secret = newSecret();
-  await tx`
-    INSERT INTO webhooks (tenant_id, id, url, description, events, include_restricted, secret, enabled, created_by)
-    VALUES (${ctx.tenantId}, ${id}, ${url}, ${input.description ?? null}, ${events}, ${input.include_restricted ?? false},
-            ${await encryptValue(tx, ctx.tenantId, id, "webhook_secret", secret)}, ${input.enabled ?? true}, ${ctx.actor.id})`;
+  await insertWebhook(tx, { tenantId: ctx.tenantId, id, url, description: input.description ?? null, events, includeRestricted: input.include_restricted ?? false,
+    secret: await encryptValue(tx, ctx.tenantId, id, "webhook_secret", secret), enabled: input.enabled ?? true, createdBy: ctx.actor.id });
   await audit(tx, ctx, { action: "webhook.created", details: { webhook: encodeId("whk", id), events, include_restricted: input.include_restricted ?? false } });
-  const [row] = await tx<WebhookRow[]>`SELECT * FROM webhooks WHERE id = ${id}`;
+  const row = await webhookById(tx, id);
   return { ...publicWebhook(row!), secret };
 }
 
 export async function listWebhooks(tx: Tx) {
-  const rows = await tx<WebhookRow[]>`SELECT * FROM webhooks WHERE archived_at IS NULL ORDER BY created_at`;
+  const rows = await liveWebhooks(tx);
   return rows.map(publicWebhook);
 }
 
@@ -148,12 +144,12 @@ export async function updateWebhook(tx: Tx, ctx: Ctx, publicId: string, patch: P
     throw forbidden("This webhook receives restricted values, so its URL and events can't be changed through MCP. Ask the user to change them through the API (PATCH /v1/webhooks/{id}).");
   }
   const enabled = patch.enabled ?? w.enabled;
-  await tx`
-    UPDATE webhooks SET url = ${url}, description = ${patch.description !== undefined ? patch.description : w.description},
-      events = ${events}, include_restricted = ${patch.include_restricted ?? w.include_restricted}, enabled = ${enabled},
-      consecutive_failures = ${enabled && !w.enabled ? 0 : w.consecutive_failures},
-      circuit_open_until = ${enabled && !w.enabled ? null : w.circuit_open_until}
-    WHERE id = ${w.id}`;
+  await updateWebhookSettings(tx, w.id, {
+    url, description: patch.description !== undefined ? patch.description : w.description,
+    events, includeRestricted: patch.include_restricted ?? w.include_restricted, enabled,
+    consecutiveFailures: enabled && !w.enabled ? 0 : w.consecutive_failures,
+    circuitOpenUntil: enabled && !w.enabled ? null : w.circuit_open_until,
+  });
   await audit(tx, ctx, { action: "webhook.updated", details: { webhook: publicId, fields: Object.keys(patch) } });
   return getWebhook(tx, publicId);
 }
@@ -161,8 +157,8 @@ export async function updateWebhook(tx: Tx, ctx: Ctx, publicId: string, patch: P
 export async function archiveWebhook(tx: Tx, ctx: Ctx, publicId: string) {
   const w = await loadWebhook(tx, publicId, { forUpdate: true });
   if (!w.archived_at) {
-    await tx`UPDATE webhooks SET archived_at = now(), enabled = false WHERE id = ${w.id}`;
-    await tx`UPDATE webhook_deliveries SET status = 'dead', last_error = 'webhook archived' WHERE webhook_id = ${w.id} AND status IN ('pending', 'sending')`;
+    await archiveWebhookRow(tx, w.id);
+    await abandonDeliveriesOf(tx, w.id);
     await audit(tx, ctx, { action: "webhook.archived", details: { webhook: publicId } });
   }
   return getWebhook(tx, publicId);
@@ -173,11 +169,9 @@ export async function rotateWebhookSecret(tx: Tx, ctx: Ctx, publicId: string, ov
   const w = await loadWebhook(tx, publicId, { forUpdate: true });
   if (w.archived_at) throw conflict(`Webhook ${publicId} is archived`);
   const secret = newSecret();
-  await tx`
-    UPDATE webhooks SET secret = ${await encryptValue(tx, ctx.tenantId, w.id, "webhook_secret", secret)},
-      previous_secret = ${overlapHours > 0 ? w.secret : null},
-      previous_expires_at = ${overlapHours > 0 ? new Date(Date.now() + overlapHours * 3_600_000) : null}
-    WHERE id = ${w.id}`;
+  await setWebhookSecret(tx, w.id, await encryptValue(tx, ctx.tenantId, w.id, "webhook_secret", secret),
+    overlapHours > 0 ? w.secret : null,
+    overlapHours > 0 ? new Date(Date.now() + overlapHours * 3_600_000) : null);
   await audit(tx, ctx, { action: "webhook.secret_rotated", details: { webhook: publicId, overlap_hours: overlapHours } });
   return { ...(await getWebhook(tx, publicId)), secret };
 }
@@ -190,12 +184,6 @@ export async function revealWebhookSecret(tx: Tx, ctx: Ctx, publicId: string) {
 
 // ----------------------------------------------------------------------------------------------
 // Payloads and the delivery queue
-
-export interface EventRow {
-  id: string; type: string; object_type: string | null; record_id: string | null; occurred_at: Date;
-  actor_type: string; actor_id: string | null; surface: string; data: Record<string, unknown>; causation_depth: number;
-  automation_id: string | null;
-}
 
 /** Public IDs for actors, events and records referenced by an event. */
 export function actorRef(type: string, id: string | null): string | null {
@@ -285,18 +273,9 @@ export async function enqueueDelivery(tx: Tx, ctx: Ctx, args: {
   };
   const restricted = webhook.include_restricted && rec.restricted
     ? await encryptValue(tx, ctx.tenantId, id, "payload_restricted", rec.restricted) : null;
-  const inserted = await tx`
-    INSERT INTO webhook_deliveries (tenant_id, id, webhook_id, event_id, consumer, event_type, payload, restricted_values)
-    VALUES (${ctx.tenantId}, ${id}, ${webhook.id}, ${event.id}, ${args.consumer}, ${event.type}, ${tx.json(payload as never)}, ${restricted})
-    ON CONFLICT (tenant_id, event_id, webhook_id, consumer) DO NOTHING RETURNING id`;
-  return inserted.length ? id : null;
-}
-
-interface DeliveryRow {
-  id: string; webhook_id: string; event_id: string | null; consumer: string; event_type: string; payload: Record<string, unknown>;
-  restricted_values: string | null; status: string; attempts: number; next_attempt_at: Date; last_attempt_at: Date | null;
-  last_status_code: number | null; last_error: string | null; last_duration_ms: number | null; replay_of: string | null;
-  created_at: Date; delivered_at: Date | null;
+  const inserted = await insertDelivery(tx, { tenantId: ctx.tenantId, id, webhookId: webhook.id, eventId: event.id, consumer: args.consumer, eventType: event.type,
+    payload, restricted });
+  return inserted ? id : null;
 }
 
 function publicDelivery(d: DeliveryRow) {
@@ -320,17 +299,14 @@ export async function listDeliveries(tx: Tx, webhookPublicId: string, q: { statu
   const before = q.before ? decodeId(q.before) : null;
   if (q.before && (!before || before.prefix !== "dlv")) throw badRequest("before must be a delivery ID (dlv_…)");
   const status = q.status === "pending" ? ["pending", "sending"] : q.status ? [q.status] : ["pending", "sending", "succeeded", "dead"];
-  const rows = await tx<DeliveryRow[]>`
-    SELECT * FROM webhook_deliveries WHERE webhook_id = ${w.id} AND status = ANY(${status})
-      AND (${before?.uuid ?? null}::uuid IS NULL OR id < ${before?.uuid ?? null}::uuid)
-    ORDER BY id DESC LIMIT ${limit}`;
+  const rows = await deliveriesOf(tx, w.id, status, before?.uuid ?? null, limit);
   return { data: rows.map(publicDelivery), next_before: rows.length === limit ? encodeId("dlv", rows[rows.length - 1]!.id) : null };
 }
 
 async function loadDelivery(tx: Tx, publicId: string): Promise<DeliveryRow> {
   const d = decodeId(publicId);
   if (!d || d.prefix !== "dlv") throw notFound(`Delivery ${publicId}`);
-  const [row] = await tx<DeliveryRow[]>`SELECT * FROM webhook_deliveries WHERE id = ${d.uuid}`;
+  const row = await deliveryById(tx, d.uuid);
   if (!row) throw notFound(`Delivery ${publicId}`);
   return row;
 }
@@ -342,7 +318,7 @@ export async function getDelivery(tx: Tx, publicId: string) {
 /** Queues a fresh copy of a delivery (same payload, new delivery ID, attempts reset). */
 export async function replayDelivery(tx: Tx, ctx: Ctx, publicId: string) {
   const d = await loadDelivery(tx, publicId);
-  const [w] = await tx<WebhookRow[]>`SELECT * FROM webhooks WHERE id = ${d.webhook_id}`;
+  const w = await webhookById(tx, d.webhook_id);
   if (!w || w.archived_at) throw conflict("The webhook for this delivery is archived");
   // A replay sends the stored restricted values to the endpoint's current URL.
   if (d.restricted_values && !can(ctx, "restricted:read")) {
@@ -355,9 +331,8 @@ export async function replayDelivery(tx: Tx, ctx: Ctx, publicId: string) {
   const restricted = d.restricted_values
     ? await encryptValue(tx, ctx.tenantId, id, "payload_restricted", await decryptValue(tx, ctx.tenantId, d.id, "payload_restricted", d.restricted_values))
     : null;
-  await tx`
-    INSERT INTO webhook_deliveries (tenant_id, id, webhook_id, event_id, consumer, event_type, payload, restricted_values, replay_of)
-    VALUES (${ctx.tenantId}, ${id}, ${d.webhook_id}, ${d.event_id}, ${`replay:${id}`}, ${d.event_type}, ${tx.json(d.payload as never)}, ${restricted}, ${d.id})`;
+  await insertReplayDelivery(tx, { tenantId: ctx.tenantId, id, webhookId: d.webhook_id, eventId: d.event_id, eventType: d.event_type, payload: d.payload,
+    restricted, replayOf: d.id });
   await audit(tx, ctx, { action: "webhook.delivery_replayed", details: { delivery: publicId, replay: encodeId("dlv", id) } });
   return getDelivery(tx, encodeId("dlv", id));
 }
@@ -431,28 +406,21 @@ export async function recordAttempt(
   tx: Tx, w: Pick<WebhookRow, "id">, d: Pick<DeliveryRow, "id" | "attempts" | "consumer">, out: AttemptOutcome, leaseToken: string | null = null,
 ): Promise<boolean> {
   const attempts = d.attempts + 1;
-  const held = leaseToken === null ? tx`TRUE` : tx`status = 'sending' AND lease_token = ${leaseToken}::uuid`;
   if (out.ok) {
-    const done = await tx`UPDATE webhook_deliveries SET status = 'succeeded', attempts = ${attempts}, last_attempt_at = now(), delivered_at = now(),
-               last_status_code = ${out.status}, last_error = NULL, last_duration_ms = ${out.durationMs}, locked_until = NULL, lease_token = NULL
-             WHERE id = ${d.id} AND ${held} RETURNING 1`;
-    if (done.length === 0) return false;
-    await tx`UPDATE webhooks SET consecutive_failures = 0, circuit_open_until = NULL WHERE id = ${w.id}`;
+    const done = await markDeliverySucceeded(tx, d.id, { attempts, status: out.status, durationMs: out.durationMs }, leaseToken);
+    if (!done) return false;
+    await resetWebhookFailures(tx, w.id);
     return true;
   }
   const dead = attempts >= MAX_ATTEMPTS || d.consumer.startsWith("test:");
   const delay = RETRY_DELAYS_S[Math.min(attempts - 1, RETRY_DELAYS_S.length - 1)]! * (0.8 + Math.random() * 0.4);
-  const done = await tx`UPDATE webhook_deliveries SET status = ${dead ? "dead" : "pending"}, attempts = ${attempts}, last_attempt_at = now(),
-             next_attempt_at = ${new Date(Date.now() + delay * 1000)}, last_status_code = ${out.status}, last_error = ${out.error},
-             last_duration_ms = ${out.durationMs}, locked_until = NULL, lease_token = NULL
-           WHERE id = ${d.id} AND ${held} RETURNING 1`;
-  if (done.length === 0) return false;
+  const done = await markDeliveryFailed(tx, d.id, { state: dead ? "dead" : "pending", attempts, nextAttemptAt: new Date(Date.now() + delay * 1000),
+    status: out.status, error: out.error, durationMs: out.durationMs }, leaseToken);
+  if (!done) return false;
   // A failed test doesn't count against real deliveries or pause them: otherwise a few queued tests
   // to a dead endpoint (or one briefly down) would trip the circuit breaker for real traffic.
   if (d.consumer.startsWith("test:")) return true;
-  await tx`UPDATE webhooks SET consecutive_failures = consecutive_failures + 1,
-             circuit_open_until = CASE WHEN consecutive_failures + 1 >= ${CIRCUIT_THRESHOLD} THEN ${new Date(Date.now() + CIRCUIT_PAUSE_MS)}::timestamptz ELSE circuit_open_until END
-           WHERE id = ${w.id}`;
+  await countWebhookFailure(tx, w.id, CIRCUIT_THRESHOLD, new Date(Date.now() + CIRCUIT_PAUSE_MS));
   return true;
 }
 
@@ -468,19 +436,17 @@ export async function testWebhook(tx: Tx, ctx: Ctx, publicId: string) {
   // Locked, so concurrent test requests count pending tests one at a time and the cap holds.
   const w = await loadWebhook(tx, publicId, { forUpdate: true });
   if (w.archived_at) throw conflict(`Webhook ${publicId} is archived`);
-  const [pending] = await tx<{ n: number }[]>`
-    SELECT count(*)::int AS n FROM webhook_deliveries WHERE webhook_id = ${w.id} AND consumer LIKE 'test:%' AND status IN ('pending', 'sending')`;
-  if ((pending?.n ?? 0) >= MAX_PENDING_TESTS) throw conflict(`Webhook ${publicId} already has ${MAX_PENDING_TESTS} test deliveries waiting to be sent`);
+  const pending = await pendingTestDeliveries(tx, w.id);
+  if ((pending ?? 0) >= MAX_PENDING_TESTS) throw conflict(`Webhook ${publicId} already has ${MAX_PENDING_TESTS} test deliveries waiting to be sent`);
   const id = uuidv7();
   const payload = {
     id: encodeId("evt", id), type: "webhook.test", occurred_at: new Date().toISOString(), object: null, record_id: null,
     actor: { type: ctx.actor.type, id: actorRef(ctx.actor.type, ctx.actor.id), surface: ctx.surface }, causation_depth: 0,
     automation_id: null, data: { message: "Test event from hl-crm-db. Verify the signature, then return any 2xx status." }, record: null, automation: null,
   };
-  await tx`INSERT INTO webhook_deliveries (tenant_id, id, webhook_id, event_id, consumer, event_type, payload)
-           VALUES (${ctx.tenantId}, ${id}, ${w.id}, NULL, ${`test:${id}`}, 'webhook.test', ${tx.json(payload as never)})`;
+  await insertTestDelivery(tx, { tenantId: ctx.tenantId, id, webhookId: w.id, payload });
   const delivery = await getDelivery(tx, encodeId("dlv", id));
   return { queued: true, delivery, poll: `/v1/webhook-deliveries/${delivery.id}` };
 }
 
-export type { DeliveryRow, WebhookRow };
+export type { DeliveryRow, EventRow, WebhookRow };

@@ -6,6 +6,8 @@ import type { Ctx } from "./context.js";
 import { ADDRESS_PART_NAMES, PERCENT, ratingMax } from "./fieldtypes.js";
 import { listPipelines } from "./pipelines.js";
 import { getObject, isModuleOn, loadSchema, quoteIdent, type FieldMeta, type ObjectMeta } from "./schema.js";
+import { countLiveCustomRecordsCapped } from "./queries/records.js";
+import { activeMembersForPicking, activityTypeList, schemaChangeLog } from "./queries/schema.js";
 
 /**
  * Field metadata as agents and clients see it. Names are not data, so every field is listed to
@@ -75,14 +77,14 @@ export async function describeObject(tx: Tx, ctx: Ctx, name: string, opts: { inc
   const extra: Record<string, unknown> = {};
   if (obj.api_name === "deal") extra.pipelines = await listPipelines(tx);
   if (obj.api_name === "activity") {
-    extra.activity_types = await tx`SELECT key, label, editable FROM activity_types ORDER BY is_system DESC, key`;
+    extra.activity_types = await activityTypeList(tx);
   }
   if (obj.api_name === "activity" || obj.api_name === "task") {
     extra.virtual_fields = [{ name: "related_to", type: "array of record IDs", description: "Records this item is about (contacts, accounts, deals, any custom object). Set on create." }];
   }
   // Users are listed for picking an owner or assignee, so only to a caller who can read such a field here (as GET /v1/users).
   if ((obj.owned || obj.api_name === "task") && obj.fields.some((f) => f.type === "relation" && f.options.to === "user" && fieldAccess(ctx, obj, f) !== "none")) {
-    const users = await tx<{ id: string; name: string; email: string }[]>`SELECT id, name, email FROM users WHERE disabled_at IS NULL ORDER BY name LIMIT 100`;
+    const users = await activeMembersForPicking(tx);
     extra.users = users.map((u) => ({ id: encodeId("usr", u.id), name: u.name, email: u.email }));
   }
   return {
@@ -113,15 +115,13 @@ export async function schemaSummary(tx: Tx, ctx: Ctx) {
   // `records` and are counted in one query, however many there are.
   const counts = new Map<string, number>();
   for (const o of visible.filter((x) => x.is_system)) {
-    const [c] = await tx.unsafe<{ n: number }[]>(
+    const [c] = await tx.unsafe<{ n: number }[]>( // eslint-disable-line no-restricted-syntax -- SQL built at run time, kept beside its builder (ADR 0012)
       `SELECT count(*)::int AS n FROM (SELECT 1 FROM ${quoteIdent(o.table_name!)} WHERE archived_at IS NULL LIMIT ${COUNT_CAP + 1}) s`);
     counts.set(o.id, c?.n ?? 0);
   }
   const custom = visible.filter((x) => !x.is_system).map((x) => x.id);
   if (custom.length) {
-    const rows = await tx<{ id: string; n: number }[]>`
-      SELECT o.id, (SELECT count(*)::int FROM (SELECT 1 FROM records r WHERE r.object_id = o.id AND r.archived_at IS NULL LIMIT ${COUNT_CAP + 1}) s) AS n
-      FROM unnest(${custom}::uuid[]) AS o(id)`;
+    const rows = await countLiveCustomRecordsCapped(tx, custom, COUNT_CAP);
     for (const r of rows) counts.set(r.id, r.n);
   }
   const objects = [];
@@ -152,14 +152,7 @@ export async function schemaSummary(tx: Tx, ctx: Ctx) {
 }
 
 export async function schemaChanges(tx: Tx, limit = 50) {
-  const rows = await tx<{ version: string; changed_at: Date; actor_type: string; actor_id: string | null; surface: string;
-    change_type: string; before: unknown; after: unknown; object_name: string | null; field_name: string | null }[]>`
-    SELECT sc.version::text, sc.changed_at, sc.actor_type, sc.actor_id, sc.surface, sc.change_type, sc.before, sc.after,
-           o.api_name AS object_name, f.api_name AS field_name
-    FROM schema_changes sc
-    LEFT JOIN objects o ON o.tenant_id = sc.tenant_id AND o.id = sc.object_id
-    LEFT JOIN fields f ON f.tenant_id = sc.tenant_id AND f.id = sc.field_id
-    ORDER BY sc.version DESC LIMIT ${Math.min(Math.max(limit, 1), 500)}`;
+  const rows = await schemaChangeLog(tx, Math.min(Math.max(limit, 1), 500));
   return rows.map((r) => ({
     version: Number(r.version), changed_at: r.changed_at.toISOString(), change: r.change_type, object: r.object_name,
     field: r.field_name, surface: r.surface, actor: r.actor_id ? encodeId(r.actor_type === "user" ? "usr" : "svc", r.actor_id) : r.actor_type,

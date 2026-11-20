@@ -5,6 +5,7 @@ import type { Ctx } from "./context.js";
 import { Compiler, targetFor } from "./query.js";
 import { fetchRows, serialize, type RecordOut } from "./records.js";
 import { getObject, loadSchema, quoteIdent, type FieldMeta, type ObjectMeta } from "./schema.js";
+import { limitFuzzyComparison } from "./queries/duplicates.js";
 
 /**
  * The duplicate finder (POST /v1/objects/{object}/duplicates): groups of records that look like the
@@ -123,6 +124,7 @@ export async function findDuplicates(tx: Tx, ctx: Ctx, objectName: string, input
     const c = new Compiler(schema);
     const exprs = rule.map((name) => c.expr("r", t.fields.get(name)!));
     const keys = rule.map((name, i) => `${normalized(obj, obj.byName.get(name)!, exprs[i]!)} AS k${i}`);
+    // eslint-disable-next-line no-restricted-syntax -- SQL built at run time, kept beside its builder (ADR 0012)
     const rows = await tx.unsafe<{ ids: string[]; n: number; exact: boolean }[]>(`
       WITH k AS (SELECT r.id, ${keys.join(", ")}, jsonb_build_array(${exprs.map((e) => `(${e})::text`).join(", ")}) AS raw FROM (${window(DUPLICATE_SCAN)}) r)
       SELECT (array_agg(id ORDER BY id))[1:${MAX_MEMBERS}] AS ids, count(*)::int AS n, count(DISTINCT raw) = 1 AS exact, min(id::text) AS first
@@ -140,7 +142,8 @@ export async function findDuplicates(tx: Tx, ctx: Ctx, objectName: string, input
     try {
       // In a savepoint that is always rolled back: the lower timeout and the threshold end with it, and a timeout leaves the transaction usable.
       await tx.savepoint(async (sp) => {
-        await sp`SELECT set_config('statement_timeout', ${String(FUZZY_LIMITS.timeoutMs)}, true), set_config('pg_trgm.similarity_threshold', ${String(minSimilarity)}, true)`;
+        await limitFuzzyComparison(sp, String(FUZZY_LIMITS.timeoutMs), String(minSimilarity));
+        // eslint-disable-next-line no-restricted-syntax -- SQL built at run time, kept beside its builder (ADR 0012)
         throw new Done(await sp.unsafe<{ a: string; b: string; s: number }[]>(`
           WITH n AS MATERIALIZED (SELECT r.id, ${name} AS nm FROM (${window(FUZZY_SCAN)}) r)
           SELECT x.id AS a, y.id AS b, similarity(x.nm, y.nm)::float8 AS s FROM n x JOIN n y ON x.id < y.id AND x.nm % y.nm
@@ -175,7 +178,7 @@ export async function findDuplicates(tx: Tx, ctx: Ctx, objectName: string, input
     const out = await serialize(tx, ctx, schema, obj, rows);
     rows.forEach((r, i) => records.set(r.id, out[i]!));
   }
-  const [scanned] = await tx.unsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM (${window(DUPLICATE_SCAN + 1)}) r`, params as never[]);
+  const [scanned] = await tx.unsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM (${window(DUPLICATE_SCAN + 1)}) r`, params as never[]); // eslint-disable-line no-restricted-syntax -- SQL built at run time, kept beside its builder (ADR 0012)
   return {
     object: obj.api_name,
     scanned: Math.min(scanned!.n, DUPLICATE_SCAN),

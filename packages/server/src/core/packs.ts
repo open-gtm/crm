@@ -9,10 +9,14 @@ import { audit } from "./audit.js";
 import { issueConfirm, readConfirm, spendConfirm } from "./confirm.js";
 import { can, type Ctx, type Permission } from "./context.js";
 import { dependencies, fieldOfName, writes } from "./automation-access.js";
-import type { AutomationRow } from "./automation-defs.js";
 import { DISGUISING } from "./fieldtypes.js";
 import { listPipelines } from "./pipelines.js";
 import type { SortInput, Where } from "./query.js";
+import {
+  archiveObject, fieldForRestore, installedPack, installedPacks, isRoleLive, liveAlertRules, liveAutomations, liveFieldNamed, liveRecordCount,
+  liveRecordCountIn, liveRoleDefinition, liveRoleKeys, liveWebhookEvents, markPackUninstalled, objectArchivedAt, restoreField, restoreObject, roleKeyTaken,
+  setPackOwned, upsertInstalledPack, viewDefinition, viewExists, viewSnapshot, viewVersion, type InstalledPackRow,
+} from "./queries/packs.js";
 import { archiveRole, createRole, publicRules, resolveRole, updateRole } from "./roles.js";
 import {
   archiveField, confirmToken, countValues, loadSchema, lockSchema, MAX_CUSTOM_OBJECTS, MAX_FIELDS, recordChange, type FieldMeta, type ObjectMeta, type Schema,
@@ -93,7 +97,7 @@ interface Owned {
   written: Written;
 }
 type OwnedKind = Exclude<keyof Owned, "written">;
-interface PackRow { name: string; version: string; status: "installed" | "uninstalled"; description: string; owned: Owned; installed_at: Date; installed_by: string | null; updated_at: Date }
+type PackRow = Omit<InstalledPackRow, "owned"> & { owned: Owned };
 
 const nullMap = <T>(src: unknown): Record<string, T> => {
   const m = Object.create(null) as Record<string, T>;
@@ -211,9 +215,7 @@ function requireAnyPart(ctx: Ctx, verb: string): void {
 }
 
 async function loadRow(tx: Tx, name: string, lock: boolean): Promise<PackRow | undefined> {
-  const [row] = lock
-    ? await tx<PackRow[]>`SELECT * FROM installed_packs WHERE name = ${name} FOR UPDATE`
-    : await tx<PackRow[]>`SELECT * FROM installed_packs WHERE name = ${name}`;
+  const row = await installedPack(tx, name, lock);
   return row ? { ...row, owned: ownedFrom(row.owned) } : undefined;
 }
 
@@ -280,8 +282,7 @@ async function snapshot(tx: Tx, ctx: Ctx, owned: Owned): Promise<Map<string, Sna
     }
   }
   for (const [key, id] of Object.entries(owned.roles)) {
-    const [r] = await tx<{ id: string; name: string; description: string; permissions: string[]; access_version: string }[]>`
-      SELECT id, name, description, permissions, access_version::text FROM roles WHERE id = ${id} AND archived_at IS NULL`;
+    const r = await liveRoleDefinition(tx, id);
     if (!r) continue;
     const rules = await loadRoleRules(tx, ctx.tenantId, r.id, r.access_version);
     const pub = publicRules(schema, rules);
@@ -291,7 +292,7 @@ async function snapshot(tx: Tx, ctx: Ctx, owned: Owned): Promise<Map<string, Sna
     out.set(`roles.${key}`, { props, fp, accessVersion: r.access_version });
   }
   for (const [key, v] of Object.entries(owned.views)) {
-    const [r] = await tx<{ name: string; definition: unknown; version: number }[]>`SELECT name, definition, version FROM views WHERE id = ${v.id}`;
+    const r = await viewSnapshot(tx, v.id);
     if (r) out.set(`views.${key}`, { props: { name: r.name, ...(r.definition as object) }, fp: String(r.version) });
   }
   return out;
@@ -415,7 +416,7 @@ async function restore(tx: Tx, ctx: Ctx, pack: Pack, owned: Owned, run: PackRun)
   const listedFields = new Set((pack.schema?.objects ?? []).flatMap((o) => (o.fields ?? []).map((f) => `${o.name}.${f.name}`)));
   let live = [...(await loadSchema(tx)).objects.values()].filter((o) => !o.is_system).length;
   for (const [name, id] of Object.entries(owned.objects)) {
-    const [o] = await tx<{ archived_at: Date | null }[]>`SELECT archived_at FROM objects WHERE id = ${id}`;
+    const o = await objectArchivedAt(tx, id);
     if (!o) {
       delete owned.objects[name];
       continue;
@@ -427,16 +428,14 @@ async function restore(tx: Tx, ctx: Ctx, pack: Pack, owned: Owned, run: PackRun)
     }
     if (live >= MAX_CUSTOM_OBJECTS) throw unprocessable(`objects.${name}: restoring it would pass the limit of ${MAX_CUSTOM_OBJECTS} custom objects`);
     live++;
-    const [held] = await tx<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM (SELECT 1 FROM records WHERE object_id = ${id} AND archived_at IS NULL LIMIT 10001) s`;
-    await tx`UPDATE objects SET archived_at = NULL, updated_at = now() WHERE id = ${id}`;
+    const held = await liveRecordCount(tx, id);
+    await restoreObject(tx, id);
     const change = { change: "object_restored", object: name };
     await recordChange(tx, ctx, { ...change, object_id: id });
-    run.changes.push({ ...change, ...(held!.n ? { warning: `${held!.n} record(s) come back with it`, data_affecting: true } : {}) });
+    run.changes.push({ ...change, ...(held ? { warning: `${held} record(s) come back with it`, data_affecting: true } : {}) });
   }
   for (const [key, id] of Object.entries(owned.fields)) {
-    const [f] = await tx<(FieldMeta & { archived_at: Date | null })[]>`
-      SELECT id, api_name, object_id, type, storage_key, sensitivity, archived_at FROM fields WHERE id = ${id}`;
+    const f = await fieldForRestore(tx, id);
     if (!f) {
       delete owned.fields[key];
       continue;
@@ -446,8 +445,7 @@ async function restore(tx: Tx, ctx: Ctx, pack: Pack, owned: Owned, run: PackRun)
       run.notes.push(`fields.${key}: archived when the pack was uninstalled, and not in this version of it; left archived`);
       continue;
     }
-    const [taken] = await tx`SELECT 1 FROM fields WHERE object_id = ${f.object_id} AND api_name = ${f.api_name} AND archived_at IS NULL`;
-    if (taken) {
+    if (await liveFieldNamed(tx, f.object_id, f.api_name)) {
       delete owned.fields[key];
       run.notes.push(`fields.${key}: its name was taken while the pack was uninstalled; its old values stay archived`);
       continue;
@@ -456,19 +454,17 @@ async function restore(tx: Tx, ctx: Ctx, pack: Pack, owned: Owned, run: PackRun)
     if (!obj) continue; // its object is archived: the field comes back with it
     if (obj.fields.length >= MAX_FIELDS) throw unprocessable(`fields.${key}: restoring it would pass the limit of ${MAX_FIELDS} fields on ${obj.api_name}`);
     const values = await countValues(tx, obj, f);
-    await tx`UPDATE fields SET archived_at = NULL, updated_at = now() WHERE id = ${id}`;
+    await restoreField(tx, id);
     const [object, field] = key.split(".");
     const change = { change: "field_restored", object: object!, field: field! };
     await recordChange(tx, ctx, { ...change, object_id: f.object_id, field_id: id });
     run.changes.push({ ...change, ...(values ? { warning: `${values} record(s) have their value back`, data_affecting: true } : {}) });
   }
   for (const [key, id] of Object.entries(owned.roles)) {
-    const [r] = await tx`SELECT 1 FROM roles WHERE id = ${id} AND archived_at IS NULL`;
-    if (!r) delete owned.roles[key];
+    if (!(await isRoleLive(tx, id))) delete owned.roles[key];
   }
   for (const [key, v] of Object.entries(owned.views)) {
-    const [r] = await tx`SELECT 1 FROM views WHERE id = ${v.id}`;
-    if (!r) delete owned.views[key];
+    if (!(await viewExists(tx, v.id))) delete owned.views[key];
   }
 }
 
@@ -510,8 +506,7 @@ async function runRoles(tx: Tx, ctx: Ctx, pack: Pack, owned: Owned, run: PackRun
       }
     };
     if (!ownedId) {
-      const [taken] = await tx`SELECT 1 FROM roles WHERE key = ${r.key} AND archived_at IS NULL`;
-      if (taken) {
+      if (await roleKeyTaken(tx, r.key)) {
         run.unsupported.push({ path, message: `A role with key "${r.key}" already exists in this workspace and this pack didn't create it` });
         continue;
       }
@@ -572,7 +567,7 @@ async function runViews(tx: Tx, ctx: Ctx, pack: Pack, owned: Owned, run: PackRun
       }
     };
     const mine = owned.views[key];
-    const [row] = mine ? await tx<{ definition: unknown; name: string; version: number }[]>`SELECT definition, name, version FROM views WHERE id = ${mine.id}` : [];
+    const row = mine ? await viewDefinition(tx, mine.id) : undefined;
     if (!row) {
       const made = await at(() => createView(tx, ctx, { object: v.object, name: v.name, shared: true, ...Object.fromEntries(Object.entries(def).filter(([, x]) => x !== null)) }));
       owned.views[key] = { id: decodeId(made.id)!.uuid, version: made.version };
@@ -597,7 +592,7 @@ async function runViews(tx: Tx, ctx: Ctx, pack: Pack, owned: Owned, run: PackRun
 
 /** Deletes a pack view unless someone changed it since the pack wrote it; a changed one is kept and named. */
 async function dropView(tx: Tx, ctx: Ctx, v: { id: string; version: number }, run: PackRun, key: string): Promise<boolean> {
-  const [row] = await tx<{ version: number }[]>`SELECT version FROM views WHERE id = ${v.id}`;
+  const row = await viewVersion(tx, v.id);
   if (!row) return true;
   if (Number(row.version) !== v.version) {
     run.notes.push(`views.${key}: changed since the pack wrote it; kept`);
@@ -776,7 +771,7 @@ export async function applyPack(tx: Tx, ctx: Ctx, pack: Pack, opts: PackApplyOpt
     // Nothing in the workspace changes. Only a row from before fingerprints were kept gains them here (overwrite_changes); otherwise nothing is written.
     if (canon(plan.owned) !== canon(row.owned)) {
       await spendConfirm(tx, ctx, opts.planToken, token.exp);
-      await tx`UPDATE installed_packs SET owned = ${tx.json(plan.owned as never)}, updated_by = ${ctx.actor.id} WHERE name = ${m.name}`;
+      await setPackOwned(tx, m.name, plan.owned, ctx.actor.id);
     }
     return { dry_run: false, applied: false, ...summary };
   }
@@ -790,11 +785,8 @@ export async function applyPack(tx: Tx, ctx: Ctx, pack: Pack, opts: PackApplyOpt
   }
   await spendConfirm(tx, ctx, opts.planToken, token.exp);
   const done = await runPack(tx, ctx, pack, row, ro, check);
-  await tx`
-    INSERT INTO installed_packs (tenant_id, name, version, status, description, owned, installed_by, updated_by)
-    VALUES (${ctx.tenantId}, ${m.name}, ${m.version}, 'installed', ${m.description ?? ""}, ${tx.json(done.owned as never)}, ${ctx.actor.id}, ${ctx.actor.id})
-    ON CONFLICT (tenant_id, name) DO UPDATE SET version = EXCLUDED.version, status = 'installed', description = EXCLUDED.description,
-      owned = EXCLUDED.owned, updated_by = EXCLUDED.updated_by`;
+  await upsertInstalledPack(tx, { tenantId: ctx.tenantId, name: m.name, version: m.version, description: m.description ?? "", owned: done.owned,
+    actorId: ctx.actor.id });
   await audit(tx, ctx, { action: `pack.${action === "reapply" ? "reapplied" : action === "install" ? "installed" : action === "reinstall" ? "reinstalled" : "upgraded"}`,
     objectType: "pack", details: { name: m.name, version: m.version, from_version: row?.version ?? null, changes: done.changes.length, prune: ro.prune,
       kept: done.kept.length, overwritten: done.overwritten.map((o) => o.path) } });
@@ -809,7 +801,7 @@ const countOwned = (o: Owned): Record<OwnedKind, string[]> => ({
   roles: Object.keys(o.roles).sort(), views: Object.keys(o.views).sort(),
 });
 
-const packOut = (r: PackRow) => ({
+const packOut = (r: InstalledPackRow) => ({
   name: r.name, version: r.version, status: r.status, description: r.description, owns: countOwned(ownedFrom(r.owned)),
   installed_at: r.installed_at.toISOString(), installed_by: actorRef("user", r.installed_by), updated_at: r.updated_at.toISOString(),
 });
@@ -817,22 +809,21 @@ const packOut = (r: PackRow) => ({
 /** Installed packs (and uninstalled ones, which keep what they owned so a reinstall restores it). */
 export async function listPacks(tx: Tx, ctx: Ctx) {
   requireAnyPart(ctx, "Listing");
-  const rows = await tx<PackRow[]>`SELECT * FROM installed_packs ORDER BY name`;
+  const rows = await installedPacks(tx);
   return rows.map(packOut);
 }
 
 /** Records in the objects a pack created, and values in the fields it added to other objects: what an uninstall would hide. Capped. */
 async function recordsHeld(tx: Tx, schema: Schema, owned: Owned): Promise<{ records: number; values: number }> {
   const ids = Object.values(owned.objects);
-  const [r] = ids.length ? await tx<{ n: number }[]>`
-    SELECT count(*)::int AS n FROM (SELECT 1 FROM records WHERE object_id = ANY(${ids}::uuid[]) AND archived_at IS NULL LIMIT 10001) s` : [{ n: 0 }];
+  const records = ids.length ? await liveRecordCountIn(tx, ids) : 0;
   let values = 0;
   for (const id of Object.values(owned.fields)) {
     const obj = [...schema.objects.values()].find((o) => o.fields.some((f) => f.id === id));
     if (!obj || ids.includes(obj.id)) continue;
     values += await countValues(tx, obj, obj.fields.find((f) => f.id === id)!);
   }
-  return { records: r!.n, values };
+  return { records, values };
 }
 
 /** Field names a filter looks at (the field a part, path or relation hop starts from). */
@@ -871,7 +862,7 @@ async function packInUse(tx: Tx, schema: Schema, owned: Owned): Promise<{ inUse:
     fields.set(o.api_name, set);
   }
   const roleIds = Object.values(owned.roles);
-  const roleKeys = new Set(roleIds.length ? (await tx<{ key: string }[]>`SELECT key FROM roles WHERE id = ANY(${roleIds}::uuid[]) AND archived_at IS NULL`).map((r) => r.key) : []);
+  const roleKeys = new Set(roleIds.length ? (await liveRoleKeys(tx, roleIds)).map((r) => r.key) : []);
   const uses = new Set<string>();
   const useObject = (o: string | undefined) => {
     if (o && objects.has(o)) uses.add(`${o} records`);
@@ -883,7 +874,7 @@ async function packInUse(tx: Tx, schema: Schema, owned: Owned): Promise<{ inUse:
     if (fields.get(obj.api_name)?.has(name)) uses.add(`${obj.api_name}.${name}`);
   };
   const inUse: PackInUse[] = [];
-  const autos = await tx<AutomationRow[]>`SELECT * FROM automations WHERE archived_at IS NULL ORDER BY name, id LIMIT 1000`;
+  const autos = await liveAutomations(tx);
   for (const a of autos) {
     uses.clear();
     const d = dependencies(schema, a);
@@ -907,8 +898,7 @@ async function packInUse(tx: Tx, schema: Schema, owned: Owned): Promise<{ inUse:
     if (uses.size) inUse.push({ kind: "automation", id: encodeId("auto", a.id), name: a.name, uses: [...uses].sort() });
   }
   // A personal rule's name is its owner's: it is listed without it.
-  const alerts = await tx<{ id: string; name: string; scope: string; object: string; trigger: Record<string, unknown>; condition: unknown }[]>`
-    SELECT id, name, scope, object, trigger, condition FROM alert_rules WHERE archived_at IS NULL ORDER BY name, id LIMIT 1000`;
+  const alerts = await liveAlertRules(tx);
   for (const r of alerts) {
     uses.clear();
     useObject(r.object);
@@ -920,7 +910,7 @@ async function packInUse(tx: Tx, schema: Schema, owned: Owned): Promise<{ inUse:
   const notes: string[] = [];
   if (objects.size) {
     const patterns = [...objects].flatMap((o) => [`${o}.*`]);
-    const hooks = await tx<{ id: string; events: string[] }[]>`SELECT id, events FROM webhooks WHERE archived_at IS NULL ORDER BY id LIMIT 1000`;
+    const hooks = await liveWebhookEvents(tx);
     for (const h of hooks) {
       const hit = h.events.filter((e) => patterns.some((p) => e === p || e.startsWith(p.slice(0, -1))));
       if (hit.length) notes.push(`webhook ${encodeId("whk", h.id)} subscribes to ${hit.join(", ")}; it will receive no such events once the objects are archived`);
@@ -974,16 +964,15 @@ export async function uninstallPack(tx: Tx, ctx: Ctx, name: string, opts: Uninst
       r.notes.push(`fields.${key}: archived (values kept)`);
     }
     for (const [objName, id] of Object.entries(owned.objects)) {
-      const [o] = await t<{ archived_at: Date | null }[]>`SELECT archived_at FROM objects WHERE id = ${id}`;
+      const o = await objectArchivedAt(t, id);
       if (!o || o.archived_at) continue;
-      await t`UPDATE objects SET archived_at = now(), updated_at = now() WHERE id = ${id}`;
+      await archiveObject(t, id);
       const change = { change: "object_archived", object: objName };
       await recordChange(t, ctx, { ...change, object_id: id });
       r.changes.push(change);
     }
     for (const [key, id] of Object.entries(owned.roles)) {
-      const [live] = await t`SELECT 1 FROM roles WHERE id = ${id} AND archived_at IS NULL`;
-      if (!live) continue;
+      if (!(await isRoleLive(t, id))) continue;
       try {
         await archiveRole(t, ctx, encodeId("role", id));
       } catch (e) {
@@ -1017,7 +1006,7 @@ export async function uninstallPack(tx: Tx, ctx: Ctx, name: string, opts: Uninst
   }
   await spendConfirm(tx, ctx, opts.confirmToken, token.exp);
   const done = await run(tx);
-  await tx`UPDATE installed_packs SET status = 'uninstalled', updated_by = ${ctx.actor.id} WHERE name = ${name}`;
+  await markPackUninstalled(tx, name, ctx.actor.id);
   await audit(tx, ctx, { action: "pack.uninstalled", objectType: "pack", details: { name, version: row.version, changes: done.changes.length, records: held.records } });
   return { dry_run: false, ...out, changes: done.changes, notes: done.notes };
 }
