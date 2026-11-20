@@ -565,7 +565,7 @@ export async function countValues(tx: Tx, obj: ObjectMeta, field: FieldMeta): Pr
   }
   const col = obj.is_system ? (field.sensitivity === "restricted" ? "custom_encrypted" : "custom") : (field.sensitivity === "restricted" ? "encrypted" : "data");
   const table = obj.table_name ?? "records";
-  const [r] = await tx.unsafe<{ n: number }[]>(
+  const [r] = await tx.unsafe<{ n: number }[]>( // eslint-disable-line no-restricted-syntax -- SQL built at run time, kept beside its builder (ADR 0012)
     `SELECT count(*)::int AS n FROM ${quoteIdent(table)} WHERE ${quoteIdent(col)} ? $1${obj.is_system ? "" : " AND object_id = $2"}`,
     obj.is_system ? [field.storage_key] : [field.storage_key, obj.id],
   );
@@ -642,7 +642,7 @@ export async function retypeField(
     const from = type === "currency" ? "number" : "string";
     // Reviewed: `col` is a quoted identifier, and `value` and `from` are built above from fixed strings only.
     // nosemgrep: hlcrm-no-interpolated-sql-in-unsafe
-    await tx.unsafe(
+    await tx.unsafe( // eslint-disable-line no-restricted-syntax -- SQL built at run time, kept beside its builder (ADR 0012)
       `UPDATE ${quoteIdent(obj.table_name ?? "records")} SET ${col} = jsonb_set(${col}, ARRAY[$1], ${value})
        WHERE jsonb_typeof(${col}->$1) = '${from}'${obj.is_system ? "" : " AND object_id = $2"}`,
       obj.is_system ? [field.storage_key] : [field.storage_key, obj.id],
@@ -703,7 +703,7 @@ async function rebuildSearchText(tx: Tx, obj: ObjectMeta, fields: FieldMeta[]): 
   const text = parts.length ? `left(lower(concat_ws(' ', ${parts.join(", ")})), 4000)` : "''";
   // Reviewed: `text` holds only quoted column names and $n placeholders.
   // nosemgrep: hlcrm-no-interpolated-sql-in-unsafe
-  await tx.unsafe(`UPDATE ${quoteIdent(obj.table_name ?? "records")} SET search_text = ${text}${obj.is_system ? "" : " WHERE object_id = $1"}`, params);
+  await tx.unsafe(`UPDATE ${quoteIdent(obj.table_name ?? "records")} SET search_text = ${text}${obj.is_system ? "" : " WHERE object_id = $1"}`, params); // eslint-disable-line no-restricted-syntax -- SQL built at run time, kept beside its builder (ADR 0012)
 }
 
 export interface ObjectPatch { label?: string; plural_label?: string; description?: string; hidden?: boolean; display_field?: string }
@@ -746,7 +746,7 @@ export async function setModules(tx: Tx, ctx: Ctx, modules: string[], dryRun: bo
   for (const m of turningOff) {
     for (const o of schema.objects.values()) {
       if (o.module !== m || !o.table_name) continue;
-      const [r] = await tx.unsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM ${quoteIdent(o.table_name)} WHERE archived_at IS NULL`);
+      const [r] = await tx.unsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM ${quoteIdent(o.table_name)} WHERE archived_at IS NULL`); // eslint-disable-line no-restricted-syntax -- SQL built at run time, kept beside its builder (ADR 0012)
       if ((r?.n ?? 0) > 0) throw conflict(`Module "${m}" has ${o.plural_label.toLowerCase()} with data; archive them before turning it off`);
     }
   }

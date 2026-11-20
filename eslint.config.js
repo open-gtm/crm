@@ -14,21 +14,21 @@ export default tseslint.config(
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_", varsIgnorePattern: "^_" }],
     },
   },
-  // SQL lives in per-domain query modules (ADR 0012). In the directories converted so far, a tagged
-  // template (tx`…`, sql`…`, db()`…`) or .unsafe() anywhere but the query module is refused.
-  // Add a directory here once its SQL has moved.
+  // SQL lives in per-domain query modules (ADR 0012). Anywhere else in the server, a tagged template
+  // (tx`…`, sql`…`, db()`…`) or .unsafe() is refused. The few statements built at run time that stay
+  // beside their builders carry an eslint-disable-line comment saying so.
   {
-    files: ["packages/server/src/auth/**/*.ts", "packages/server/src/api/**/*.ts", "packages/server/src/web/**/*.ts"],
-    ignores: ["packages/server/src/auth/queries.ts", "packages/server/src/auth/queries/**", "packages/server/src/api/queries.ts"],
+    files: ["packages/server/src/**/*.ts"],
+    ignores: ["packages/server/src/**/queries.ts", "packages/server/src/**/queries/**"],
     rules: {
       "no-restricted-syntax": ["error",
         {
           selector: "TaggedTemplateExpression:not([tag.object.name='String'][tag.property.name='raw'])",
-          message: "Put SQL in the directory's query module (auth/queries.ts, api/queries.ts), not inline. See docs/decisions/0012-sql-in-query-modules.md",
+          message: "Put SQL in the directory's query module (queries.ts or queries/), not inline. See docs/decisions/0012-sql-in-query-modules.md",
         },
         {
           selector: "CallExpression[callee.property.name='unsafe']",
-          message: "Put SQL in the directory's query module (auth/queries.ts, api/queries.ts), not inline. See docs/decisions/0012-sql-in-query-modules.md",
+          message: "Put SQL in the directory's query module (queries.ts or queries/), not inline. See docs/decisions/0012-sql-in-query-modules.md",
         },
       ],
     },
