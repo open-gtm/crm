@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import postgres from "postgres";
 import { ConfigError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
+import { appliedMigrations, applyGrants, ensureMigrationsTable, recordMigration, runMigrationScript } from "./queries.js";
 
 const MIGRATIONS_DIR = new URL("./migrations/", import.meta.url);
 
@@ -15,10 +16,8 @@ export async function migrate(migratorUrl: string, appRole = process.env.APP_DB_
   const sql = postgres(migratorUrl, { max: 1, onnotice: () => {} });
   const applied: string[] = [];
   try {
-    await sql`CREATE TABLE IF NOT EXISTS schema_migrations (
-      name text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`;
-    const done = new Map((await sql<{ name: string; checksum: string }[]>`SELECT name, checksum FROM schema_migrations`)
-      .map((r) => [r.name, r.checksum]));
+    await ensureMigrationsTable(sql);
+    const done = new Map((await appliedMigrations(sql)).map((r) => [r.name, r.checksum]));
     const files = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql") && (!opts.upTo || f.slice(0, opts.upTo.length) <= opts.upTo)).sort();
     for (const file of files) {
       const text = readFileSync(new URL(file, MIGRATIONS_DIR), "utf8");
@@ -29,13 +28,13 @@ export async function migrate(migratorUrl: string, appRole = process.env.APP_DB_
         continue;
       }
       await sql.begin(async (tx) => {
-        await tx.unsafe(text);
-        await tx`INSERT INTO schema_migrations (name, checksum) VALUES (${file}, ${checksum})`;
+        await runMigrationScript(tx, text);
+        await recordMigration(tx, file, checksum);
       });
       applied.push(file);
       logger.info({ migration: file }, "applied migration");
     }
-    await sql.unsafe(grantsSql(appRole));
+    await applyGrants(sql, grantsSql(appRole));
     return applied;
   } finally {
     await sql.end({ timeout: 5 });

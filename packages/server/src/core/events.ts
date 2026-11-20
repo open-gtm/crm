@@ -1,6 +1,7 @@
 import type { Tx } from "../db/pool.js";
 import { uuidv7 } from "../lib/ids.js";
 import type { Ctx } from "./context.js";
+import { insertEvent } from "./queries/events.js";
 
 /** Writes an outbox event in the caller's transaction (transactional outbox). Workers deliver it later. */
 export async function emit(
@@ -8,9 +9,9 @@ export async function emit(
   ctx: Ctx,
   event: { type: string; objectType?: string; recordId?: string; data?: Record<string, unknown> },
 ): Promise<void> {
-  await tx`
-    INSERT INTO outbox_events (tenant_id, id, type, object_type, record_id, actor_type, actor_id, surface, data, causation_depth, automation_id)
-    VALUES (${ctx.tenantId}, ${uuidv7()}, ${event.type}, ${event.objectType ?? null}, ${event.recordId ?? null},
-            ${ctx.actor.type}, ${ctx.actor.id}, ${ctx.surface}, ${tx.json((event.data ?? {}) as never)},
-            ${ctx.causationDepth ?? 0}, ${ctx.automationId ?? null})`;
+  await insertEvent(tx, {
+    tenantId: ctx.tenantId, id: uuidv7(), type: event.type, objectType: event.objectType ?? null, recordId: event.recordId ?? null,
+    actorType: ctx.actor.type, actorId: ctx.actor.id, surface: ctx.surface, data: event.data ?? {},
+    causationDepth: ctx.causationDepth ?? 0, automationId: ctx.automationId ?? null,
+  });
 }

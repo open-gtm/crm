@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { Tx } from "../db/pool.js";
 import { open, seal } from "../lib/crypto.js";
 import { keyProvider } from "../providers/keys.js";
+import { currentTenantKey, insertTenantKey } from "./queries/encryption.js";
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const cache = new Map<string, { key: Buffer; version: number; expires: number }>();
@@ -10,14 +11,13 @@ const cache = new Map<string, { key: Buffer; version: number; expires: number }>
 export async function createTenantKey(tx: Tx, tenantId: string): Promise<void> {
   const dek = randomBytes(32);
   const wrapped = await keyProvider().wrap(tenantId, dek);
-  await tx`INSERT INTO tenant_keys (tenant_id, version, provider, wrapped_key) VALUES (${tenantId}, 1, ${keyProvider().name}, ${wrapped})`;
+  await insertTenantKey(tx, tenantId, keyProvider().name, wrapped);
 }
 
 async function currentKey(tx: Tx, tenantId: string): Promise<{ key: Buffer; version: number }> {
   const hit = cache.get(tenantId);
   if (hit && hit.expires > Date.now()) return hit;
-  const [row] = await tx<{ version: number; wrapped_key: Buffer }[]>`
-    SELECT version, wrapped_key FROM tenant_keys WHERE retired_at IS NULL ORDER BY version DESC LIMIT 1`;
+  const row = await currentTenantKey(tx);
   if (!row) throw new Error("tenant has no data key");
   const key = await keyProvider().unwrap(tenantId, row.wrapped_key);
   const entry = { key, version: row.version, expires: Date.now() + CACHE_TTL_MS };

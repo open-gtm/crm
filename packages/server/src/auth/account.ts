@@ -6,6 +6,7 @@ import { withTenant } from "../db/tx.js";
 import { ApiError, conflict, unprocessable } from "../lib/errors.js";
 import { LIMITS, emailKey, hit } from "./limits.js";
 import { hashPassword, isBreached, passwordProblem } from "./passwords.js";
+import { passwordChangeFacts, passwordHashForUpdate, storePasswordHash } from "./queries.js";
 import { requireRecentSignIn, requireSession, revokeUserSessions } from "./sessions.js";
 import { checkPassword, rateLimited } from "./signin.js";
 
@@ -26,9 +27,7 @@ export interface PasswordChange { userId: string; previous: string | null; next:
 export async function preparePasswordChange(ctx: Ctx, input: { password: string | null; current_password?: string | null }): Promise<PasswordChange> {
   requireSession(ctx);
   const userId = ctx.actor.id!;
-  const cur = await withTenant(ctx.tenantId, async (tx) => (await tx<{ email: string; workspace: string; password_hash: string | null; password_sign_in: boolean }[]>`
-    SELECT u.email::text, t.name AS workspace, c.password_hash, t.password_sign_in FROM users u CROSS JOIN tenants t
-    LEFT JOIN member_credentials c ON c.tenant_id = u.tenant_id AND c.user_id = u.id WHERE u.id = ${userId}`)[0]);
+  const cur = await withTenant(ctx.tenantId, (tx) => passwordChangeFacts(tx, userId));
   if (!cur) throw new ApiError(404, "not_found", "Member not found");
   if (input.password !== null && (!config().PASSWORD_SIGN_IN || !cur.password_sign_in)) {
     throw new ApiError(409, "password_sign_in_off", "Password sign-in is turned off for this workspace");
@@ -53,12 +52,9 @@ export async function preparePasswordChange(ctx: Ctx, input: { password: string 
 
 export async function applyPasswordChange(tx: Tx, ctx: Ctx, change: PasswordChange) {
   const session = requireSession(ctx);
-  const [row] = await tx<{ password_hash: string | null }[]>`
-    SELECT password_hash FROM member_credentials WHERE user_id = ${change.userId} FOR UPDATE`;
+  const row = await passwordHashForUpdate(tx, change.userId);
   if ((row?.password_hash ?? null) !== change.previous) throw conflict("Your password changed while this request was being checked; try again");
-  await tx`INSERT INTO member_credentials (tenant_id, user_id, password_hash, password_set_at) VALUES (${ctx.tenantId}, ${change.userId}, ${change.next}, ${change.next ? new Date() : null})
-           ON CONFLICT (tenant_id, user_id) DO UPDATE SET password_hash = EXCLUDED.password_hash, password_set_at = EXCLUDED.password_set_at,
-             password_failures = 0, password_locked_until = NULL`;
+  await storePasswordHash(tx, ctx.tenantId, change.userId, change.next, change.next ? new Date() : null);
   const others = await revokeUserSessions(tx, change.userId, "password_changed", session.id);
   const action = change.next === null ? "auth.password_removed" : change.previous ? "auth.password_changed" : "auth.password_set";
   await audit(tx, ctx, { action, objectType: "user", recordId: change.userId, details: { other_sessions_revoked: others } });

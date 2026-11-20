@@ -3,6 +3,7 @@ import type { Tx } from "../db/pool.js";
 import { hmac, safeEqual, sha256 } from "../lib/crypto.js";
 import { ApiError, badRequest } from "../lib/errors.js";
 import { credential, type Ctx } from "./context.js";
+import { spendConfirmToken } from "./queries/confirm.js";
 
 /**
  * Confirm tokens for changes previewed first (bulk changes, merges). A dry run issues one, signed with
@@ -56,9 +57,7 @@ export function peekConfirm(token: string | undefined): unknown {
 
 /** Spends a checked token in the caller's transaction. A token already spent is refused (409); a concurrent spend waits for the first and then is refused. */
 export async function spendConfirm(tx: Tx, ctx: Ctx, token: string, exp: number): Promise<void> {
-  const spent = await tx`INSERT INTO confirm_tokens (tenant_id, token_hash, expires_at) VALUES (${ctx.tenantId}, ${sha256(token)}, ${new Date(exp)})
-    ON CONFLICT DO NOTHING RETURNING 1`;
-  if (spent.length === 0) {
+  if (!(await spendConfirmToken(tx, ctx.tenantId, sha256(token), new Date(exp)))) {
     throw new ApiError(409, "confirm_token_used", "This confirm_token was already used: a token applies once. Run the dry run again for a new one");
   }
 }
