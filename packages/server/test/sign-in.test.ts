@@ -584,7 +584,10 @@ describe("passwords", () => {
       expect(passwordProblem("short")).toMatch(/at least 12/);
       expect(passwordProblem("aaaaaaaaaaaaaaaa")).toMatch(/repeats/);
     });
-    withBar("5", () => expect(() => passwordProblem("lantern-orbit-maple-quartz")).toThrow(/Invalid configuration/));
+    // Out of range, or set but empty (which coercion would read as 0, the estimate off): the server won't start.
+    for (const bad of ["5", "", " ", "0x4", "3.0"]) {
+      withBar(bad, () => expect(() => passwordProblem("lantern-orbit-maple-quartz"), JSON.stringify(bad)).toThrow(/Invalid configuration/));
+    }
   });
 
   it("sets a first password after a recent sign-in, refuses weak ones, and signs in with it", async () => {
