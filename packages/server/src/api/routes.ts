@@ -23,7 +23,7 @@ import { invitationUnavailable, reserveInvitation, sendInvitation } from "../aut
 import { encodeId } from "../lib/ids.js";
 import { SERVER_VERSION } from "../lib/version.js";
 import { route } from "./registry.js";
-import { createdOrDry, data, dataList, enumOf, list, nullable, object, plain, R, ref, S } from "./responses.js";
+import { createdOrDry, data, dataList, enumOf, list, nullable, object, plain, R, ref, S, secretOmitted } from "./responses.js";
 
 const Values = z.record(z.string(), z.unknown());
 const DryRun = z.object({ dry_run: z.boolean().optional() });
@@ -579,7 +579,7 @@ route({
 
 route({
   method: "POST", path: "/v1/api-keys", scope: "admin", permission: "keys:manage", tag: "admin",
-  response: data(object({ id: S.str, secret: S.str }), 201),
+  response: data(object({ id: S.str, secret: S.str, secret_omitted: secretOmitted }, ["id"]), 201),
   summary: "Create an API key. The secret is shown once. Scopes can't exceed the calling key's or the owner's role. test keys reach live data (there is no sandbox). From a browser session, needs a sign-in in the last 10 minutes: a key outlives the session",
   body: z.object({ name: z.string(), scopes: z.array(z.enum(["admin", "ops:write", "ops:read", "restricted:read"])).min(1),
     owner: z.string().optional(), environment: z.enum(["live", "test"]).optional(), expires_in_days: z.number().int().positive().max(3650).optional() }),
@@ -604,8 +604,8 @@ route({
     id: { type: "string", description: "The new key" }, name: S.str, scopes: S.strs, environment: enumOf("live", "test"),
     expires_at: { ...nullable(S.time), description: "The new key's expiry: the old key's, unchanged" },
     secret: { type: "string", description: "The new key's secret, shown once" },
-    replaces: S.str, old_key_expires_in_hours: S.int,
-  })),
+    secret_omitted: secretOmitted, replaces: S.str, old_key_expires_in_hours: S.int,
+  }, ["id", "name", "scopes", "environment", "expires_at", "replaces", "old_key_expires_in_hours"])),
   idParams: { id: "key" }, body: z.object({ overlap_hours: z.number().int().min(0).max(168).optional() }).optional() as never,
   handler: async ({ tx, ctx, params, body, headers }) => {
     if ((headers.get("x-hlcrm-surface") ?? "api").endsWith("mcp") || ctx.surface.endsWith("mcp")) throw badRequest("Keys cannot be rotated through MCP");

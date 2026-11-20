@@ -30,6 +30,11 @@ const anyObject: JsonSchema = { type: "object", additionalProperties: true };
 export const object = (properties: Record<string, JsonSchema>, required: string[] = Object.keys(properties)): JsonSchema =>
   ({ type: "object", properties, required, additionalProperties: true });
 export const list = (items: JsonSchema): JsonSchema => ({ type: "array", items });
+/**
+ * Beside a `secret` that is shown once. A request repeated with the same Idempotency-Key gets the first response
+ * again without the secret (api/app.ts redactSecrets), and this note in its place, so `secret` is never required.
+ */
+export const secretOmitted: JsonSchema = { type: "string", description: "In place of `secret` when this is a replay of an earlier request with the same Idempotency-Key" };
 /** A closed object: every property listed, nothing else allowed. For small shapes that are stable by design (sign-in, sessions). */
 export const strict = (properties: Record<string, JsonSchema>, required: string[] = Object.keys(properties)): JsonSchema =>
   ({ type: "object", properties, required, additionalProperties: false });
@@ -235,7 +240,8 @@ export const BASE_SCHEMAS: Record<string, JsonSchema> = {
     ...webhook,
     secret: { ...nullable(str), description: "The signing secret, shown this once; null through MCP" },
     secret_note: { type: "string", description: "Through MCP: where to get the secret instead" },
-  }, [...Object.keys(webhook), "secret"]),
+    secret_omitted: secretOmitted,
+  }, Object.keys(webhook)),
   WebhookDelivery: object({
     id: str, webhook_id: str, event_id: nullable(str), event_type: str,
     trigger: { ...enumOf("subscription", "automation", "replay", "test"), description: "What queued it: an event subscription, an automation or alert rule, a replay or a test" },
