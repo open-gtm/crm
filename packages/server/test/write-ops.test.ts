@@ -1,5 +1,6 @@
 import postgres from "postgres";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { resetRateLimiter } from "../src/api/app.js";
 import { decodeId } from "../src/lib/ids.js";
 import { processEvents } from "../src/worker/events.js";
 import { call, create, memberWithKey, newWorkspace, uniqueEmail, type Workspace } from "./helpers.js";
@@ -37,6 +38,9 @@ async function member(permissions: string[], rules: Record<string, unknown> = {}
 beforeAll(async () => {
   ws = await newWorkspace("Write ops");
 });
+
+// Each test makes many calls with one key; rate limits are tested elsewhere.
+beforeEach(() => resetRateLimiter());
 
 describe("restore", () => {
   it("un-archives a record, with an event and an audit entry, and lists archived records on their own", async () => {
