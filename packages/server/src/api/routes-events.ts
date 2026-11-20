@@ -15,7 +15,7 @@ import { loadSchema } from "../core/schema.js";
 import { badRequest } from "../lib/errors.js";
 import { decodeId } from "../lib/ids.js";
 import { route } from "./registry.js";
-import { data, list, nullable, object, plain, R, S } from "./responses.js";
+import { data, enumOf, list, nullable, object, plain, R, ref, S } from "./responses.js";
 
 /** Through an MCP server: the header a key's client sends, or the surface a connected app's token fixes. */
 const viaMcp = (headers: Headers, ctx: Ctx) => (headers.get("x-hlcrm-surface") ?? "api").endsWith("mcp") || ctx.surface.endsWith("mcp");
@@ -32,13 +32,13 @@ const WebhookBody = z.object({
 
 route({
   method: "GET", path: "/v1/webhooks", scope: "admin", tag: "webhooks", summary: "List webhook endpoints",
-  response: R.anyList,
+  response: R.webhooks,
   handler: async ({ tx }) => ({ body: { data: await listWebhooks(tx) } }),
 });
 
 route({
   method: "POST", path: "/v1/webhooks", scope: "admin", tag: "webhooks",
-  response: data(S.obj, 201),
+  response: { ...R.webhookWithSecret, status: 201 },
   summary: "Register a webhook endpoint. The signing secret is returned once (not through MCP)",
   body: WebhookBody,
   handler: async ({ tx, ctx, body, headers }) => {
@@ -50,27 +50,27 @@ route({
 
 route({
   method: "GET", path: "/v1/webhooks/:id", scope: "admin", tag: "webhooks", summary: "Get a webhook endpoint", idParams: { id: "webhook" },
-  response: R.any,
+  response: R.webhook,
   handler: async ({ tx, params }) => ({ body: { data: await getWebhook(tx, params.id!) } }),
 });
 
 route({
   method: "PATCH", path: "/v1/webhooks/:id", scope: "admin", tag: "webhooks", summary: "Change a webhook's URL, events, description or enabled flag",
-  response: R.any,
+  response: R.webhook,
   idParams: { id: "webhook" }, body: WebhookBody.partial(),
   handler: async ({ tx, ctx, params, body }) => ({ body: { data: await updateWebhook(tx, ctx, params.id!, body) } }),
 });
 
 route({
   method: "DELETE", path: "/v1/webhooks/:id", scope: "admin", tag: "webhooks", summary: "Archive a webhook (pending deliveries are dropped)",
-  response: R.any,
+  response: R.webhook,
   idParams: { id: "webhook" },
   handler: async ({ tx, ctx, params }) => ({ body: { data: await archiveWebhook(tx, ctx, params.id!) } }),
 });
 
 route({
   method: "GET", path: "/v1/webhooks/:id/secret", scope: "admin", tag: "webhooks", summary: "Reveal the signing secret (not available through MCP)",
-  response: R.any,
+  response: data(object({ id: S.str, secret: S.str })),
   idParams: { id: "webhook" },
   handler: async ({ tx, ctx, params, headers }) => {
     if (viaMcp(headers, ctx)) throw badRequest("Webhook secrets are not shown through MCP; use the API");
@@ -80,7 +80,7 @@ route({
 
 route({
   method: "POST", path: "/v1/webhooks/:id/rotate-secret", scope: "admin", tag: "webhooks",
-  response: R.any,
+  response: R.webhookWithSecret,
   summary: "Rotate the signing secret. The old secret also signs during the overlap window (default 24 hours)",
   idParams: { id: "webhook" }, body: z.object({ overlap_hours: z.number().int().min(0).max(168).optional() }),
   handler: async ({ tx, ctx, params, body, headers }) => {
@@ -91,7 +91,7 @@ route({
 
 route({
   method: "POST", path: "/v1/webhooks/:id/test", scope: "admin", tag: "webhooks",
-  response: data(S.obj, 202),
+  response: data(object({ queued: S.bool, delivery: ref("WebhookDelivery"), poll: { type: "string", description: "The path to poll for the result" } }), 202),
   summary: "Queue a signed webhook.test event; the worker sends it within seconds. Poll the returned delivery for the result",
   idParams: { id: "webhook" },
   handler: async ({ tx, ctx, params }) => ({ status: 202, body: { data: await testWebhook(tx, ctx, params.id!) } }),
@@ -99,7 +99,7 @@ route({
 
 route({
   method: "GET", path: "/v1/webhooks/:id/deliveries", scope: "admin", tag: "webhooks", summary: "Delivery log for a webhook, newest first",
-  response: plain(object({ data: list(S.obj) })),
+  response: plain(object({ data: list(ref("WebhookDelivery")), next_before: nullable(S.str) })),
   idParams: { id: "webhook" },
   query: z.object({ status: z.enum(["pending", "succeeded", "dead"]).optional(), limit: z.coerce.number().int().optional(), before: z.string().optional() }),
   handler: async ({ tx, params, query }) => ({ body: await listDeliveries(tx, params.id!, query) }),
@@ -107,14 +107,14 @@ route({
 
 route({
   method: "GET", path: "/v1/webhook-deliveries/:id", scope: "admin", tag: "webhooks", summary: "One delivery, with its payload and last result",
-  response: R.any,
+  response: R.webhookDelivery,
   idParams: { id: "delivery" },
   handler: async ({ tx, params }) => ({ body: { data: await getDelivery(tx, params.id!) } }),
 });
 
 route({
   method: "POST", path: "/v1/webhook-deliveries/:id/replay", scope: "admin", tag: "webhooks", summary: "Send a delivery again (queues a new copy)",
-  response: data(S.obj, 202),
+  response: { ...R.webhookDelivery, status: 202 },
   idParams: { id: "delivery" },
   handler: async ({ tx, ctx, params }) => ({ status: 202, body: { data: await replayDelivery(tx, ctx, params.id!) } }),
 });
@@ -178,7 +178,7 @@ route({
 
 route({
   method: "POST", path: "/v1/automations/:id/test", scope: "admin", tag: "automations", heavy: true,
-  response: R.anyData,
+  response: R.automationTest,
   summary: "Run a saved automation against one record (or none, for a schedule) without side effects: HTTP requests and emails are described, never sent", idParams: { id: "automation" },
   body: z.object({ record: z.string().max(100).optional() }).strict(),
   handler: async ({ tx, ctx, params, body }) => ({ body: { data: await testAutomation(tx, ctx, { automation: params.id!, record: body.record }) } }),
@@ -186,7 +186,7 @@ route({
 
 route({
   method: "POST", path: "/v1/automations/test", scope: "admin", tag: "automations", heavy: true,
-  response: R.anyData,
+  response: R.automationTest,
   summary: "Run a draft automation against one record (or none, for a schedule) without saving it or causing side effects",
   body: z.object({ automation: AutomationInput, record: z.string().max(100).optional() }).strict(),
   handler: async ({ tx, ctx, body }) => ({ body: { data: await testAutomation(tx, ctx, { draft: body.automation, record: body.record }) } }),
@@ -267,9 +267,20 @@ const publicProcessing = (r: EventProcessing) => ({
   next_attempt_at: !r.processed_at && !r.dead_at ? r.next_attempt_at?.toISOString() ?? null : null,
 });
 
+/** An event as the caller may see it (core/webhooks.ts publicEvent), with how the worker got on with it. */
+const Event = object({
+  id: S.str, type: S.str, occurred_at: S.time, object: nullable(S.str), record_id: nullable(S.str),
+  actor: object({ type: S.str, id: nullable(S.str), surface: S.str }),
+  causation_depth: { type: "integer", description: "How many automation steps led to it (0 for a direct change)" },
+  automation_id: { ...nullable(S.str), description: "The automation whose step caused it, or null" },
+  data: { type: "object", additionalProperties: true,
+    description: "The event's own data. Open by design: it differs per event type (record events carry before/after field values, without fields the caller can't read)" },
+  processing: object({ status: enumOf("pending", "processed", "dead"), attempts: S.int, last_error: nullable(S.str), next_attempt_at: nullable(S.time) }),
+});
+
 route({
   method: "GET", path: "/v1/events", scope: "ops:read", tag: "events",
-  response: plain(object({ data: list(S.obj), next_before: nullable(S.str) })),
+  response: plain(object({ data: list(Event), next_before: nullable(S.str) })),
   summary: "Recent events (90 days), newest first. Filter by type prefix, record or processing status (dead = failed every retry)",
   query: z.object({
     type: z.string().max(100).optional(), record: z.string().optional(), limit: z.coerce.number().int().optional(), before: z.string().optional(),

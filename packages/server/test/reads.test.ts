@@ -555,4 +555,59 @@ describe("typed OpenAPI responses", () => {
     // The checker itself catches drift.
     expect(validate(doc, { $ref: "#/components/schemas/RecordPage" }, { data: [{ id: 1 }] }).length).toBeGreaterThan(0);
   });
+
+  it("real responses of the timeline, schema history and administration routes match what they declare", async () => {
+    const w = await newWorkspace("Typed admin");
+    const doc = (await call("GET", "/v1/openapi.json", { key: w.keys.admin })).json as Schema;
+    const declared = (template: string, method: string, status: number) =>
+      (doc.paths as Record<string, Record<string, { responses: Record<string, { content: Record<string, { schema: Schema }> }> }>>)[template]![method.toLowerCase()]!
+        .responses[String(status)]!.content["application/json"]!.schema;
+    const check = async (method: string, template: string, path: string, body: unknown, status: number, key = w.keys.admin) => {
+      const res = await call(method, path, { key, body });
+      expect(res.status, `${method} ${path} ${JSON.stringify(res.json)}`).toBe(status);
+      expect(validate(doc, declared(template, method, status), res.json), `${method} ${path}`).toEqual([]);
+      return res.json;
+    };
+
+    // A deal with an activity, a task and a stage change; a schema change.
+    const c = await create(w.keys.ops, "contact", { email: uniqueEmail("tl") });
+    const deal = await create(w.keys.ops, "deal", { name: "Timeline", primary_contact: c.id });
+    await call("POST", "/v1/ops/log_activity", { key: w.keys.ops, body: { type: "note", subject: "Hello", related_to: [deal.id] } });
+    await create(w.keys.ops, "task", { title: "Follow up", related_to: [deal.id] });
+    await call("POST", "/v1/ops/move_deal_stage", { key: w.keys.ops, body: { deal: deal.id, stage: "Closed won" } });
+    const tl = (await check("GET", "/v1/records/{id}/timeline", `/v1/records/${deal.id}/timeline`, undefined, 200, w.keys.ops)).data;
+    expect(new Set(tl.items.map((i: { kind: string }) => i.kind))).toEqual(new Set(["activity", "stage_change", "task"]));
+    expect((await call("POST", "/v1/objects/deal/fields", { key: w.keys.admin, body: { api_name: "region", type: "text" } })).status).toBe(201);
+    expect((await check("GET", "/v1/schema/changes", "/v1/schema/changes", undefined, 200)).data.length).toBeGreaterThan(0);
+    await check("GET", "/v1/me/access", "/v1/me/access", undefined, 200, w.keys.ops);
+
+    // Members and service accounts.
+    const m = (await check("POST", "/v1/members", "/v1/members", { email: uniqueEmail("typed"), name: "Typed", role: "member" }, 201)).data;
+    expect((await call("POST", "/v1/api-keys", { key: w.keys.admin, body: { name: "member key", scopes: ["ops:read"], owner: m.id } })).status).toBe(201);
+    expect((await check("PATCH", "/v1/members/{id}", `/v1/members/${m.id}`, { active: false }, 200)).data.keys_revoked).toBe(1);
+    await check("PATCH", "/v1/members/{id}", `/v1/members/${m.id}`, { active: true }, 200);
+    const sa = (await check("POST", "/v1/service-accounts", "/v1/service-accounts", { name: slug("bot"), role: "member" }, 201)).data;
+    await check("PATCH", "/v1/service-accounts/{id}", `/v1/service-accounts/${sa.id}`, { role: "read_only" }, 200);
+    const members = (await check("GET", "/v1/members", "/v1/members", undefined, 200)).data;
+    expect([members.users.length, members.service_accounts.length]).toEqual([2, 1]);
+    const review = (await check("GET", "/v1/access-review", "/v1/access-review", undefined, 200)).data;
+    expect(review.members.some((x: { keys: unknown[] }) => x.keys.length > 0)).toBe(true);
+
+    // Roles and permissions.
+    await check("GET", "/v1/permissions", "/v1/permissions", undefined, 200);
+    const role = (await check("POST", "/v1/roles", "/v1/roles", { key: slug("typed"), name: "Typed", permissions: ["records:read"],
+      objects: { deal: { write: false } }, fields: { contact: { email: "none" } } }, 201)).data;
+    await check("GET", "/v1/roles", "/v1/roles?include_archived=true", undefined, 200);
+    await check("GET", "/v1/roles/{id}", `/v1/roles/${role.key}`, undefined, 200);
+    expect((await check("GET", "/v1/roles/{id}/access", `/v1/roles/${role.id}/access`, undefined, 200)).data.objects.length).toBeGreaterThan(0);
+    await check("PATCH", "/v1/roles/{id}", `/v1/roles/${role.id}`, { description: "Changed" }, 200);
+    await check("DELETE", "/v1/roles/{id}", `/v1/roles/${role.id}`, undefined, 200);
+
+    // API keys and the audit log.
+    const keys = (await check("GET", "/v1/api-keys", "/v1/api-keys", undefined, 200)).data as { id: string; revoked_at: string | null; scopes: string[] }[];
+    const k = keys.find((x) => !x.revoked_at && x.scopes.includes("ops:read") && !x.scopes.includes("admin"))!;
+    const rotated = (await check("POST", "/v1/api-keys/{id}/rotate", `/v1/api-keys/${k.id}/rotate`, { overlap_hours: 1 }, 200)).data;
+    await check("POST", "/v1/api-keys/{id}/revoke", `/v1/api-keys/${rotated.id}/revoke`, undefined, 200);
+    expect((await check("GET", "/v1/audit/verify", "/v1/audit/verify", undefined, 200)).data.ok).toBe(true);
+  });
 });

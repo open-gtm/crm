@@ -26,7 +26,7 @@ import { encodeId } from "../lib/ids.js";
 import { TEXT_MAX } from "../lib/limits.js";
 import { SERVER_VERSION } from "../lib/version.js";
 import { route } from "./registry.js";
-import { createdOrDry, data, dataList, list, nullable, object, plain, R, ref, S } from "./responses.js";
+import { createdOrDry, data, dataList, enumOf, list, nullable, object, plain, R, ref, S, secretOmitted } from "./responses.js";
 
 const Values = z.record(z.string(), z.unknown());
 const DryRun = z.object({ dry_run: z.boolean().optional() });
@@ -127,7 +127,7 @@ route({
 
 route({
   method: "GET", path: "/v1/me/access", scope: "any", tag: "workspace",
-  response: data(object({ permissions: S.strs, objects: list(S.obj) })),
+  response: data(object({ permissions: S.strs, objects: list(ref("ObjectAccess")) })),
   summary: "What this key can do with records, per object: read, write, archive, and limited or restricted fields",
   handler: async ({ tx, ctx }) => ({ body: { data: { permissions: [...ctx.permissions], objects: describeAccess(ctx, await loadSchema(tx)) } } }),
 });
@@ -155,7 +155,12 @@ route({
 
 route({
   method: "GET", path: "/v1/schema/changes", scope: "admin", permission: "audit:read", tag: "schema", summary: "Schema change history, newest first",
-  response: R.anyList,
+  response: dataList(object({
+    version: S.int, changed_at: S.time, change: S.str, object: nullable(S.str), field: nullable(S.str), surface: S.str,
+    actor: { type: "string", description: "The member or service account (usr_…, svc_…), or the actor type (system)" },
+    before: { description: "The changed definition before, as stored: open by design, its shape depends on the change" },
+    after: { description: "The changed definition after, as stored: open by design, its shape depends on the change" },
+  })),
   query: z.object({ limit: z.coerce.number().int().optional() }),
   handler: async ({ tx, query }) => ({ body: { data: await schemaChanges(tx, query.limit) } }),
 });
@@ -346,7 +351,14 @@ route({
 
 route({
   method: "GET", path: "/v1/records/:id/timeline", scope: "ops:read", tag: "records", summary: "Activities, tasks and stage changes for a record",
-  idParams: { id: "record" }, query: z.object({ limit: z.coerce.number().int().optional() }), response: R.anyList,
+  idParams: { id: "record" }, query: z.object({ limit: z.coerce.number().int().optional() }),
+  response: data(object({
+    record: ref("Record"),
+    items: { ...list(object({
+      kind: enumOf("activity", "task", "stage_change"), at: S.str,
+      item: { anyOf: [ref("Record"), object({ from: nullable(S.str), to: S.str, status: S.str })], description: "The activity or task record, or a deal's stage change" },
+    })), description: "Newest first" },
+  })),
   handler: async ({ tx, ctx, params, query }) => ({ body: { data: await timeline(tx, ctx, params.id!, query.limit) } }),
 });
 
@@ -448,13 +460,13 @@ const MemberPatch = z.object({ role: RoleRef.optional(), active: z.boolean().opt
 
 route({
   method: "GET", path: "/v1/members", scope: "admin", permission: "members:manage", tag: "admin", summary: "Members and service accounts, with their roles",
-  response: R.anyList,
+  response: data(object({ users: list(ref("Member")), service_accounts: list(ref("Member")) })),
   handler: async ({ tx }) => ({ body: { data: await listMembers(tx) } }),
 });
 
 route({
   method: "POST", path: "/v1/members", scope: "admin", permission: "members:manage", tag: "admin",
-  response: data(S.obj, 201),
+  response: { ...R.member, status: 201 },
   summary: "Add a member with any role you could grant (you must hold all of its permissions). The email must be printable ASCII. send_invite: true emails them the sign-in page's address (off by default; limited per workspace and per sender, 429 past it)",
   body: z.object({ email: z.string(), name: z.string(), role: RoleRef, send_invite: z.boolean().optional() }),
   handler: async ({ tx, ctx, body }) => {
@@ -475,7 +487,7 @@ route({
 
 route({
   method: "PATCH", path: "/v1/members/:id", scope: "admin", permission: "members:manage", tag: "admin", idParams: { id: "member" },
-  response: R.any,
+  response: R.member,
   summary: "Change a member's role, or disable (active: false) or re-enable them. Disabling revokes all their API keys and ends their sessions",
   body: MemberPatch,
   handler: async ({ tx, ctx, params, body }) => ({ body: { data: await updateMember(tx, ctx, params.id!, body, "user") } }),
@@ -483,7 +495,7 @@ route({
 
 route({
   method: "POST", path: "/v1/service-accounts", scope: "admin", permission: "members:manage", tag: "admin",
-  response: data(S.obj, 201),
+  response: { ...R.member, status: 201 },
   summary: "Create a service account (for an integration or agent)",
   body: z.object({ name: z.string(), role: RoleRef }),
   handler: async ({ tx, ctx, body }) => ({ status: 201, body: { data: await addServiceAccount(tx, ctx, body) } }),
@@ -491,7 +503,7 @@ route({
 
 route({
   method: "PATCH", path: "/v1/service-accounts/:id", scope: "admin", permission: "members:manage", tag: "admin", idParams: { id: "service_account" },
-  response: R.any,
+  response: R.member,
   summary: "Change a service account's role, or disable or re-enable it. Disabling revokes all its API keys",
   body: MemberPatch,
   handler: async ({ tx, ctx, params, body }) => ({ body: { data: await updateMember(tx, ctx, params.id!, body, "service_account") } }),
@@ -499,7 +511,7 @@ route({
 
 route({
   method: "GET", path: "/v1/access-review", scope: "admin", permission: "audit:read", tag: "admin",
-  response: R.anyData,
+  response: R.accessReview,
   summary: "Access review: every member and service account with role, permissions, status and keys",
   handler: async ({ tx, ctx }) => ({ body: { data: await accessReview(tx, ctx) } }),
 });
@@ -508,20 +520,20 @@ route({
 
 route({
   method: "GET", path: "/v1/permissions", scope: "any", tag: "admin", summary: "The permissions a role can be built from",
-  response: R.anyList,
+  response: dataList(object({ key: S.str, description: S.str, requires: { ...S.strs, description: "Permissions a role must also hold to have this one" } })),
   handler: async () => ({ body: { data: permissionCatalog() } }),
 });
 
 route({
   method: "GET", path: "/v1/roles", scope: "any", tag: "admin", summary: "Roles: the four system roles and any custom ones",
-  response: R.anyList,
+  response: R.roles,
   query: z.object({ include_archived: z.enum(["true", "false"]).optional() }),
   handler: async ({ tx, ctx, query }) => ({ body: { data: await listRoles(tx, ctx, { includeArchived: query.include_archived === "true" }) } }),
 });
 
 route({
   method: "POST", path: "/v1/roles", scope: "admin", permission: "roles:manage", tag: "admin",
-  response: data(S.obj, 201),
+  response: { ...R.role, status: 201 },
   summary: "Create a custom role, optionally copying another role's permissions and rules. You must hold every permission and all record access it grants",
   body: z.object({ key: z.string(), name: z.string(), description: z.string().max(1000).optional(),
     permissions: z.array(z.string()).max(50).optional(), copy_from: RoleRef.optional(), ...RoleRules }),
@@ -530,20 +542,20 @@ route({
 
 route({
   method: "GET", path: "/v1/roles/:id", scope: "any", tag: "admin", summary: "Get a role by key or role_… ID", idParams: { id: "role" },
-  response: R.any,
+  response: R.role,
   handler: async ({ tx, ctx, params }) => ({ body: { data: await getRole(tx, ctx, params.id!) } }),
 });
 
 route({
   method: "GET", path: "/v1/roles/:id/access", scope: "any", tag: "admin", idParams: { id: "role" },
-  response: R.anyData,
+  response: data(object({ role: { type: "string", description: "The role's key" }, permissions: S.strs, objects: list(ref("ObjectAccess")) })),
   summary: "Effective record access of a role, per object: read, write, archive, and limited or restricted fields",
   handler: async ({ tx, ctx, params }) => ({ body: { data: await roleAccess(tx, ctx, params.id!) } }),
 });
 
 route({
   method: "PATCH", path: "/v1/roles/:id", scope: "admin", permission: "roles:manage", tag: "admin", idParams: { id: "role" },
-  response: R.any,
+  response: R.role,
   summary: "Change a custom role's name, description, permissions or object and field rules. System roles and roles you hold can't be changed",
   body: z.object({ name: z.string().optional(), description: z.string().max(1000).optional(), permissions: z.array(z.string()).max(50).optional(), ...RoleRules }),
   handler: async ({ tx, ctx, params, body }) => ({ body: { data: await updateRole(tx, ctx, params.id!, body) } }),
@@ -551,7 +563,7 @@ route({
 
 route({
   method: "DELETE", path: "/v1/roles/:id", scope: "admin", permission: "roles:manage", tag: "admin", idParams: { id: "role" },
-  response: R.any,
+  response: data(object({ id: S.str, key: S.str, archived: { type: "boolean", const: true } })),
   summary: "Archive a custom role. Refused while any active member holds it",
   handler: async ({ tx, ctx, params }) => ({ body: { data: await archiveRole(tx, ctx, params.id!) } }),
 });
@@ -560,13 +572,17 @@ route({
 
 route({
   method: "GET", path: "/v1/api-keys", scope: "admin", permission: "keys:manage", tag: "admin", summary: "List API keys (metadata only; secrets are never returned)",
-  response: R.anyList,
+  response: dataList(object({
+    id: S.str, name: S.str, owner: { type: "string", description: "The member or service account it acts as (usr_…, svc_…)" },
+    scopes: S.strs, environment: enumOf("live", "test"), hint: { type: "string", description: "The secret's first characters, to recognise it" },
+    created_at: S.time, expires_at: nullable(S.time), revoked_at: nullable(S.time), last_used_at: nullable(S.time),
+  })),
   handler: async ({ tx, ctx }) => ({ body: { data: await listApiKeys(tx, ctx) } }),
 });
 
 route({
   method: "POST", path: "/v1/api-keys", scope: "admin", permission: "keys:manage", tag: "admin",
-  response: data(object({ id: S.str, secret: S.str }), 201),
+  response: data(object({ id: S.str, secret: S.str, secret_omitted: secretOmitted }, ["id"]), 201),
   summary: "Create an API key. The secret is shown once. Scopes can't exceed the calling key's or the owner's role. test keys reach live data (there is no sandbox). From a browser session, needs a sign-in in the last 10 minutes: a key outlives the session",
   body: z.object({ name: z.string(), scopes: z.array(z.enum(["admin", "ops:write", "ops:read", "restricted:read"])).min(1),
     owner: z.string().optional(), environment: z.enum(["live", "test"]).optional(), expires_in_days: z.number().int().positive().max(3650).optional() }),
@@ -580,14 +596,19 @@ route({
 
 route({
   method: "POST", path: "/v1/api-keys/:id/revoke", scope: "admin", permission: "keys:manage", tag: "admin", summary: "Revoke an API key", idParams: { id: "key" },
-  response: R.any,
+  response: data(object({ id: S.str, revoked: { type: "boolean", const: true } })),
   handler: async ({ tx, ctx, params }) => ({ body: { data: await revokeApiKey(tx, ctx, params.id!) } }),
 });
 
 route({
   method: "POST", path: "/v1/api-keys/:id/rotate", scope: "admin", permission: "keys:manage", tag: "admin",
   summary: "Rotate an API key with an overlap window. From a browser session, needs a sign-in in the last 10 minutes",
-  response: R.any,
+  response: data(object({
+    id: { type: "string", description: "The new key" }, name: S.str, scopes: S.strs, environment: enumOf("live", "test"),
+    expires_at: { ...nullable(S.time), description: "The new key's expiry: the old key's, unchanged" },
+    secret: { type: "string", description: "The new key's secret, shown once" },
+    secret_omitted: secretOmitted, replaces: S.str, old_key_expires_in_hours: S.int,
+  }, ["id", "name", "scopes", "environment", "expires_at", "replaces", "old_key_expires_in_hours"])),
   idParams: { id: "key" }, body: z.object({ overlap_hours: z.number().int().min(0).max(168).optional() }).optional() as never,
   handler: async ({ tx, ctx, params, body, headers }) => {
     if ((headers.get("x-hlcrm-surface") ?? "api").endsWith("mcp") || ctx.surface.endsWith("mcp")) throw badRequest("Keys cannot be rotated through MCP");
@@ -619,7 +640,13 @@ route({
 
 route({
   method: "GET", path: "/v1/audit/verify", scope: "admin", permission: "audit:read", tag: "admin", summary: "Verify the audit log hash chain and its anchors",
-  response: R.anyData,
+  response: data(object({
+    ok: S.bool, rows_checked: S.int, unsealed: S.int,
+    anchors_checked: { type: "integer", description: "Anchors listed in the database, each checked against the chain and write-once storage" },
+    stored_anchors_checked: { type: "integer", description: "Anchors found in write-once storage, each checked to have a matching database anchor" },
+    checks: { ...S.strs, description: "The checks that ran to completion; a failure stops at the first problem" },
+    problem: { type: "string", description: "When ok is false: what failed" },
+  }, ["ok", "rows_checked", "unsealed", "anchors_checked", "stored_anchors_checked", "checks"])),
   // Uses the request transaction: opening a second one here would hold two pooled connections per call.
   // Doesn't wait for the tenant's verify/anchor lock: a concurrent call gets 409 at once instead of holding a connection.
   handler: async ({ tx, ctx }) => ({ body: { data: await verifyInTx(tx, ctx.tenantId, { wait: false }) } }),

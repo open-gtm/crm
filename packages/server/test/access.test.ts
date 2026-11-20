@@ -6,7 +6,7 @@ import { SYSTEM_ROLES, systemCtx } from "../src/core/context.js";
 import { updateMember } from "../src/core/workspace.js";
 import { withTenant } from "../src/db/tx.js";
 import { decodeId } from "../src/lib/ids.js";
-import { call, create, memberWithKey, newWorkspace, uniqueEmail, type Workspace } from "./helpers.js";
+import { call, create, memberWithKey, newWorkspace, uniqueEmail, validate, type Schema, type Workspace } from "./helpers.js";
 
 let ws: Workspace;
 const sql = postgres(process.env.TEST_DATABASE_URL!, { max: 1, onnotice: () => {} });
@@ -371,6 +371,15 @@ describe("idempotency never stores secrets", () => {
     expect(hook.status).toBe(201);
     const whsec = hook.json.data.secret as string;
     expect(whsec).toMatch(/^whsec_/);
+    const hookReplay = await call("POST", "/v1/webhooks", { key: ws.keys.admin, body: { url: "https://idem.example/hook", events: ["contact.*"] }, headers: { "Idempotency-Key": hookIdem } });
+    expect(hookReplay.json.data.secret).toBeUndefined();
+
+    // The declared responses allow for the replay: `secret` is not required, and the note is declared.
+    const doc = (await call("GET", "/v1/openapi.json", { key: ws.keys.admin })).json as Schema;
+    const declared = (path: string) => (doc.paths as Record<string, Record<string, { responses: Record<string, { content: Record<string, { schema: Schema }> }> }>>)[path]!.post!.responses["201"]!.content["application/json"]!.schema;
+    for (const [path, res] of [["/v1/api-keys", first], ["/v1/api-keys", replay], ["/v1/webhooks", hook], ["/v1/webhooks", hookReplay]] as const) {
+      expect(validate(doc, declared(path), res.json), `${path} ${res.headers.get("idempotent-replayed") ?? "first"}`).toEqual([]);
+    }
 
     const stored = await sql.begin(async (tx) => {
       await tx`SELECT set_config('app.tenant_id', ${ws.tenantId}, true)`;
