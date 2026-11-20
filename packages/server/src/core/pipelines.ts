@@ -3,15 +3,17 @@ import { conflict, notFound, unprocessable } from "../lib/errors.js";
 import { decodeId, encodeId, uuidv7 } from "../lib/ids.js";
 import { audit } from "./audit.js";
 import type { Ctx } from "./context.js";
+import {
+  allLiveStages, clearDefaultPipeline, insertPipeline, insertStage, livePipeline, livePipelines, liveStage, liveStagesOf, pipelineNameTaken,
+  pipelineNameTakenByAnother, setStagePosition, stageNameTaken, updatePipelineRow, updateStageRow, type PipelineRow, type StageRow,
+} from "./queries/pipelines.js";
 import { lockSchema, recordChange, type Change } from "./schema.js";
 
 export interface StageInput { name: string; category?: "open" | "won" | "lost"; probability?: number }
 
 export async function listPipelines(tx: Tx) {
-  const pipes = await tx<{ id: string; name: string; is_default: boolean }[]>`
-    SELECT id, name, is_default FROM pipelines WHERE archived_at IS NULL ORDER BY position, name`;
-  const stages = await tx<{ id: string; pipeline_id: string; name: string; category: string; default_probability: string | null }[]>`
-    SELECT id, pipeline_id, name, category, default_probability FROM stages WHERE archived_at IS NULL ORDER BY position`;
+  const pipes = await livePipelines(tx);
+  const stages = await allLiveStages(tx);
   return pipes.map((p) => ({
     id: encodeId("pipe", p.id), name: p.name, is_default: p.is_default,
     stages: stages.filter((s) => s.pipeline_id === p.id).map((s) => ({
@@ -38,16 +40,15 @@ export async function createPipeline(tx: Tx, ctx: Ctx, input: { name: string; is
   if (!input.stages.some((s) => s.category === "won")) throw unprocessable("A pipeline needs at least one won stage");
   if (!input.stages.some((s) => s.category === "lost")) throw unprocessable("A pipeline needs at least one lost stage");
   if (!dryRun) await lockSchema(tx);
-  const [dup] = await tx`SELECT 1 FROM pipelines WHERE name = ${input.name} AND archived_at IS NULL`;
-  if (dup) throw conflict(`A pipeline named "${input.name}" already exists`);
+  if (await pipelineNameTaken(tx, input.name)) throw conflict(`A pipeline named "${input.name}" already exists`);
   if (dryRun) return { dry_run: true, changes: [{ change: "pipeline_created", name: input.name, stages: input.stages }] };
   const id = uuidv7();
-  if (input.is_default) await tx`UPDATE pipelines SET is_default = false WHERE is_default`;
-  await tx`INSERT INTO pipelines (tenant_id, id, name, is_default) VALUES (${ctx.tenantId}, ${id}, ${input.name}, ${input.is_default ?? false})`;
+  if (input.is_default) await clearDefaultPipeline(tx);
+  await insertPipeline(tx, { tenantId: ctx.tenantId, id, name: input.name, isDefault: input.is_default ?? false });
   let position = 0;
   for (const s of input.stages) {
-    await tx`INSERT INTO stages (tenant_id, id, pipeline_id, name, position, category, default_probability)
-             VALUES (${ctx.tenantId}, ${uuidv7()}, ${id}, ${s.name}, ${position++}, ${s.category ?? "open"}, ${s.probability ?? null})`;
+    await insertStage(tx, { tenantId: ctx.tenantId, id: uuidv7(), pipelineId: id, name: s.name, position: position++, category: s.category ?? "open",
+      probability: s.probability ?? null });
   }
   await audit(tx, ctx, { action: "pipeline.created", objectType: "pipeline", recordId: id, details: { name: input.name } });
   // Pipelines are part of the schema document, so creating one moves the schema version like any other schema change.
@@ -59,19 +60,15 @@ export async function createPipeline(tx: Tx, ctx: Ctx, input: { name: string; is
 // and like every schema writer takes the schema lock (lockSchema) before it reads what it changes.
 // Stage categories never change and nothing is removed here: deals already in a stage depend on both.
 
-interface PipelineRow { id: string; name: string; is_default: boolean }
-interface StageRow { id: string; pipeline_id: string; name: string; category: string; default_probability: string | null; position: number }
-
 async function pipelineRow(tx: Tx, publicId: string): Promise<PipelineRow> {
   const d = decodeId(publicId);
-  const [p] = d?.prefix === "pipe" ? await tx<PipelineRow[]>`SELECT id, name, is_default FROM pipelines WHERE id = ${d.uuid} AND archived_at IS NULL` : [];
+  const p = d?.prefix === "pipe" ? await livePipeline(tx, d.uuid) : undefined;
   if (!p) throw notFound(`Pipeline ${publicId}`);
   return p;
 }
 
 async function stageRows(tx: Tx, pipelineId: string): Promise<StageRow[]> {
-  return tx<StageRow[]>`SELECT id, pipeline_id, name, category, default_probability, position FROM stages
-                        WHERE pipeline_id = ${pipelineId} AND archived_at IS NULL ORDER BY position`;
+  return liveStagesOf(tx, pipelineId);
 }
 
 function checkName(name: string, what: string): void {
@@ -86,8 +83,7 @@ export async function updatePipeline(tx: Tx, ctx: Ctx, publicId: string, patch: 
   const after: Record<string, unknown> = { pipeline: publicId };
   if (patch.name !== undefined && patch.name !== p.name) {
     checkName(patch.name, "Pipeline");
-    const [dup] = await tx`SELECT 1 FROM pipelines WHERE name = ${patch.name} AND archived_at IS NULL AND id <> ${p.id}`;
-    if (dup) throw conflict(`A pipeline named "${patch.name}" already exists`);
+    if (await pipelineNameTakenByAnother(tx, patch.name, p.id)) throw conflict(`A pipeline named "${patch.name}" already exists`);
     before.name = p.name;
     after.name = patch.name;
   }
@@ -97,9 +93,8 @@ export async function updatePipeline(tx: Tx, ctx: Ctx, publicId: string, patch: 
     after.is_default = true;
   }
   if (Object.keys(before).length === 0) return [];
-  if (after.is_default) await tx`UPDATE pipelines SET is_default = false WHERE is_default`;
-  await tx`UPDATE pipelines SET name = ${(after.name as string) ?? p.name}, is_default = ${(after.is_default as boolean) ?? p.is_default},
-           updated_at = now() WHERE id = ${p.id}`;
+  if (after.is_default) await clearDefaultPipeline(tx);
+  await updatePipelineRow(tx, p.id, (after.name as string) ?? p.name, (after.is_default as boolean) ?? p.is_default);
   const change: Change = { change: "pipeline_updated", object: "pipeline", before, after };
   await recordChange(tx, ctx, change);
   return [change];
@@ -116,9 +111,8 @@ export async function addStage(tx: Tx, ctx: Ctx, pipelinePublicId: string, stage
   if (stages.length >= 30) throw unprocessable("A pipeline can have at most 30 stages");
   if (stages.some((s) => s.name.toLowerCase() === stage.name.toLowerCase())) throw conflict(`Stage "${stage.name}" already exists in ${p.name}`);
   const id = uuidv7();
-  await tx`INSERT INTO stages (tenant_id, id, pipeline_id, name, position, category, default_probability)
-           VALUES (${ctx.tenantId}, ${id}, ${p.id}, ${stage.name}, ${Math.max(-1, ...stages.map((s) => s.position)) + 1},
-                   ${stage.category ?? "open"}, ${stage.probability ?? null})`;
+  await insertStage(tx, { tenantId: ctx.tenantId, id, pipelineId: p.id, name: stage.name, position: Math.max(-1, ...stages.map((s) => s.position)) + 1,
+    category: stage.category ?? "open", probability: stage.probability ?? null });
   const change: Change = { change: "stage_added", object: "pipeline",
     after: { pipeline: pipelinePublicId, stage: encodeId("stg", id), name: stage.name, category: stage.category ?? "open", probability: stage.probability ?? null } };
   await recordChange(tx, ctx, change);
@@ -129,15 +123,13 @@ export async function addStage(tx: Tx, ctx: Ctx, pipelinePublicId: string, stage
 export async function updateStage(tx: Tx, ctx: Ctx, stagePublicId: string, patch: { name?: string; probability?: number | null }): Promise<Change[]> {
   await lockSchema(tx);
   const d = decodeId(stagePublicId);
-  const [s] = d?.prefix === "stg" ? await tx<StageRow[]>`
-    SELECT id, pipeline_id, name, category, default_probability, position FROM stages WHERE id = ${d.uuid} AND archived_at IS NULL` : [];
+  const s = d?.prefix === "stg" ? await liveStage(tx, d.uuid) : undefined;
   if (!s) throw notFound(`Stage ${stagePublicId}`);
   const before: Record<string, unknown> = {};
   const after: Record<string, unknown> = { pipeline: encodeId("pipe", s.pipeline_id), stage: stagePublicId };
   if (patch.name !== undefined && patch.name !== s.name) {
     checkName(patch.name, "Stage");
-    const [dup] = await tx`SELECT 1 FROM stages WHERE pipeline_id = ${s.pipeline_id} AND lower(name) = lower(${patch.name}) AND id <> ${s.id} AND archived_at IS NULL`;
-    if (dup) throw conflict(`Stage "${patch.name}" already exists in this pipeline`);
+    if (await stageNameTaken(tx, s.pipeline_id, patch.name, s.id)) throw conflict(`Stage "${patch.name}" already exists in this pipeline`);
     before.name = s.name;
     after.name = patch.name;
   }
@@ -148,8 +140,7 @@ export async function updateStage(tx: Tx, ctx: Ctx, stagePublicId: string, patch
     after.probability = patch.probability;
   }
   if (Object.keys(before).length === 0) return [];
-  await tx`UPDATE stages SET name = ${(after.name as string) ?? s.name},
-           default_probability = ${"probability" in after ? (after.probability as number | null) : s.default_probability} WHERE id = ${s.id}`;
+  await updateStageRow(tx, s.id, (after.name as string) ?? s.name, "probability" in after ? (after.probability as number | null) : s.default_probability);
   const change: Change = { change: "stage_updated", object: "pipeline", before, after };
   await recordChange(tx, ctx, change);
   return [change];
@@ -164,7 +155,7 @@ export async function reorderStages(tx: Tx, ctx: Ctx, pipelinePublicId: string, 
   if (stagePublicIds.length !== current.length || new Set(stagePublicIds).size !== current.length || stagePublicIds.some((x) => !current.includes(x))) {
     throw unprocessable(`The new order must list each of ${p.name}'s ${current.length} stages exactly once`);
   }
-  for (const [i, sid] of stagePublicIds.entries()) await tx`UPDATE stages SET position = ${i} WHERE id = ${decodeId(sid)!.uuid}`;
+  for (const [i, sid] of stagePublicIds.entries()) await setStagePosition(tx, decodeId(sid)!.uuid, i);
   const change: Change = { change: "stages_reordered", object: "pipeline",
     before: { pipeline: pipelinePublicId, stages: current }, after: { pipeline: pipelinePublicId, stages: stagePublicIds } };
   await recordChange(tx, ctx, change);

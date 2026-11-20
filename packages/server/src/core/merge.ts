@@ -11,6 +11,10 @@ import { encryptValue } from "./encryption.js";
 import { emit } from "./events.js";
 import { fetchRows, getRecord, serialize, updateRecord, type RecordOut } from "./records.js";
 import { isModuleOn, loadSchema, quoteIdent, type FieldMeta, type ObjectMeta, type Schema } from "./schema.js";
+import {
+  archiveMergedRecords, bumpLinkHolders, countAlertReferences, countReferenceRows, dropDuplicateDeadlines, insertMerge, lockMerges, mergedInto,
+  moveDeadlines, moveGuardedReferences, moveNotifications, resolveDuplicateNotifications, runReferenceStatement, type ReferenceRow,
+} from "./queries/merge.js";
 
 /**
  * Merging duplicate records (POST /v1/ops/merge_records). One survivor takes the duplicates' place:
@@ -108,7 +112,7 @@ export interface MergeInput { survivor: string; duplicates: string[]; fields?: R
 
 interface MovedRow { k: string[]; from: string; holder: string }
 interface Moved { table: string; column: string; moved: MovedRow[]; dropped: MovedRow[]; archived: MovedRow[]; cleared: MovedRow[] }
-type Found = { h: string; old: string; k: string[] }[];
+type Found = ReferenceRow[];
 
 /**
  * The statements for one reference, built from identifiers only: every table and column name goes
@@ -221,13 +225,12 @@ export async function mergeRecords(tx: Tx, ctx: Ctx, input: MergeInput, dryRun: 
   }
 
   // One merge at a time per workspace: two merges touching the same rows in different orders would deadlock.
-  await tx`SELECT pg_advisory_xact_lock(hashtext(${`merge:${ctx.tenantId}`}))`;
+  await lockMerges(tx, ctx.tenantId);
   // Lock in ID order, so a merge and other writers over the same records can't deadlock.
   const rows = await fetchRows(tx, obj, [s.uuid, ...dupIds].sort(), true);
   const byId = new Map(rows.map((r) => [r.id, r]));
   for (const id of [s.uuid, ...dupIds]) if (!byId.has(id)) throw notFound(`${obj.label} ${encodeId(obj.id_prefix, id)}`);
-  const into = await tx<{ survivor_id: string; merged_id: string }[]>`
-    SELECT survivor_id, unnest(merged_ids) AS merged_id FROM merges WHERE tenant_id = app.tenant_id() AND merged_ids && ${[s.uuid, ...dupIds]}::uuid[]`;
+  const into = await mergedInto(tx, [s.uuid, ...dupIds]);
   for (const id of [s.uuid, ...dupIds]) {
     if (!byId.get(id)!.archived_at) continue;
     const m = into.find((x) => x.merged_id === id);
@@ -294,8 +297,7 @@ export async function mergeRecords(tx: Tx, ctx: Ctx, input: MergeInput, dryRun: 
     const mergeId = uuidv7();
     const survivorPublic = encodeId(obj.id_prefix, s.uuid);
     // Archived first: a unique value (an email, a domain) is free for the survivor once its holder is archived.
-    await t.unsafe(`UPDATE ${quoteIdent(obj.table_name ?? "records")} SET archived_at = now(), version = version + 1, updated_by = $2
-      WHERE tenant_id = app.tenant_id() AND id = ANY ($1::uuid[])`, [dupIds, ctx.actor.id] as never[]);
+    await archiveMergedRecords(t, obj.table_name ?? "records", dupIds, ctx.actor.id);
     for (const id of dupIds) {
       await audit(t, ctx, { action: `${obj.api_name}.archived`, objectType: obj.api_name, recordId: id, details: { merged_into: survivorPublic } });
       await emit(t, ctx, { type: `${obj.api_name}.archived`, objectType: obj.api_name, recordId: id, data: { merged_into: survivorPublic } });
@@ -305,10 +307,9 @@ export async function mergeRecords(tx: Tx, ctx: Ctx, input: MergeInput, dryRun: 
     // The survivor's previous values of the fields that change, for an unmerge: encrypted, since they may be restricted.
     const full = (await serialize(t, withRestricted(internalReader(ctx)), schema, obj, [byId.get(s.uuid)!], { includeHidden: true }))[0]!;
     const before = Object.fromEntries(Object.keys(changes).map((k) => [k, full[k] ?? null]));
-    await t`INSERT INTO merges (tenant_id, id, object_id, survivor_id, merged_ids, field_sources, survivor_before, repointed, merged_by)
-            VALUES (${ctx.tenantId}, ${mergeId}, ${obj.id}, ${s.uuid}, ${dupIds}::uuid[], ${t.json(sources as never)},
-                    ${Object.keys(before).length ? await encryptValue(t, ctx.tenantId, mergeId, "survivor_before", before) : null},
-                    ${t.json(moved.log as never)}, ${ctx.actor.id})`;
+    const survivorBefore = Object.keys(before).length ? await encryptValue(t, ctx.tenantId, mergeId, "survivor_before", before) : null;
+    await insertMerge(t, { tenantId: ctx.tenantId, id: mergeId, objectId: obj.id, survivorId: s.uuid, mergedIds: dupIds, fieldSources: sources,
+      survivorBefore, repointed: moved.log, mergedBy: ctx.actor.id });
     if (Object.keys(changes).length) await updateRecord(t, ctx, obj.api_name, survivorPublic, changes);
     const counts = Object.fromEntries(moved.log.map((m) => [`${m.table}.${m.column}`, m.moved.length + m.dropped.length + m.archived.length + m.cleared.length]));
     await audit(t, ctx, { action: `${obj.api_name}.merged`, objectType: obj.api_name, recordId: s.uuid,
@@ -362,13 +363,11 @@ const referencesFor = (obj: ObjectMeta) => REFERENCES.filter((r) => r.policy !==
 async function countReferences(tx: Tx, obj: ObjectMeta, dups: string[]): Promise<void> {
   let total = 0;
   for (const r of referencesFor(obj)) {
-    const n = (await tx.unsafe<{ n: number }[]>(statements(r).count, [dups] as never[]))[0]!.n;
+    const n = await countReferenceRows(tx, statements(r).count, dups);
     if (r.policy === "refuse" && n > 0) throw conflict(`A record in this merge ${r.refusal ?? "is referenced where a merge can't move it"}`);
     total += n;
   }
-  const [other] = await tx<{ n: number }[]>`SELECT ((SELECT count(*) FROM rule_deadlines WHERE tenant_id = app.tenant_id() AND record_id = ANY (${dups}::uuid[]))
-    + (SELECT count(*) FROM notifications WHERE tenant_id = app.tenant_id() AND record_id = ANY (${dups}::uuid[])))::int AS n`;
-  total += other!.n;
+  total += await countAlertReferences(tx, dups);
   if (total > MERGE_MAX_REFERENCES) {
     throw unprocessable(`This merge would move ${total} references to the survivor; one merge moves at most ${MERGE_MAX_REFERENCES}. `
       + "Merge fewer duplicates at a time (or move some of their references first)");
@@ -431,17 +430,17 @@ async function repoint(tx: Tx, ctx: Ctx, schema: Schema, obj: ObjectMeta, surviv
   for (const r of referencesFor(obj)) {
     if (r.policy === "refuse" || r.guarded) continue;
     const sql = statements(r);
-    const params = (r.via ? [survivor, dups] : [survivor, dups, ctx.actor.id]) as never[];
+    const params = r.via ? [survivor, dups] : [survivor, dups, ctx.actor.id];
     if (r.self) {
       check();
-      record(r, r.self === "clear" ? "cleared" : "dropped", await tx.unsafe<Found>(sql.self, params));
+      record(r, r.self === "clear" ? "cleared" : "dropped", await runReferenceStatement(tx, sql.self, params));
     }
     if (r.policy === "dedupe") {
       check();
-      record(r, r.via ? "dropped" : "archived", await tx.unsafe<Found>(sql.dedupe, params));
+      record(r, r.via ? "dropped" : "archived", await runReferenceStatement(tx, sql.dedupe, params));
     }
     check();
-    record(r, "moved", await tx.unsafe<Found>(sql.move, params));
+    record(r, "moved", await runReferenceStatement(tx, sql.move, params));
   }
 
   // Rows the immutability triggers protect move through app.merge_move, which also bumps those that hold a moved link.
@@ -451,8 +450,7 @@ async function repoint(tx: Tx, ctx: Ctx, schema: Schema, obj: ObjectMeta, surviv
     touch.delete(table);
     if (!guarded.length && !holders.length) continue;
     check();
-    const rows = await tx<{ row_id: string; col: string | null; ref: string | null }[]>`
-      SELECT row_id, col, ref FROM app.merge_move(${table}, ${survivor}, ${dups}::uuid[], ${holders}::uuid[], ${ctx.actor.id})`;
+    const rows = await moveGuardedReferences(tx, table, survivor, dups, holders, ctx.actor.id);
     for (const g of guarded) {
       record(g, "moved", rows.filter((x) => x.col === g.column).map((x) => ({ h: x.row_id, old: x.ref!, k: [x.row_id] })));
     }
@@ -463,7 +461,7 @@ async function repoint(tx: Tx, ctx: Ctx, schema: Schema, obj: ObjectMeta, surviv
     const todo = [...ids].filter((id) => !bumped.has(id));
     if (!todo.length) continue;
     check();
-    await tx.unsafe(bumpSql(table), [todo, ctx.actor.id] as never[]);
+    await bumpLinkHolders(tx, bumpSql(table), todo, ctx.actor.id);
     for (const id of todo) bumped.add(id);
   }
 
@@ -472,25 +470,12 @@ async function repoint(tx: Tx, ctx: Ctx, schema: Schema, obj: ObjectMeta, surviv
   check();
   const dl: Moved = { table: "rule_deadlines", column: "record_id", moved: [], dropped: [], archived: [], cleared: [] };
   const nt: Moved = { table: "notifications", column: "record_id", moved: [], dropped: [], archived: [], cleared: [] };
-  dl.dropped = (await tx<{ rule_id: string; record_id: string }[]>`
-    WITH c AS (SELECT rule_id, record_id, row_number() OVER (PARTITION BY rule_id ORDER BY (record_id = ${survivor}) DESC, array_position(${dups}::uuid[], record_id)) AS n
-               FROM rule_deadlines WHERE tenant_id = app.tenant_id() AND (record_id = ${survivor} OR record_id = ANY (${dups}::uuid[])))
-    DELETE FROM rule_deadlines d USING c WHERE d.tenant_id = app.tenant_id() AND d.rule_id = c.rule_id AND d.record_id = c.record_id AND c.n > 1 AND c.record_id <> ${survivor}
-    RETURNING d.rule_id, d.record_id`).map((x) => ({ k: [x.rule_id], from: x.record_id, holder: x.rule_id }));
-  dl.moved = (await tx<{ rule_id: string; old: string }[]>`
-    UPDATE rule_deadlines d SET record_id = ${survivor} FROM (SELECT rule_id, record_id AS old FROM rule_deadlines WHERE tenant_id = app.tenant_id() AND record_id = ANY (${dups}::uuid[])) o
-    WHERE d.tenant_id = app.tenant_id() AND d.rule_id = o.rule_id AND d.record_id = o.old RETURNING d.rule_id, o.old`).map((x) => ({ k: [x.rule_id], from: x.old, holder: x.rule_id }));
+  dl.dropped = (await dropDuplicateDeadlines(tx, survivor, dups)).map((x) => ({ k: [x.rule_id], from: x.record_id, holder: x.rule_id }));
+  dl.moved = (await moveDeadlines(tx, survivor, dups)).map((x) => ({ k: [x.rule_id], from: x.old, holder: x.rule_id }));
   check();
-  nt.archived = (await tx<{ id: string; record_id: string }[]>`
-    WITH c AS (SELECT id, record_id, row_number() OVER (PARTITION BY user_id, rule_id, automation_id
-                 ORDER BY (record_id = ${survivor}) DESC, array_position(${dups}::uuid[], record_id), id) AS n
-               FROM notifications WHERE tenant_id = app.tenant_id() AND state <> 'resolved' AND (record_id = ${survivor} OR record_id = ANY (${dups}::uuid[])))
-    UPDATE notifications n SET state = 'resolved', resolved_at = now() FROM c
-    WHERE n.tenant_id = app.tenant_id() AND n.id = c.id AND c.n > 1 AND c.record_id <> ${survivor} RETURNING n.id, n.record_id`)
+  nt.archived = (await resolveDuplicateNotifications(tx, survivor, dups))
     .map((x) => ({ k: [x.id], from: x.record_id, holder: x.id }));
-  nt.moved = (await tx<{ id: string; old: string }[]>`
-    UPDATE notifications n SET record_id = ${survivor} FROM (SELECT id, record_id AS old FROM notifications WHERE tenant_id = app.tenant_id() AND record_id = ANY (${dups}::uuid[])) o
-    WHERE n.tenant_id = app.tenant_id() AND n.id = o.id RETURNING n.id, o.old`).map((x) => ({ k: [x.id], from: x.old, holder: x.id }));
+  nt.moved = (await moveNotifications(tx, survivor, dups)).map((x) => ({ k: [x.id], from: x.old, holder: x.id }));
   for (const m of [dl, nt]) if (m.moved.length + m.dropped.length + m.archived.length) log.push(m);
 
   // One event per record whose reference moved: its normal event, with the IDs that moved (filtered per reader by field, like any update).

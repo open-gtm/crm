@@ -4,6 +4,12 @@ import { decodeId, uuidv7 } from "../lib/ids.js";
 import { canObject, canReadField } from "./access.js";
 import { audit } from "./audit.js";
 import { actorUserId, type Ctx } from "./context.js";
+import {
+  activityType, activityTypeEditable, activityTypeKeys, advanceDealsLastActivity, clearPrimaryAccountLink, contactLifecycle, contactPrimaryAccount,
+  defaultPipelineId, firstStage, hasCurrentAccountLink, insertActivityAssociation, insertActivityAssociationNow, insertFirstStageHistory,
+  insertPrimaryAccountLink, insertTaskAssociation, insertTaskCompletedActivity, recordExists, setContactLifecycle, stageNamed, stageNames,
+  stageOfPipeline, taskRecords,
+} from "./queries/standard.js";
 import { getObject, type ObjectMeta, type Schema } from "./schema.js";
 
 /** A record being created or updated, shared between the record engine and these hooks. */
@@ -40,8 +46,7 @@ async function resolveRelated(tx: Tx, ctx: Ctx, schema: Schema, raw: unknown): P
     const obj = d ? schema.byPrefix.get(d.prefix) : undefined;
     if (!d || !obj) throw unprocessable(`related_to: "${pid}" is not a record ID`);
     if (!canObject(ctx, obj, "read")) throw forbidden(`related_to: this key can't read ${obj.api_name} records, so it can't relate to them`);
-    const found = await tx`SELECT 1 FROM record_registry WHERE id = ${d.uuid} AND object_id = ${obj.id}`;
-    if (!found.length) throw unprocessable(`related_to: ${pid} was not found`);
+    if (!(await recordExists(tx, d.uuid, obj.id))) throw unprocessable(`related_to: ${pid} was not found`);
     ids.push(d.uuid);
   }
   return [...new Set(ids)];
@@ -67,7 +72,7 @@ export async function beforeCreate(tx: Tx, ctx: Ctx, d: Draft): Promise<void> {
       // The lead takes its contact's account, but only for a caller who can read contact.account:
       // otherwise lead.account would show them a value hidden on the contact.
       if (!cols.has("account_id") && cols.get("contact_id") && canReadField(ctx, getObject(d.schema, "contact"), "account")) {
-        const [c] = await tx`SELECT primary_account_id FROM contacts WHERE id = ${cols.get("contact_id") as string}`;
+        const c = await contactPrimaryAccount(tx, cols.get("contact_id") as string);
         if (c?.primary_account_id) cols.set("account_id", c.primary_account_id);
       }
       break;
@@ -86,9 +91,9 @@ export async function beforeCreate(tx: Tx, ctx: Ctx, d: Draft): Promise<void> {
     }
     case "activity": {
       const type = cols.get("type_key");
-      const [t] = await tx`SELECT key FROM activity_types WHERE key = ${type as string}`;
+      const t = await activityType(tx, type as string);
       if (!t) {
-        const types = await tx<{ key: string }[]>`SELECT key FROM activity_types ORDER BY key`;
+        const types = await activityTypeKeys(tx);
         throw unprocessable(`Unknown activity type "${String(type)}". Use one of: ${types.map((x) => x.key).join(", ")}`);
       }
       if (cols.get("actor_contact_id")) d.extra.set("actor_type", "contact");
@@ -107,7 +112,7 @@ async function prepareDealStage(tx: Tx, d: Draft): Promise<void> {
   const cols = d.prepared.columns;
   let pipelineId = cols.get("pipeline_id") as string | undefined;
   if (!pipelineId) {
-    const [p] = await tx<{ id: string }[]>`SELECT id FROM pipelines WHERE is_default AND archived_at IS NULL`;
+    const p = await defaultPipelineId(tx);
     if (!p) throw unprocessable("This workspace has no default pipeline; pass pipeline");
     pipelineId = p.id;
     cols.set("pipeline_id", pipelineId);
@@ -115,18 +120,16 @@ async function prepareDealStage(tx: Tx, d: Draft): Promise<void> {
   const stageInput = d.prepared.values.stage;
   let stage: { id: string; category: string; default_probability: string | null } | undefined;
   if (typeof stageInput === "string" && !decodeId(stageInput)) {
-    [stage] = await tx`SELECT id, category, default_probability FROM stages
-      WHERE pipeline_id = ${pipelineId} AND lower(name) = lower(${stageInput}) AND archived_at IS NULL`;
+    stage = await stageNamed(tx, pipelineId, stageInput);
     if (!stage) {
-      const names = await tx<{ name: string }[]>`SELECT name FROM stages WHERE pipeline_id = ${pipelineId} AND archived_at IS NULL ORDER BY position`;
+      const names = await stageNames(tx, pipelineId);
       throw unprocessable(`Stage "${stageInput}" is not in this pipeline. Stages: ${names.map((n) => n.name).join(", ")}`);
     }
   } else if (cols.get("stage_id")) {
-    [stage] = await tx`SELECT id, category, default_probability FROM stages WHERE id = ${cols.get("stage_id") as string} AND pipeline_id = ${pipelineId}`;
+    stage = await stageOfPipeline(tx, cols.get("stage_id") as string, pipelineId);
     if (!stage) throw unprocessable("stage does not belong to the deal's pipeline");
   } else {
-    [stage] = await tx`SELECT id, category, default_probability FROM stages
-      WHERE pipeline_id = ${pipelineId} AND archived_at IS NULL ORDER BY position LIMIT 1`;
+    stage = await firstStage(tx, pipelineId);
     if (!stage) throw unprocessable("The pipeline has no stages");
   }
   cols.set("stage_id", stage.id);
@@ -144,24 +147,21 @@ export async function afterCreate(tx: Tx, ctx: Ctx, d: Draft): Promise<void> {
       const actorContact = cols.get("actor_contact_id") as string | undefined;
       if (actorContact) related.add(actorContact);
       for (const rid of related) {
-        await tx`INSERT INTO activity_associations (tenant_id, activity_id, record_id, occurred_at)
-                 VALUES (${ctx.tenantId}, ${d.id}, ${rid}, ${occurred})`;
+        await insertActivityAssociation(tx, { tenantId: ctx.tenantId, activityId: d.id, recordId: rid, occurredAt: occurred });
       }
       // Bookkeeping: the activity's own time, which the caller just wrote; no value is copied from another record.
       if (related.size) {
-        await tx`UPDATE deals SET last_activity_at = greatest(coalesce(last_activity_at, ${occurred}::timestamptz), ${occurred}::timestamptz)
-                 WHERE id = ANY(${[...related]}::uuid[])`;
+        await advanceDealsLastActivity(tx, [...related], occurred);
       }
       break;
     }
     case "task":
       for (const rid of d.related ?? []) {
-        await tx`INSERT INTO task_associations (tenant_id, task_id, record_id) VALUES (${ctx.tenantId}, ${d.id}, ${rid})`;
+        await insertTaskAssociation(tx, ctx.tenantId, d.id, rid);
       }
       break;
     case "deal":
-      await tx`INSERT INTO deal_stage_history (tenant_id, id, deal_id, from_stage_id, to_stage_id, changed_by)
-               VALUES (${ctx.tenantId}, ${uuidv7()}, ${d.id}, NULL, ${cols.get("stage_id") as string}, ${ctx.actor.id})`;
+      await insertFirstStageHistory(tx, { tenantId: ctx.tenantId, id: uuidv7(), dealId: d.id, stageId: cols.get("stage_id") as string, changedBy: ctx.actor.id });
       await bumpLifecycle(tx, ctx, cols.get("primary_contact_id") as string, d.extra.get("status_category") === "won" ? "customer" : "opportunity");
       break;
     case "contact": // Bookkeeping: links the account the caller just set on the contact.
@@ -203,7 +203,7 @@ export async function beforeUpdate(_tx: Tx, _ctx: Ctx, d: Draft): Promise<void> 
 }
 
 async function isEditableActivity(tx: Tx, typeKey: string): Promise<boolean> {
-  const [t] = await tx`SELECT editable FROM activity_types WHERE key = ${typeKey}`;
+  const t = await activityTypeEditable(tx, typeKey);
   return Boolean(t?.editable);
 }
 
@@ -212,15 +212,13 @@ export async function afterUpdate(tx: Tx, ctx: Ctx, d: Draft): Promise<void> {
   if (d.obj.api_name === "task" && cols.get("status") === "done" && d.current!.status !== "done") {
     // A generic subject, linked to the task itself and the records it is about: readers see the task's
     // title through the link only if their role can read it (the subject used to copy it).
-    const related = await tx<{ record_id: string }[]>`SELECT record_id FROM task_associations WHERE task_id = ${d.id}`;
+    const related = await taskRecords(tx, d.id);
     const activityId = uuidv7();
     const actorUser = actorUserId(ctx);
-    await tx`INSERT INTO activities (tenant_id, id, type_key, actor_type, actor_user_id, subject, source, created_by, updated_by)
-             VALUES (${ctx.tenantId}, ${activityId}, 'task_completed', ${actorUser ? "user" : "system"}, ${actorUser},
-                     'Task completed', 'task', ${ctx.actor.id}, ${ctx.actor.id})`;
+    await insertTaskCompletedActivity(tx, { tenantId: ctx.tenantId, id: activityId, actorType: actorUser ? "user" : "system", actorUserId: actorUser,
+      createdBy: ctx.actor.id });
     for (const r of [{ record_id: d.id }, ...related]) {
-      await tx`INSERT INTO activity_associations (tenant_id, activity_id, record_id, occurred_at)
-               VALUES (${ctx.tenantId}, ${activityId}, ${r.record_id}, now())`;
+      await insertActivityAssociationNow(tx, { tenantId: ctx.tenantId, activityId, recordId: r.record_id });
     }
   }
   if (d.obj.api_name === "contact" && cols.get("primary_account_id")) {
@@ -229,12 +227,9 @@ export async function afterUpdate(tx: Tx, ctx: Ctx, d: Draft): Promise<void> {
 }
 
 async function ensureAccountContact(tx: Tx, ctx: Ctx, accountId: string, contactId: string): Promise<void> {
-  const existing = await tx`SELECT 1 FROM account_contacts
-    WHERE account_id = ${accountId} AND contact_id = ${contactId} AND archived_at IS NULL AND end_date IS NULL`;
-  if (existing.length) return;
-  await tx`UPDATE account_contacts SET is_primary = false WHERE contact_id = ${contactId} AND is_primary`;
-  await tx`INSERT INTO account_contacts (tenant_id, id, account_id, contact_id, is_primary, created_by, updated_by)
-           VALUES (${ctx.tenantId}, ${uuidv7()}, ${accountId}, ${contactId}, true, ${ctx.actor.id}, ${ctx.actor.id})`;
+  if (await hasCurrentAccountLink(tx, accountId, contactId)) return;
+  await clearPrimaryAccountLink(tx, contactId);
+  await insertPrimaryAccountLink(tx, { tenantId: ctx.tenantId, id: uuidv7(), accountId, contactId, actorId: ctx.actor.id });
 }
 
 /**
@@ -242,11 +237,9 @@ async function ensureAccountContact(tx: Tx, ctx: Ctx, accountId: string, contact
  * the new stage follows from the caller's own change (a lead or deal); no value is copied between records.
  */
 export async function bumpLifecycle(tx: Tx, ctx: Ctx, contactId: string, to: "lead" | "opportunity" | "customer"): Promise<void> {
-  const [c] = await tx<{ lifecycle_category: string; lifecycle_stage_overridden: boolean }[]>`
-    SELECT lifecycle_category, lifecycle_stage_overridden FROM contacts WHERE id = ${contactId}`;
+  const c = await contactLifecycle(tx, contactId);
   if (!c || c.lifecycle_stage_overridden) return;
   if (LIFECYCLE_ORDER.indexOf(c.lifecycle_category) >= LIFECYCLE_ORDER.indexOf(to)) return;
-  await tx`UPDATE contacts SET lifecycle_stage = ${to}, lifecycle_category = ${to}, version = version + 1, updated_by = ${ctx.actor.id}
-           WHERE id = ${contactId}`;
+  await setContactLifecycle(tx, contactId, to, ctx.actor.id);
   await audit(tx, ctx, { action: "contact.lifecycle_changed", objectType: "contact", recordId: contactId, details: { from: c.lifecycle_category, to } });
 }

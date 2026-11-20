@@ -7,15 +7,15 @@ import {
   ALL_PERMISSIONS, PERMISSION_REQUIRES, PERMISSIONS, RECORD_ACTIONS, can, isPermission, missingRequired,
   type Ctx, type FieldLimit, type ObjectRule, type Permission,
 } from "./context.js";
+import {
+  activeMemberCount, archiveRoleRow, deleteFieldRule, deleteObjectRule, insertRole, insertSystemRoles, liveRole, rolesWithMemberCounts,
+  updateRoleDefinition, upsertFieldRule, upsertObjectRule, type RoleRow,
+} from "./queries/roles.js";
 import { loadSchema, type Schema } from "./schema.js";
 
-export interface RoleRow {
-  id: string; key: string; name: string; description: string; permissions: Permission[]; is_system: boolean;
-  created_at: Date; updated_at: Date; archived_at: Date | null; access_version: string;
-}
+export type { RoleRow } from "./queries/roles.js";
 
 const KEY_PATTERN = /^[a-z][a-z0-9_]{1,39}$/;
-const ROLE_COLUMNS = "id, key, name, description, permissions, is_system, created_at, updated_at, archived_at, access_version::text";
 
 /**
  * Roles holding these configure work that runs with full record access, or (schema:manage) see per-field
@@ -30,7 +30,7 @@ export const permissionCatalog = () => ALL_PERMISSIONS.map((key) => ({ key, desc
 
 /** Seeds the system roles for the tenant in `app.tenant_id`. The definitions live in migration 006 (app.seed_system_roles). */
 export async function seedSystemRoles(tx: Tx): Promise<void> {
-  await tx`SELECT app.seed_system_roles()`;
+  await insertSystemRoles(tx);
 }
 
 /** Rules by object and field api_name, as the API takes and returns them. Rules on archived objects or fields are dormant and left out. */
@@ -67,9 +67,7 @@ export async function resolveRole(tx: Tx, ref: string, lock: "share" | "update" 
   const d = decodeId(ref);
   if (d && d.prefix !== "role") throw notFound("Role");
   if (!d && !KEY_PATTERN.test(ref)) throw notFound("Role");
-  const by = d ? tx`id = ${d.uuid}` : tx`key = ${ref}`;
-  const suffix = lock === "update" ? tx`FOR UPDATE` : lock === "share" ? tx`FOR SHARE` : tx``;
-  const [row] = await tx<RoleRow[]>`SELECT ${tx.unsafe(ROLE_COLUMNS)} FROM roles WHERE ${by} AND archived_at IS NULL ${suffix}`;
+  const row = await liveRole(tx, d ? { id: d.uuid } : { key: ref }, lock);
   if (!row) throw notFound("Role");
   return row;
 }
@@ -92,20 +90,12 @@ export async function assertCoversRole(tx: Tx, ctx: Ctx, schema: Schema, role: R
 }
 
 async function activeMembers(tx: Tx, roleId: string): Promise<number> {
-  const [r] = await tx<{ n: number }[]>`
-    SELECT (SELECT count(*) FROM users WHERE role_id = ${roleId} AND disabled_at IS NULL)::int
-         + (SELECT count(*) FROM service_accounts WHERE role_id = ${roleId} AND disabled_at IS NULL)::int AS n`;
-  return r?.n ?? 0;
+  return (await activeMemberCount(tx, roleId)) ?? 0;
 }
 
 export async function listRoles(tx: Tx, ctx: Ctx, opts: { includeArchived?: boolean } = {}) {
   const schema = await loadSchema(tx);
-  const rows = await tx<(RoleRow & { members: number })[]>`
-    SELECT r.id, r.key, r.name, r.description, r.permissions, r.is_system, r.created_at, r.updated_at, r.archived_at, r.access_version::text,
-      ((SELECT count(*) FROM users u WHERE u.role_id = r.id AND u.disabled_at IS NULL)
-       + (SELECT count(*) FROM service_accounts s WHERE s.role_id = r.id AND s.disabled_at IS NULL))::int AS members
-    FROM roles r WHERE ${opts.includeArchived ? tx`true` : tx`r.archived_at IS NULL`}
-    ORDER BY r.is_system DESC, r.created_at, r.key`;
+  const rows = await rolesWithMemberCounts(tx, opts.includeArchived ?? false);
   const out = [];
   for (const r of rows) out.push(publicRole(r, r.members, publicRules(schema, await loadRoleRules(tx, ctx.tenantId, r.id, r.access_version))));
   return out;
@@ -241,11 +231,8 @@ async function saveRules(tx: Tx, ctx: Ctx, schema: Schema, roleId: string, befor
     const a = after.objects.get(id);
     if (b && a && RECORD_ACTIONS.every((x) => b[x] === a[x])) continue;
     if (a) {
-      await tx`INSERT INTO role_object_permissions (tenant_id, role_id, object_id, can_read, can_write, can_archive, updated_by)
-               VALUES (${ctx.tenantId}, ${roleId}, ${id}, ${a.read}, ${a.write}, ${a.archive}, ${ctx.actor.id})
-               ON CONFLICT (tenant_id, role_id, object_id) DO UPDATE SET can_read = EXCLUDED.can_read, can_write = EXCLUDED.can_write,
-                 can_archive = EXCLUDED.can_archive, updated_by = EXCLUDED.updated_by, updated_at = now()`;
-    } else await tx`DELETE FROM role_object_permissions WHERE role_id = ${roleId} AND object_id = ${id}`;
+      await upsertObjectRule(tx, { tenantId: ctx.tenantId, roleId, objectId: id, read: a.read, write: a.write, archive: a.archive, updatedBy: ctx.actor.id });
+    } else await deleteObjectRule(tx, roleId, id);
     objectChanges.push({ object: schema.byId.get(id)?.api_name ?? id, read: a?.read ?? null, write: a?.write ?? null, archive: a?.archive ?? null });
   }
   const fieldName = new Map([...schema.objects.values()].flatMap((o) => o.fields.map((f) => [f.id, { object: o.api_name, field: f.api_name }] as const)));
@@ -253,10 +240,8 @@ async function saveRules(tx: Tx, ctx: Ctx, schema: Schema, roleId: string, befor
     const a = after.fields.get(id);
     if (before.fields.get(id) === a) continue;
     if (a) {
-      await tx`INSERT INTO role_field_permissions (tenant_id, role_id, field_id, access, updated_by)
-               VALUES (${ctx.tenantId}, ${roleId}, ${id}, ${a}, ${ctx.actor.id})
-               ON CONFLICT (tenant_id, role_id, field_id) DO UPDATE SET access = EXCLUDED.access, updated_by = EXCLUDED.updated_by, updated_at = now()`;
-    } else await tx`DELETE FROM role_field_permissions WHERE role_id = ${roleId} AND field_id = ${id}`;
+      await upsertFieldRule(tx, { tenantId: ctx.tenantId, roleId, fieldId: id, access: a, updatedBy: ctx.actor.id });
+    } else await deleteFieldRule(tx, roleId, id);
     fieldChanges.push({ ...(fieldName.get(id) ?? { object: "?", field: id }), access: a ?? null });
   }
   return { objectChanges, fieldChanges };
@@ -288,8 +273,7 @@ export async function createRole(tx: Tx, ctx: Ctx, input: CreateRoleInput) {
   if (description.length > 1000) throw unprocessable("description is limited to 1000 characters");
   const id = uuidv7();
   try {
-    await tx`INSERT INTO roles (tenant_id, id, key, name, description, permissions, created_by)
-             VALUES (${ctx.tenantId}, ${id}, ${input.key}, ${input.name.trim()}, ${description}, ${permissions}, ${ctx.actor.id})`;
+    await insertRole(tx, { tenantId: ctx.tenantId, id, key: input.key, name: input.name.trim(), description, permissions, createdBy: ctx.actor.id });
   } catch (e) {
     if ((e as { code?: string }).code === "23505") throw conflict(`A role with key "${input.key}" already exists`);
     throw e;
@@ -322,7 +306,7 @@ export async function updateRole(tx: Tx, ctx: Ctx, ref: string, patch: UpdateRol
   await assertCoversRole(tx, ctx, schema, { ...role, permissions }, "This change", rules);
   const name = patch.name?.trim() ?? role.name;
   const description = patch.description ?? role.description;
-  await tx`UPDATE roles SET name = ${name}, description = ${description}, permissions = ${permissions} WHERE id = ${role.id}`;
+  await updateRoleDefinition(tx, role.id, name, description, permissions);
   const saved = await saveRules(tx, ctx, schema, role.id, before, rules);
   const changed = diff(role.permissions, permissions);
   await audit(tx, ctx, { action: "role.updated", objectType: "role", recordId: role.id,
@@ -340,7 +324,7 @@ export async function archiveRole(tx: Tx, ctx: Ctx, ref: string) {
   if (role.key === ctx.actor.role) throw forbidden("You can't archive a role you hold");
   const n = await activeMembers(tx, role.id);
   if (n > 0) throw conflict(`${n} active member(s) hold this role; give them another role first`);
-  await tx`UPDATE roles SET archived_at = now() WHERE id = ${role.id}`;
+  await archiveRoleRow(tx, role.id);
   await audit(tx, ctx, { action: "role.archived", objectType: "role", recordId: role.id, details: { key: role.key, permissions: role.permissions } });
   return { id: encodeId("role", role.id), key: role.key, archived: true };
 }

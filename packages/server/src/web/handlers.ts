@@ -1,6 +1,7 @@
 import type { Context, Hono } from "hono";
 import { applyPasswordChange, preparePasswordChange } from "../auth/account.js";
 import { clearCookie, cookieNames, readCookie } from "../auth/cookies.js";
+import { passwordPageFacts, signedInPageFacts } from "../auth/queries.js";
 import { authorizationOrigin, ssoSettings } from "../auth/oidc.js";
 import { resolveSession, revokeOne, sessionPublicId } from "../auth/sessions.js";
 import { pendingChoice, safeReturnTo } from "../auth/signin.js";
@@ -88,10 +89,7 @@ export function mountPages(app: Hono<Env>): void {
   app.get("/auth/signed-in", async (c) => {
     const ctx = await sessionCtx(c);
     if (!ctx) return c.redirect("/auth/sign-in", 303);
-    const v = await withTenant(ctx.tenantId, async (tx) => (await tx<{ name: string; email: string; workspace: string; expires_at: Date; has_password: boolean; allowed: boolean }[]>`
-      SELECT u.name, u.email::text, t.name AS workspace, s.expires_at, c.password_hash IS NOT NULL AS has_password, t.password_sign_in AS allowed
-      FROM sessions s JOIN users u ON u.tenant_id = s.tenant_id AND u.id = s.user_id CROSS JOIN tenants t
-      LEFT JOIN member_credentials c ON c.tenant_id = u.tenant_id AND c.user_id = u.id WHERE s.id = ${ctx.session!.id}`)[0]!);
+    const v = (await withTenant(ctx.tenantId, (tx) => signedInPageFacts(tx, ctx.session!.id)))!;
     return html(c, signedInPage({ name: v.name, email: v.email, workspace: v.workspace, role: ctx.actor.role, expiresAt: v.expires_at.toISOString(),
       hasPassword: Boolean(v.has_password), passwordAllowed: v.allowed && config().PASSWORD_SIGN_IN, csrf: csrfToken(ctx.session!.id), apps: Boolean(oauthSettings()) }));
   });
@@ -99,9 +97,7 @@ export function mountPages(app: Hono<Env>): void {
   app.get("/auth/password", async (c) => {
     const ctx = await sessionCtx(c);
     if (!ctx) return c.redirect("/auth/sign-in?return_to=%2Fauth%2Fpassword", 303);
-    const v = await withTenant(ctx.tenantId, async (tx) => (await tx<{ has_password: boolean; allowed: boolean }[]>`
-      SELECT c.password_hash IS NOT NULL AS has_password, t.password_sign_in AS allowed FROM users u CROSS JOIN tenants t
-      LEFT JOIN member_credentials c ON c.tenant_id = u.tenant_id AND c.user_id = u.id WHERE u.id = ${ctx.actor.id}`)[0]!);
+    const v = (await withTenant(ctx.tenantId, (tx) => passwordPageFacts(tx, ctx.actor.id!)))!;
     return html(c, passwordPage({ hasPassword: Boolean(v.has_password), allowed: v.allowed && config().PASSWORD_SIGN_IN, csrf: csrfToken(ctx.session!.id),
       error: c.req.query("error"), done: c.req.query("done") === "1" }));
   });

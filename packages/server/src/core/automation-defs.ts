@@ -4,6 +4,7 @@ import { unprocessable } from "../lib/errors.js";
 import { encodeId } from "../lib/ids.js";
 import { TEXT_MAX } from "../lib/limits.js";
 import { permissionsForScopes, type Ctx } from "./context.js";
+import { compiledConditionRows } from "./queries/automations.js";
 import { compileQuery, type Where } from "./query.js";
 import { ScheduleFields, type Schedule } from "./schedule.js";
 import { getObject, type ObjectMeta, type Schema } from "./schema.js";
@@ -185,7 +186,7 @@ export async function conditionMatches(tx: Tx, schema: Schema, obj: ObjectMeta, 
   if (!condition) return true;
   const idCond: Where = { field: "id", op: "eq", value: encodeId(obj.id_prefix, recordId) };
   const q = compileQuery(schema, { object: obj.api_name, where: { and: [condition, idCond] }, include_archived: true, limit: 1 });
-  const rows = await tx.unsafe(q.text, q.params as never[]);
+  const rows = await compiledConditionRows(tx, q.text, q.params);
   return rows.length > 0;
 }
 

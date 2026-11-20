@@ -12,6 +12,11 @@ import { webUi } from "../web/static.js";
 import { activeMemberships, lookupIdentity, type Candidate, type Membership } from "./identity.js";
 import { LIMITS, emailKey, hit } from "./limits.js";
 import { dummyVerify, hashPassword, verifyPassword } from "./passwords.js";
+import {
+  allowFlowPrune, clearPasswordFailures, consumeChoiceFlow, consumeEmailFlows, consumeEmailFlowsOfBrowser, consumeServerLinkFlow, countPasswordAttempt,
+  deleteExpiredFlows, emailFlowByLinkForUpdate, emailFlowsForUpdate, insertSignInFlow, latestChoiceFlow, narrowToFlows, recordWrongCode,
+  replacePasswordHash, setFlowCandidates, type FlowRow,
+} from "./queries.js";
 import { createSession, webCtx, type ClientMeta } from "./sessions.js";
 import { CODE_PATTERN, codeHash, isToken, newCode, newToken, tokenHash } from "./tokens.js";
 
@@ -71,29 +76,22 @@ export async function settleSignInTasks(): Promise<void> {
 
 // --- Flows -----------------------------------------------------------------------------------------
 
-interface FlowRow { id: string; purpose: string; browser_hash: Buffer | null; link_hash: Buffer | null; code_hash: Buffer | null; attempts: number;
-  candidates: Candidate[]; method: SignInMethod | null; return_to: string | null; workspace_id: string | null; more_workspaces: boolean;
-  expires_at: Date; consumed_at: Date | null }
-
 /** A transaction that can see only the flows of this browser cookie and/or link token (the flow_lookup policy). */
 export function withFlows<T>(keys: { browser?: string | null; link?: string | null }, fn: (tx: Tx) => Promise<T>): Promise<T> {
   const hex = (t?: string | null) => (t && isToken(t) ? tokenHash(t).toString("hex") : "");
   return db().begin(async (tx) => {
-    await tx`SELECT set_config('app.flow_browser', ${hex(keys.browser)}, true), set_config('app.flow_link', ${hex(keys.link)}, true)`;
+    await narrowToFlows(tx, hex(keys.browser), hex(keys.link));
     return fn(tx);
   }) as Promise<T>;
 }
 
 const live = (f: FlowRow | undefined): f is FlowRow => Boolean(f && !f.consumed_at && f.expires_at.getTime() > Date.now());
-const FLOW_COLUMNS = "id, purpose, browser_hash, link_hash, code_hash, attempts, candidates, method, return_to, workspace_id, more_workspaces, expires_at, consumed_at";
 
 async function insertFlow(tx: Tx, f: { purpose: FlowRow["purpose"]; browser?: string | null; link?: string | null; codeHash?: Buffer | null;
   candidates?: Candidate[]; method?: SignInMethod | null; returnTo?: string | null; more?: boolean; minutes: number; id?: string }): Promise<string> {
   const id = f.id ?? uuidv7();
-  await tx`INSERT INTO sign_in_flows (id, browser_hash, link_hash, purpose, code_hash, candidates, method, return_to, more_workspaces, expires_at)
-           VALUES (${id}, ${f.browser ? tokenHash(f.browser) : null}, ${f.link ? tokenHash(f.link) : null}, ${f.purpose}, ${f.codeHash ?? null},
-                   ${tx.json((f.candidates ?? []) as never)}, ${f.method ?? null}, ${f.returnTo ?? null}, ${f.more ?? false},
-                   now() + make_interval(mins => ${f.minutes}))`;
+  await insertSignInFlow(tx, { id, browserHash: f.browser ? tokenHash(f.browser) : null, linkHash: f.link ? tokenHash(f.link) : null, purpose: f.purpose,
+    codeHash: f.codeHash ?? null, candidates: f.candidates ?? [], method: f.method ?? null, returnTo: f.returnTo ?? null, more: f.more ?? false, minutes: f.minutes });
   return id;
 }
 
@@ -169,8 +167,7 @@ export async function completeSignIn(candidates: Candidate[] | Membership[], met
 /** The workspaces a pending choice offers (names only), or null when there is no live choice for this browser. */
 export async function pendingChoice(browserToken: string | null): Promise<{ workspaces: { id: string; name: string }[]; more: boolean } | null> {
   if (!isToken(browserToken)) return null;
-  const f = await withFlows({ browser: browserToken }, async (tx) => (await tx.unsafe<FlowRow[]>(
-    `SELECT ${FLOW_COLUMNS} FROM sign_in_flows WHERE purpose = 'choose' ORDER BY created_at DESC LIMIT 1`))[0]);
+  const f = await withFlows({ browser: browserToken }, latestChoiceFlow);
   if (!live(f)) return null;
   return { workspaces: (await activeMemberships(f.candidates)).map((m) => m.workspace), more: f.more_workspaces };
 }
@@ -180,8 +177,7 @@ export async function chooseWorkspace(browserToken: string | null, workspace: un
   limitAddress(meta);
   if (!isToken(browserToken)) throw expired();
   const d = typeof workspace === "string" ? decodeId(workspace) : null;
-  const f = await withFlows({ browser: browserToken }, async (tx) => (await tx.unsafe<FlowRow[]>(
-    `UPDATE sign_in_flows SET consumed_at = now() WHERE purpose = 'choose' AND consumed_at IS NULL AND expires_at > now() RETURNING ${FLOW_COLUMNS}`))[0]);
+  const f = await withFlows({ browser: browserToken }, consumeChoiceFlow);
   if (!f) throw expired();
   const pick = d?.prefix === "ws" ? f.candidates.filter((c) => c.t === d.uuid) : [];
   if (pick.length !== 1) throw failed("Pick one of the workspaces offered");
@@ -233,7 +229,7 @@ async function deliverEmailCodes(browserToken: string, first: { id: string; code
     const flow = used ? { id: uuidv7(), code: newCode(), link: newToken() } : first;
     const candidates = group.map((m) => ({ t: m.tenantId, u: m.userId }));
     await withFlows({ browser: browserToken }, async (tx) => {
-      if (flow === first) await tx`UPDATE sign_in_flows SET candidates = ${tx.json(candidates as never)}, more_workspaces = ${found.more} WHERE id = ${first.id}`;
+      if (flow === first) await setFlowCandidates(tx, first.id, candidates, found.more);
       else await insertFlow(tx, { id: flow.id, purpose: "email", browser: browserToken, link: flow.link, codeHash: codeHash(flow.id, flow.code), candidates,
         returnTo, more: found.more, minutes: FLOW_MINUTES.email });
     });
@@ -281,18 +277,16 @@ export async function verifyEmailCode(browserToken: string | null, rawCode: unkn
   if (!isToken(browserToken)) throw expired();
   const code = typeof rawCode === "string" ? rawCode.replace(/[\s-]/g, "") : "";
   const r = await withFlows({ browser: browserToken }, async (tx) => {
-    const flows = (await tx.unsafe<FlowRow[]>(`SELECT ${FLOW_COLUMNS} FROM sign_in_flows WHERE purpose = 'email' ORDER BY created_at, id FOR UPDATE`))
-      .filter((f) => live(f) && f.attempts < CODE_ATTEMPTS);
+    const flows = (await emailFlowsForUpdate(tx)).filter((f) => live(f) && f.attempts < CODE_ATTEMPTS);
     if (flows.length === 0) return { kind: "expired" as const };
     const f = CODE_PATTERN.test(code) ? flows.find((x) => x.code_hash && safeEqual(codeHash(x.id, code), x.code_hash)) : undefined;
     if (!f) {
       const attempts = Math.max(...flows.map((x) => x.attempts)) + 1;
-      await tx`UPDATE sign_in_flows SET attempts = ${attempts}, consumed_at = ${attempts >= CODE_ATTEMPTS ? new Date() : null}
-               WHERE purpose = 'email' AND consumed_at IS NULL`;
+      await recordWrongCode(tx, attempts, attempts >= CODE_ATTEMPTS ? new Date() : null);
       return { kind: "wrong" as const, left: CODE_ATTEMPTS - attempts, candidates: flows.flatMap((x) => x.candidates) };
     }
     // This browser's sign-in step is used up, for every message it asked for.
-    await tx`UPDATE sign_in_flows SET consumed_at = now() WHERE purpose = 'email' AND consumed_at IS NULL`;
+    await consumeEmailFlows(tx);
     return { kind: "ok" as const, f };
   });
   if (r.kind === "expired") throw expired();
@@ -316,10 +310,10 @@ export async function useEmailLink(browserToken: string | null, linkToken: unkno
   limitAddress(meta);
   if (!isToken(linkToken)) throw expired();
   const r = await withFlows({ browser: browserToken, link: linkToken }, async (tx) => {
-    const [f] = await tx.unsafe<FlowRow[]>(`SELECT ${FLOW_COLUMNS} FROM sign_in_flows WHERE link_hash = $1 AND purpose = 'email' FOR UPDATE`, [tokenHash(linkToken)]);
+    const f = await emailFlowByLinkForUpdate(tx, tokenHash(linkToken));
     if (!live(f) || f.attempts >= CODE_ATTEMPTS) return { kind: "expired" as const };
     if (!isToken(browserToken) || !f.browser_hash || !safeEqual(f.browser_hash, tokenHash(browserToken))) return { kind: "other_browser" as const, f };
-    await tx`UPDATE sign_in_flows SET consumed_at = now() WHERE purpose = 'email' AND consumed_at IS NULL AND browser_hash = ${f.browser_hash}`;
+    await consumeEmailFlowsOfBrowser(tx, f.browser_hash);
     return { kind: "ok" as const, f };
   });
   if (r.kind === "expired") throw expired();
@@ -380,9 +374,7 @@ export async function createServerLink(rawEmail: string, workspace: string | und
 export async function useServerLink(linkToken: unknown, meta: ClientMeta): Promise<SignInResult> {
   limitAddress(meta);
   if (!isToken(linkToken)) throw expired();
-  const f = await withFlows({ link: linkToken }, async (tx) => (await tx.unsafe<FlowRow[]>(
-    `UPDATE sign_in_flows SET consumed_at = now() WHERE link_hash = $1 AND purpose = 'server_link' AND consumed_at IS NULL AND expires_at > now()
-     RETURNING ${FLOW_COLUMNS}`, [tokenHash(linkToken)]))[0]);
+  const f = await withFlows({ link: linkToken }, (tx) => consumeServerLinkFlow(tx, tokenHash(linkToken)));
   if (!f) throw expired();
   return completeSignIn(f.candidates, "server_link", f.return_to, meta);
 }
@@ -428,12 +420,7 @@ export async function passwordSignIn(rawEmail: unknown, password: unknown, retur
 export async function checkPassword(m: { tenantId: string; userId: string }, password: string, meta: ClientMeta,
   opts: { reason?: string; rehash?: boolean } = {}): Promise<"ok" | "wrong" | "locked"> {
   const reason = opts.reason ?? "wrong_password";
-  const [slot] = await withTenant(m.tenantId, (tx) => tx<{ failures: number; hash: string }[]>`
-    UPDATE member_credentials SET password_failures = password_failures + 1,
-      password_locked_until = CASE WHEN password_failures + 1 >= ${LOCK_AFTER}
-        THEN now() + make_interval(mins => least(power(2, password_failures + 1 - ${LOCK_AFTER}), 60)::int) END
-    WHERE user_id = ${m.userId} AND password_hash IS NOT NULL AND (password_locked_until IS NULL OR password_locked_until <= now())
-    RETURNING password_failures AS failures, password_hash AS hash`);
+  const slot = await withTenant(m.tenantId, (tx) => countPasswordAttempt(tx, m.userId, LOCK_AFTER));
   if (!slot) {
     await dummyVerify(password);
     background("password failure", () => auditMember(m, "auth.sign_in_failed", { method: "password", reason: "locked" }, meta));
@@ -441,7 +428,7 @@ export async function checkPassword(m: { tenantId: string; userId: string }, pas
   }
   const v = password.length <= 1024 ? await verifyPassword(password, slot.hash) : { ok: false, rehash: false };
   if (v.ok) {
-    await withTenant(m.tenantId, (tx) => tx`UPDATE member_credentials SET password_failures = 0, password_locked_until = NULL WHERE user_id = ${m.userId}`);
+    await withTenant(m.tenantId, (tx) => clearPasswordFailures(tx, m.userId));
     if (v.rehash && opts.rehash !== false) await rehash(m, slot.hash, password);
     return "ok";
   }
@@ -455,7 +442,7 @@ export async function checkPassword(m: { tenantId: string; userId: string }, pas
 async function rehash(m: { tenantId: string; userId: string }, previous: string, password: string): Promise<void> {
   const next = await hashPassword(password);
   // Only if nobody changed the password meanwhile.
-  await withTenant(m.tenantId, (tx) => tx`UPDATE member_credentials SET password_hash = ${next} WHERE user_id = ${m.userId} AND password_hash = ${previous}`);
+  await withTenant(m.tenantId, (tx) => replacePasswordHash(tx, m.userId, next, previous));
 }
 
 // --- Invitations -----------------------------------------------------------------------------------
@@ -519,7 +506,7 @@ export async function sendInvitation(to: string, workspaceName: string, invitedB
 /** Deletes sign-in steps that have expired. The flow_lookup policy lets this see expired rows only. */
 export async function pruneSignInFlows(): Promise<number> {
   return db().begin(async (tx) => {
-    await tx`SELECT set_config('app.flow_prune', 'on', true)`;
-    return (await tx`DELETE FROM sign_in_flows WHERE expires_at < now() RETURNING 1`).length;
+    await allowFlowPrune(tx);
+    return deleteExpiredFlows(tx);
   }) as Promise<number>;
 }
