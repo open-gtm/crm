@@ -10,7 +10,7 @@ import {
   archiveWebhook, createWebhook, getDelivery, getWebhook, listDeliveries, listWebhooks, publicEvent, replayDelivery,
   revealWebhookSecret, rotateWebhookSecret, testWebhook, updateWebhook,
 } from "../core/webhooks.js";
-import { recentEvents, type EventProcessing } from "../core/events-queries.js";
+import { recentEvents, type EventProcessing } from "../core/queries/events.js";
 import { loadSchema } from "../core/schema.js";
 import { badRequest } from "../lib/errors.js";
 import { decodeId } from "../lib/ids.js";

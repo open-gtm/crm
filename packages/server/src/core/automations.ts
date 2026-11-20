@@ -19,6 +19,13 @@ import { can, type Ctx } from "./context.js";
 import { decryptValue, encryptValue } from "./encryption.js";
 import { ADDRESS_PART_NAMES, FieldValueError, isAddressPart, normalizeInput } from "./fieldtypes.js";
 import { receivers, resolveUsers } from "./notifications.js";
+import {
+  hasRunForEvent, insertEventRun, insertManualRun, manualRunCounts, recentRunCounts, runsOf,
+} from "./queries/automation-runs.js";
+import {
+  archiveAutomationRow, automationById, automationsListeningFor, countLiveAutomations, deleteSuppression, insertAutomation, insertSuppression, liveAutomations,
+  liveRoles, pauseAutomationRow, resumeAutomationRow, saveAutomationSettings, scheduledAutomations, setNextRun, suppressionOf, updateAutomationDefinition,
+} from "./queries/automations.js";
 import { compileQuery, type Where } from "./query.js";
 import { getRecord } from "./records.js";
 import { contextForRole, resolveRole } from "./roles.js";
@@ -423,8 +430,7 @@ async function recipientWarnings(tx: Tx, ctx: Ctx, schema: Schema, a: Pick<Autom
     }
   }
   if (!steps.some((s) => s.type === "send_email" && (s.to.field !== undefined || s.to.address !== undefined))) return;
-  const roles = await tx<{ id: string; key: string; permissions: string[]; access_version: string }[]>`
-    SELECT id, key, permissions, access_version::text FROM roles WHERE archived_at IS NULL ORDER BY key`;
+  const roles = await liveRoles(tx);
   const hiding: string[] = [];
   for (const r of roles) {
     const why = depsHiddenFrom(await contextForRole(tx, ctx, r as never), schema, deps);
@@ -486,9 +492,7 @@ function parseAutomationId(publicId: string): string {
 
 async function loadAutomation(tx: Tx, publicId: string, forUpdate = false): Promise<AutomationRow> {
   const id = parseAutomationId(publicId);
-  const [a] = forUpdate
-    ? await tx<AutomationRow[]>`SELECT * FROM automations WHERE id = ${id} FOR UPDATE`
-    : await tx<AutomationRow[]>`SELECT * FROM automations WHERE id = ${id}`;
+  const a = await automationById(tx, id, forUpdate);
   if (!a) throw notFound(`Automation ${publicId}`);
   return a;
 }
@@ -504,15 +508,15 @@ export async function createAutomation(tx: Tx, ctx: Ctx, input: AutomationInputT
   const v = await validate(tx, ctx, input, null);
   const extra = { ...(v.nextRuns ? { next_runs: v.nextRuns } : {}) };
   if (dryRun) return { dry_run: true, summary: v.summary, warnings: v.warnings, ...extra, automation: preview(v, input.enabled ?? true, input.hourly_cap ?? 100) };
-  const [count] = await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM automations WHERE archived_at IS NULL`;
-  if ((count?.n ?? 0) >= 200) throw conflict("A workspace can have at most 200 automations");
+  const count = await countLiveAutomations(tx);
+  if ((count ?? 0) >= 200) throw conflict("A workspace can have at most 200 automations");
   const id = uuidv7();
   const secrets = Object.keys(v.secrets).length ? await encryptValue(tx, ctx.tenantId, id, "automation_secrets", v.secrets) : null;
-  await tx`
-    INSERT INTO automations (tenant_id, id, name, description, enabled, trigger, condition, actions, hourly_cap, created_by, run_roles, next_run_at, secrets)
-    VALUES (${ctx.tenantId}, ${id}, ${input.name}, ${input.description ?? null}, ${input.enabled ?? true}, ${tx.json(v.trigger as never)},
-            ${input.condition === undefined ? null : tx.json(input.condition as never)}, ${tx.json(v.actions as never)}, ${input.hourly_cap ?? 100}, ${ctx.actor.id},
-            ${v.runRoles}, ${nextRunFor(v.trigger, input.enabled ?? true, false, v.settings)}, ${secrets})`;
+  await insertAutomation(tx, {
+    tenantId: ctx.tenantId, id, name: input.name, description: input.description ?? null, enabled: input.enabled ?? true, trigger: v.trigger,
+    condition: input.condition, actions: v.actions, hourlyCap: input.hourly_cap ?? 100, createdBy: ctx.actor.id,
+    runRoles: v.runRoles, nextRunAt: nextRunFor(v.trigger, input.enabled ?? true, false, v.settings), secrets,
+  });
   await audit(tx, ctx, { action: "automation.created", details: { automation: encodeId("auto", id), trigger: v.trigger.type === "event" ? v.trigger.event : v.trigger.type,
     actions: allSteps(v.actions).map((a) => a.type), ...(sendsOut(v.actions) ? { sends_out: true } : {}) } });
   return { dry_run: false, summary: v.summary, warnings: v.warnings, ...extra, automation: publicAutomation(await loadAutomation(tx, encodeId("auto", id))) };
@@ -530,12 +534,12 @@ export async function updateAutomation(tx: Tx, ctx: Ctx, publicId: string, patch
   const extra = { ...(v.nextRuns ? { next_runs: v.nextRuns } : {}) };
   if (dryRun) return { dry_run: true, summary: v.summary, warnings: v.warnings, ...extra, automation: { ...publicAutomation(cur), ...preview(v, next.enabled ?? true, next.hourly_cap ?? 100) } };
   const secrets = Object.keys(v.secrets).length ? await encryptValue(tx, ctx.tenantId, cur.id, "automation_secrets", v.secrets) : null;
-  await tx`
-    UPDATE automations SET name = ${next.name}, description = ${next.description ?? null}, enabled = ${next.enabled ?? true},
-      trigger = ${tx.json(v.trigger as never)}, condition = ${next.condition == null ? null : tx.json(next.condition as never)},
-      actions = ${tx.json(v.actions as never)}, hourly_cap = ${next.hourly_cap ?? 100}, run_roles = ${v.runRoles}, secrets = ${secrets},
-      next_run_at = ${nextRunFor(v.trigger, next.enabled ?? true, Boolean(cur.paused_at), v.settings)}, version = version + 1
-    WHERE id = ${cur.id}`;
+  await updateAutomationDefinition(tx, cur.id, {
+    name: next.name, description: next.description ?? null, enabled: next.enabled ?? true,
+    trigger: v.trigger, condition: next.condition,
+    actions: v.actions, hourlyCap: next.hourly_cap ?? 100, runRoles: v.runRoles, secrets,
+    nextRunAt: nextRunFor(v.trigger, next.enabled ?? true, Boolean(cur.paused_at), v.settings),
+  });
   await audit(tx, ctx, { action: "automation.updated", details: { automation: publicId, fields: Object.keys(patch), ...(sendsOut(v.actions) ? { sends_out: true } : {}) } });
   return { dry_run: false, summary: v.summary, warnings: v.warnings, ...extra, automation: publicAutomation(await loadAutomation(tx, publicId)) };
 }
@@ -543,7 +547,7 @@ export async function updateAutomation(tx: Tx, ctx: Ctx, publicId: string, patch
 export async function archiveAutomation(tx: Tx, ctx: Ctx, publicId: string) {
   const cur = await loadAutomation(tx, publicId, true);
   if (!cur.archived_at) {
-    await tx`UPDATE automations SET archived_at = now(), enabled = false, next_run_at = NULL WHERE id = ${cur.id}`;
+    await archiveAutomationRow(tx, cur.id);
     await audit(tx, ctx, { action: "automation.archived", details: { automation: publicId } });
   }
   return publicAutomation(await loadAutomation(tx, publicId));
@@ -555,7 +559,7 @@ export async function pauseAutomation(tx: Tx, ctx: Ctx, publicId: string, reason
   if (cur.archived_at) throw conflict(`Automation ${publicId} is archived`);
   if (!cur.paused_at) {
     const why = (reason ?? `paused by ${actorRef(ctx.actor.type, ctx.actor.id) ?? "the system"}`).slice(0, 500);
-    await tx`UPDATE automations SET paused_at = now(), paused_reason = ${why}, next_run_at = NULL WHERE id = ${cur.id}`;
+    await pauseAutomationRow(tx, cur.id, why);
     await audit(tx, ctx, { action: "automation.paused", details: { automation: publicId } });
   }
   return publicAutomation(await loadAutomation(tx, publicId));
@@ -566,15 +570,14 @@ export async function resumeAutomation(tx: Tx, ctx: Ctx, publicId: string) {
   if (cur.archived_at) throw conflict(`Automation ${publicId} is archived`);
   if (cur.paused_at) {
     const settings = await loadSettings(tx);
-    await tx`UPDATE automations SET paused_at = NULL, paused_reason = NULL, consecutive_failures = 0,
-               next_run_at = ${nextRunFor(triggerOf(cur.trigger), cur.enabled, false, settings)} WHERE id = ${cur.id}`;
+    await resumeAutomationRow(tx, cur.id, nextRunFor(triggerOf(cur.trigger), cur.enabled, false, settings));
     await audit(tx, ctx, { action: "automation.resumed", details: { automation: publicId } });
   }
   return publicAutomation(await loadAutomation(tx, publicId));
 }
 
 export async function listAutomations(tx: Tx) {
-  return (await tx<AutomationRow[]>`SELECT * FROM automations WHERE archived_at IS NULL ORDER BY created_at`).map(publicAutomation);
+  return (await liveAutomations(tx)).map(publicAutomation);
 }
 
 export async function getAutomation(tx: Tx, publicId: string) {
@@ -591,18 +594,9 @@ export async function schedulePreview(tx: Tx, t: { publicId?: string; trigger?: 
     next_runs: upcoming(trigger as Schedule, new Date(), settings.timezone, Math.min(Math.max(n, 1), 20)) };
 }
 
-interface RunListRow {
-  id: string; event_id: string | null; record_id: string | null; status: string; reason: string | null; depth: number; results: unknown; started_at: Date;
-  finished_at: Date | null; trigger_kind: string; scheduled_for: Date | null; requested_by: string | null; input: { record?: string; via?: Record<string, string> } | null;
-  attempts: number; usage: unknown;
-}
-
 export async function listRuns(tx: Tx, publicId: string, limit = 50, status?: string) {
   const a = await loadAutomation(tx, publicId);
-  const rows = await tx<RunListRow[]>`
-    SELECT id, event_id, record_id, status, reason, depth, results, started_at, finished_at, trigger_kind, scheduled_for, requested_by, input, attempts, usage
-    FROM automation_runs WHERE automation_id = ${a.id} AND (${status ?? null}::text IS NULL OR status = ${status ?? null})
-    ORDER BY started_at DESC LIMIT ${Math.min(Math.max(limit, 1), 200)}`;
+  const rows = await runsOf(tx, a.id, status ?? null, Math.min(Math.max(limit, 1), 200));
   const schema = await loadSchema(tx);
   let prefix: string | undefined;
   try {
@@ -633,8 +627,7 @@ export async function listRuns(tx: Tx, publicId: string, limit = 50, status?: st
  */
 export async function runAutomationsForEvent(tx: Tx, tenantId: string, event: EventRow): Promise<number> {
   if (!event.object_type || !event.record_id) return 0;
-  const autos = await tx<AutomationRow[]>`
-    SELECT * FROM automations WHERE enabled AND archived_at IS NULL AND paused_at IS NULL AND trigger->>'event' = ${event.type} ORDER BY created_at`;
+  const autos = await automationsListeningFor(tx, event.type);
   if (autos.length === 0) return 0;
   const settings = await loadSettings(tx);
   if (settings.paused_at) return 0;
@@ -650,13 +643,10 @@ export async function runAutomationsForEvent(tx: Tx, tenantId: string, event: Ev
     if (event.data.reference_move && !t.include_reference_moves) continue;
     const runId = uuidv7();
     const record = async (status: string, reason: string | null, results: unknown = [], usage: Record<string, unknown> = {}) => {
-      await tx`INSERT INTO automation_runs (tenant_id, id, automation_id, event_id, record_id, status, reason, depth, results, finished_at, usage)
-               VALUES (${tenantId}, ${runId}, ${a.id}, ${event.id}, ${event.record_id}, ${status}, ${reason}, ${event.causation_depth},
-                       ${tx.json(results as never)}, ${status === "queued" ? null : new Date()}, ${tx.json(usage as never)})
-               ON CONFLICT (tenant_id, automation_id, event_id) DO NOTHING`;
+      await insertEventRun(tx, { tenantId, id: runId, automationId: a.id, eventId: event.id, recordId: event.record_id, status, reason, depth: event.causation_depth,
+        results, finishedAt: status === "queued" ? null : new Date(), usage });
     };
-    const [prior] = await tx`SELECT 1 FROM automation_runs WHERE automation_id = ${a.id} AND event_id = ${event.id}`;
-    if (prior) continue;
+    if (await hasRunForEvent(tx, a.id, event.id)) continue;
     if (event.automation_id === a.id) continue; // never react to your own change
     let matches: boolean;
     try {
@@ -671,9 +661,7 @@ export async function runAutomationsForEvent(tx: Tx, tenantId: string, event: Ev
       logger.warn({ tenantId, automation: a.id, event: event.id }, "automation loop stopped by depth limit");
       continue;
     }
-    const [recent] = await tx<{ n: number; same: number }[]>`
-      SELECT count(*)::int AS n, count(*) FILTER (WHERE record_id = ${event.record_id} AND started_at > now() - interval '10 minutes')::int AS same
-      FROM automation_runs WHERE automation_id = ${a.id} AND status <> 'skipped' AND started_at > now() - interval '1 hour'`;
+    const recent = await recentRunCounts(tx, a.id, event.record_id);
     if ((recent?.n ?? 0) >= a.hourly_cap) {
       await record("skipped", `hourly cap (${a.hourly_cap}) reached`, [], { cap: "hourly" });
       await capNotice(tx, tenantId, a, `hourly:${a.id}`, hourStart(), `hourly cap (${a.hourly_cap}) reached`);
@@ -837,10 +825,7 @@ export async function requestRun(tx: Tx, ctx: Ctx, publicId: string, body: { rec
     }
     return { status: 200, body: { dry_run: true, runs: out, ...(starts.length > 5 ? { note: "A dry run shows the first 5 records" } : {}) } };
   }
-  const [counts] = await tx<{ hour: number; open: number }[]>`
-    SELECT count(*) FILTER (WHERE status <> 'skipped' AND started_at > now() - interval '1 hour')::int AS hour,
-           count(*) FILTER (WHERE trigger_kind = 'manual' AND status IN ('queued', 'running'))::int AS open
-    FROM automation_runs WHERE automation_id = ${a.id}`;
+  const counts = await manualRunCounts(tx, a.id);
   if ((counts?.hour ?? 0) + starts.length > a.hourly_cap) throw new ApiError(429, "rate_limited", `This would pass the automation's hourly cap of ${a.hourly_cap} runs`);
   if ((counts?.open ?? 0) + starts.length > MANUAL_QUEUE_CAP) throw conflict(`At most ${MANUAL_QUEUE_CAP} requested runs of one automation can wait at a time`);
   const who = actorRef(ctx.actor.type, ctx.actor.id);
@@ -849,8 +834,7 @@ export async function requestRun(tx: Tx, ctx: Ctx, publicId: string, body: { rec
   for (const s of starts) {
     const id = uuidv7();
     const rec = s ? encodeId(s.obj.id_prefix, s.id) : null;
-    await tx`INSERT INTO automation_runs (tenant_id, id, automation_id, event_id, record_id, status, depth, trigger_kind, requested_by, input)
-             VALUES (${ctx.tenantId}, ${id}, ${a.id}, NULL, ${s?.id ?? null}, 'queued', 0, 'manual', ${who}, ${tx.json({ record: rec, via } as never)})`;
+    await insertManualRun(tx, { tenantId: ctx.tenantId, id, automationId: a.id, recordId: s?.id ?? null, requestedBy: who, input: { record: rec, via } });
     runs.push({ id: encodeId("run", id), record: rec, status: "queued" });
   }
   await audit(tx, ctx, { action: "automation.run_requested", details: { automation: publicId, runs: runs.map((r) => r.id), records: runs.map((r) => r.record).filter(Boolean) } });
@@ -882,15 +866,12 @@ export async function updateSettings(tx: Tx, ctx: Ctx, patch: { paused?: boolean
   const paused = patch.paused === undefined ? cur.paused_at : patch.paused ? cur.paused_at ?? new Date() : null;
   const reason = patch.paused === undefined ? cur.paused_reason : patch.paused ? (patch.reason ?? `paused by ${actorRef(ctx.actor.type, ctx.actor.id) ?? "the system"}`).slice(0, 500) : null;
   const next = { paused_at: paused, paused_reason: reason, external_email: patch.external_email ?? cur.external_email, timezone: patch.timezone ?? cur.timezone };
-  await tx`INSERT INTO automation_settings (tenant_id, paused_at, paused_reason, external_email, timezone)
-           VALUES (${ctx.tenantId}, ${next.paused_at}, ${next.paused_reason}, ${next.external_email}, ${next.timezone})
-           ON CONFLICT (tenant_id) DO UPDATE SET paused_at = EXCLUDED.paused_at, paused_reason = EXCLUDED.paused_reason,
-             external_email = EXCLUDED.external_email, timezone = EXCLUDED.timezone`;
+  await saveAutomationSettings(tx, ctx.tenantId, next);
   if (patch.timezone !== undefined && patch.timezone !== cur.timezone) {
     // Schedules without their own time zone move with the workspace's.
-    for (const a of await tx<AutomationRow[]>`SELECT * FROM automations WHERE next_run_at IS NOT NULL AND archived_at IS NULL`) {
+    for (const a of await scheduledAutomations(tx)) {
       const t = triggerOf(a.trigger);
-      if (t.type === "schedule" && !t.timezone) await tx`UPDATE automations SET next_run_at = ${nextRun(t, new Date(), next.timezone)} WHERE id = ${a.id}`;
+      if (t.type === "schedule" && !t.timezone) await setNextRun(tx, a.id, nextRun(t, new Date(), next.timezone));
     }
   }
   await audit(tx, ctx, { action: "automation_settings.updated", details: { fields: Object.keys(patch).filter((k) => k !== "reason"), paused: Boolean(next.paused_at), external_email: next.external_email } });
@@ -911,8 +892,7 @@ function checkAddress(email: string): string {
 export async function suppressEmail(tx: Tx, ctx: Ctx, email: string, reason?: string) {
   const e = checkAddress(email);
   const hash = mailboxHash(ctx.tenantId, e);
-  await tx`INSERT INTO email_suppressions (tenant_id, address_hash, reason, created_by) VALUES (${ctx.tenantId}, ${hash}, ${reason ?? null}, ${actorRef(ctx.actor.type, ctx.actor.id)})
-           ON CONFLICT (tenant_id, address_hash) DO NOTHING`;
+  await insertSuppression(tx, ctx.tenantId, hash, reason ?? null, actorRef(ctx.actor.type, ctx.actor.id));
   await audit(tx, ctx, { action: "email.suppressed", details: { recipient: hashLabel(hash) } });
   return { suppressed: true, recipient: hashLabel(hash) };
 }
@@ -921,8 +901,7 @@ export async function suppressEmail(tx: Tx, ctx: Ctx, email: string, reason?: st
 export async function checkSuppression(tx: Tx, ctx: Ctx, email: string) {
   const e = checkAddress(email);
   const hash = mailboxHash(ctx.tenantId, e);
-  const [row] = await tx<{ created_at: Date; reason: string | null }[]>`
-    SELECT created_at, reason FROM email_suppressions WHERE address_hash IN (${hash}, ${addressHash(ctx.tenantId, e)}) ORDER BY created_at LIMIT 1`;
+  const row = await suppressionOf(tx, hash, addressHash(ctx.tenantId, e));
   return { suppressed: Boolean(row), recipient: hashLabel(hash), since: row?.created_at.toISOString() ?? null,
     ...(can(ctx, "automations:manage") ? { reason: row?.reason ?? null } : {}) };
 }
@@ -935,9 +914,9 @@ export async function unsuppressEmail(tx: Tx, ctx: Ctx, email: string) {
   }
   const e = checkAddress(email);
   const hash = mailboxHash(ctx.tenantId, e);
-  const gone = await tx`DELETE FROM email_suppressions WHERE address_hash IN (${hash}, ${addressHash(ctx.tenantId, e)}) RETURNING 1`;
-  if (gone.length) await audit(tx, ctx, { action: "email.unsuppressed", details: { recipient: hashLabel(hash) } });
-  return { suppressed: false, recipient: hashLabel(hash), removed: gone.length > 0 };
+  const removed = await deleteSuppression(tx, hash, addressHash(ctx.tenantId, e));
+  if (removed) await audit(tx, ctx, { action: "email.unsuppressed", details: { recipient: hashLabel(hash) } });
+  return { suppressed: false, recipient: hashLabel(hash), removed };
 }
 
 export type { StepResult };
