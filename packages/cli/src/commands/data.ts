@@ -5,6 +5,7 @@ import { chunkRecords, csvLine, splitRecords, type Chunk } from "../csvsplit.js"
 import { CliError, EXIT, toCliError, usage } from "../errors.js";
 import { checkOutput, existingFile, OutputFile, startsWithLine, writeOutput } from "../files.js";
 import { clean } from "../output.js";
+import { FIELD_CONDITION, FILTER_KEY, OBJECT_NAME, RECORD_ID } from "../patterns.js";
 import type { Act } from "../program.js";
 import { registerRecordWrites } from "./records.js";
 
@@ -16,7 +17,7 @@ export const IMPORT_CHUNK_BYTES = 800_000;
 export function filterQuery(filters: string[] = []): Record<string, string> {
   const q: Record<string, string> = {};
   for (const f of filters) {
-    const m = /^([a-z0-9_.]+)(?:\[([a-z_]+)\])?=(.*)$/s.exec(f);
+    const m = FIELD_CONDITION.exec(f);
     if (!m) throw usage(`--filter "${f}" must look like field=value or field[op]=value`);
     q[`filter[${m[1]}]${m[2] ? `[${m[2]}]` : ""}`] = m[3]!;
   }
@@ -41,7 +42,7 @@ export function parseMappings(maps: string[] = []): Record<string, string> {
  */
 export function filterWhere(filters: string[] = []): unknown {
   const preds = Object.entries(filterQuery(filters)).map(([k, v]) => {
-    const m = /^filter\[([a-z0-9_.]+)\](?:\[([a-z_]+)\])?$/.exec(k)!;
+    const m = FILTER_KEY.exec(k)!;
     const op = m[2] ?? "eq";
     const value: unknown = op === "in" || op === "not_in" ? v.split(",") : op === "is_null" ? v !== "false" : v;
     return { path: m[1]!.split("."), op, value };
@@ -66,7 +67,7 @@ export function aggregateBody(object: string, opts: { groupBy?: string; sum?: st
 }
 
 const objectPath = (object: string) => {
-  if (!/^[a-z][a-z0-9_]{0,62}$/.test(object)) throw usage(`"${object}" is not an object name`);
+  if (!OBJECT_NAME.test(object)) throw usage(`"${object}" is not an object name`);
   return `/v1/objects/${object}`;
 };
 
@@ -129,7 +130,7 @@ export function registerData(program: Command, act: Act, collect: (v: string, p?
   data.command("get <id>")
     .description("Show one record by ID (any object)")
     .action(act(async (ctx, id: string) => {
-      if (!/^[a-z]{2,8}_[0-9A-Za-z]{26}$/.test(id)) throw usage(`"${id}" is not a record ID`);
+      if (!RECORD_ID.test(id)) throw usage(`"${id}" is not a record ID`);
       const rec = (await ctx.client().get<{ data: Record<string, unknown> }>(`/v1/records/${id}`)).data;
       if (ctx.g.json) return ctx.out.data(rec);
       const width = Math.max(...Object.keys(rec).map((k) => k.length));
