@@ -1,5 +1,8 @@
 import * as nodeCrypto from "node:crypto";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { ZxcvbnFactory } from "@zxcvbn-ts/core";
+import * as zxcvbnCommon from "@zxcvbn-ts/language-common";
+import * as zxcvbnEn from "@zxcvbn-ts/language-en";
 import { config } from "../config.js";
 import { ApiError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
@@ -132,32 +135,42 @@ export async function dummyVerify(pw: string): Promise<false> {
 export const PASSWORD_MIN = 12;
 export const PASSWORD_MAX = 256;
 
-/** A short list of very common passwords at least PASSWORD_MIN long (shorter ones fail on length). Compared lowercased. */
-const COMMON = new Set([
-  "123456789012", "1234567890123", "12345678901234", "123456789123", "111111111111", "000000000000", "123123123123",
-  "password1234", "password12345", "password123!", "password2024", "password2025", "password2026", "passwordpassword",
-  "qwertyuiopas", "qwerty123456", "qwertyqwerty", "qwertyuiop123", "1q2w3e4r5t6y", "1qaz2wsx3edc", "zaq12wsxcde3", "asdfghjkl123",
-  "iloveyou1234", "iloveyouiloveyou", "letmein12345", "letmeinletmein", "welcome12345", "welcome123456", "welcomewelcome",
-  "abc123456789", "abcdefghijkl", "abcdefg12345", "abcd12345678", "changeme1234", "changemenow!", "administrator", "admin1234567",
-  "trustno1trustno1", "football1234", "baseball1234", "superman1234", "starwars1234", "princess1234", "sunshine1234", "monkey123456",
-  "dragon123456", "master123456", "shadow123456", "michael12345", "jennifer1234", "computer1234", "internet1234", "whatever1234",
-  "correcthorsebatterystaple", "thequickbrownfox", "summer2024!!", "winter2024!!", "spring2025!!", "autumn2025!!",
-  "p@ssw0rd1234", "p@ssword1234", "passw0rd1234", "hello1234567", "helloworld12", "helloworld123", "mypassword12", "mypassword123",
-  "secret123456", "secretsecret", "test12345678", "testtesttest", "default12345", "login1234567", "access123456",
-]);
+/**
+ * Strength is estimated by zxcvbn-ts with its common and English dictionaries, bundled in the
+ * package, so it works offline. Built on first use (about 70 ms), then reused. Only the first
+ * ESTIMATE_MAX UTF-16 code units are estimated, which keeps a check to a few milliseconds.
+ */
+const ESTIMATE_MAX = 256;
+let estimator: ZxcvbnFactory | undefined;
+const strength = (pw: string, userInputs: string[]) => {
+  estimator ??= new ZxcvbnFactory({
+    translations: zxcvbnEn.translations,
+    graphs: zxcvbnCommon.adjacencyGraphs,
+    dictionary: { ...zxcvbnCommon.dictionary, ...zxcvbnEn.dictionary },
+    maxLength: ESTIMATE_MAX,
+  });
+  return estimator.check(pw, userInputs).score;
+};
 
-/** Why a new password is refused, or null. No composition rules: length, and not common or guessable from the account. */
+/**
+ * Why a new password is refused, or null. No composition rules: length, then not easy to guess
+ * (with the email and workspace name as words an attacker would try), and not containing either.
+ */
 export function passwordProblem(pw: string, context: { email?: string | null; workspaceName?: string | null } = {}): string | null {
   const length = [...pw].length;
   if (length < PASSWORD_MIN) return `Use at least ${PASSWORD_MIN} characters`;
   if (length > PASSWORD_MAX) return `Use at most ${PASSWORD_MAX} characters`;
   const lower = pw.toLowerCase();
-  if (COMMON.has(lower)) return "This password is too common";
+  // The estimator can rate a long run of two characters as strong (it sees no pattern in it).
   if (new Set(lower).size <= 2) return "This password repeats too few characters";
+  // A long password can rate as strong while containing these, so they are checked as well.
   const local = context.email?.split("@")[0]?.toLowerCase() ?? "";
   if (local.length >= 3 && lower.includes(local)) return "Don't include your email address in your password";
   const ws = context.workspaceName?.toLowerCase().replace(/\s+/g, "") ?? "";
   if (ws.length >= 3 && lower.replace(/\s+/g, "").includes(ws)) return "Don't include the workspace name in your password";
+  const userInputs = [local, context.email ?? "", context.workspaceName ?? "", ws].filter((s) => s.length >= 3);
+  const required = config().PASSWORD_MIN_STRENGTH; // of 0 to 4; 0 turns the estimate off
+  if (required > 0 && strength(pw, userInputs) < required) return "This password is too easy to guess";
   return null;
 }
 

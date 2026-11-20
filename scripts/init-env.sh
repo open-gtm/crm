@@ -32,6 +32,7 @@ fi
   echo "# WEB_UI=true                         serve the web UI at PUBLIC_URL; false for an API-only deployment"
   echo "# WEB_UI_DIR=                         another build of the web UI (default: the one in the image)"
   echo "# MCP_PUBLIC_URL=                     turns on OAuth for the remote MCP servers (needs PUBLIC_URL and MCP_SERVICE_SECRET above)"
+  echo "# PASSWORD_MIN_STRENGTH=3             how hard to guess new passwords must be, 0 (off) to 4; 4 is stricter"
   echo "# AUTOMATION_ACTIONS_PER_HOUR=5000    automation caps per workspace and hour (docs/automations.md)"
   echo "# AUTOMATION_HTTP_PER_HOUR=500"
   echo "# AUTOMATION_EMAILS_PER_HOUR=200"

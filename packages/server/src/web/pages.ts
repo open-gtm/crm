@@ -18,7 +18,7 @@ const ERRORS: Record<string, string> = {
   unavailable: "That way of signing in isn't available on this server.",
   provider_unavailable: "The single sign-on provider can't be reached. Try again later.",
   validation_failed: "That can't be used. Check what you entered and try again.",
-  weak_password: "Choose another password: at least 12 characters, not a common one, and not containing your email or the workspace name.",
+  weak_password: "Choose another password: at least 12 characters, not easy to guess, and not containing your email or the workspace name.",
   current_password_wrong: "Your current password is not right.",
   recent_sign_in_required: "For this, sign in again first (or enter your current password).",
   password_sign_in_off: "Password sign-in is turned off for this workspace.",
@@ -163,7 +163,7 @@ ${hidden("csrf_token", o.csrf)}
 ${current}
 <label for="new">New password</label>
 <input id="new" name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="256" aria-describedby="rules">
-<p id="rules" class="hint">At least 12 characters. Not a common password, and not containing your email or the workspace name.</p>
+<p id="rules" class="hint">At least 12 characters, not easy to guess, and not containing your email or the workspace name. A few unrelated words make a good one.</p>
 <label for="again">New password again</label>
 <input id="again" name="password_again" type="password" autocomplete="new-password" required minlength="12" maxlength="256">
 <button type="submit">${o.hasPassword ? "Change password" : "Set password"}</button>
