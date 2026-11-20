@@ -42,7 +42,7 @@ The person enters their email. The answer is always the same ("if this email bel
 
 ### Password
 
-People set a password while signed in, on `/auth/password` or with `POST /v1/auth/password`. Rules: 12 to 256 characters, no composition rules; very common passwords, and passwords containing the email's local part or the workspace name, are refused. With `PASSWORD_BREACH_CHECK=true`, new passwords are also checked against the Have I Been Pwned range API: only the first 5 characters of the password's SHA-1 leave the server. It is off by default because it calls a third party; if the service can't be reached, the password is accepted and a warning logged.
+People set a password while signed in, on `/auth/password` or with `POST /v1/auth/password`. Rules: 12 to 256 characters, no composition rules; passwords that are easy to guess, and passwords containing the email's local part or the workspace name, are refused. How easy a password is to guess is estimated on the server by [zxcvbn-ts](https://github.com/zxcvbn-ts/zxcvbn), using dictionaries that ship with it, so nothing is sent anywhere. It spots common passwords, words and names, dates, keyboard runs, repeats and l33t spellings, and also tries the email and workspace name; a password rated below 3 of 4 is refused. `PASSWORD_MIN_STRENGTH` changes that bar: 4 also refuses a word with a year and punctuation (`Summer2026!!!`) and short phrases, and 0 turns the estimate off. With `PASSWORD_BREACH_CHECK=true`, new passwords are also checked against the Have I Been Pwned range API: only the first 5 characters of the password's SHA-1 leave the server. It is off by default because it calls a third party; if the service can't be reached, the password is accepted and a warning logged.
 
 - **A first password** needs no current one while the sign-in is recent. The web UI offers it as soon as a member without one signs in by a server-printed link (a welcome step, skippable), and afterwards as a dismissible card on Home (the dismissal is the per-member preference `hint.set_password.dismissed`) and a note in Settings → Account that stays until a password is set. It never offers one where the server or the workspace turned passwords off.
 - **Changing or removing** a password needs the current password, or a sign-in within the last 10 minutes.
@@ -218,6 +218,7 @@ Attempts for an email that belongs to nobody have no workspace to be audited in;
 | `SESSION_IDLE_TIMEOUT_MINUTES` | 720 | Idle timeout (5 to 43,200) |
 | `SESSION_ABSOLUTE_TIMEOUT_HOURS` | 168 | Absolute timeout (1 to 2,160) |
 | `PASSWORD_SIGN_IN` | `true` | Password sign-in on the server |
+| `PASSWORD_MIN_STRENGTH` | 3 | How hard to guess a new password must be, as zxcvbn rates it (0 to 4). 4 is stricter; 0 turns the estimate off; below 3 is weaker than recommended |
 | `PASSWORD_BREACH_CHECK` | `false` | Check new passwords against Have I Been Pwned |
 | `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | unset | Single sign-on; all three or none |
 | `OIDC_DISPLAY_NAME` | `single sign-on` | The button label ("Sign in with …") |

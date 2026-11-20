@@ -4,7 +4,7 @@ import { PUBLIC_AUTH_ROUTES } from "../src/api/auth-public.js";
 import { resetAuthLimiter } from "../src/api/app.js";
 import { requiredPermission, routes } from "../src/api/registry.js";
 import { LIMITS, resetSignInLimits } from "../src/auth/limits.js";
-import { setArgon2Params, setBreachRangeLookup } from "../src/auth/passwords.js";
+import { PASSWORD_MAX, passwordProblem, setArgon2Params, setBreachRangeLookup } from "../src/auth/passwords.js";
 import { canonicalEmail, MAX_CANDIDATES } from "../src/auth/identity.js";
 import { createServerLink, plainName, safeReturnTo, settleSignInTasks } from "../src/auth/signin.js";
 import { pruneSessions } from "../src/auth/sessions.js";
@@ -519,10 +519,81 @@ describe("email code and link", () => {
 describe("passwords", () => {
   const good = () => `Tidal-Copper-${Math.random().toString(36).slice(2, 10)}`;
 
+  it("refuses passwords that are easy to guess, without needing them on a list", () => {
+    const account = { email: "dana.reyes@example.com", workspaceName: "Harbor Lights" };
+    for (const pw of ["Password1234!", "Qwerty123456!", "password1234", "Password2026!", "Football2026!", "Iloveyou2026!", "1q2w3e4r5t6y7u",
+      "abcdefghijklmnop", "123456789012345", "P@ssw0rd12345", "qwertyuiopasdfgh", "aaaaaaaaaaaa123"]) {
+      expect(passwordProblem(pw, account), pw).toBe("This password is too easy to guess");
+    }
+    for (const pw of ["Tidal-Copper-q8z3k1m0", "Amber-Harbour-Lantern-m3x9k2", "violet kettle mortgage sparrow", "tangerine-octopus-library-9",
+      "kL9#mQ2$vX7!pR4w", "Gravel moon 47 orchestra"]) {
+      expect(passwordProblem(pw, account), pw).toBeNull();
+    }
+  });
+
+  it("refuses passwords built from the email or workspace name, including long ones the estimator rates as strong", () => {
+    const account = { email: "dana.reyes@example.com", workspaceName: "Harbor Lights" };
+    for (const pw of ["dana.reyes-xyz-1", "Dana.Reyes loves turquoise kayaks", "dana.reyes@example.com"]) {
+      expect(passwordProblem(pw, account), pw).toMatch(/email/);
+    }
+    for (const pw of ["HarborLights2026!", "harbor lights rule the world forever", "I work at Harbor Lights since 2019, honestly"]) {
+      expect(passwordProblem(pw, account), pw).toMatch(/workspace name/);
+    }
+    // The email and workspace name are also words the estimator tries, so altered spellings of them count for little.
+    for (const pw of ["h4rb0rl1ghts2026", "harborlight$2026", "d@na.r3yes-2026"]) {
+      expect(passwordProblem(pw, account), pw).toBe("This password is too easy to guess");
+      expect(passwordProblem(pw, {}), pw).toBeNull();
+    }
+    // Two distinct characters can look random to the estimator; they are refused anyway.
+    expect(passwordProblem("abbabaabbbababba", account)).toMatch(/repeats/);
+  });
+
+  it("checks length first, and a long password takes milliseconds to check", () => {
+    expect(passwordProblem("Xy9-short")).toMatch(/at least 12/);
+    expect(passwordProblem(`${"Qz7-".repeat(64)}x`)).toMatch(/at most 256/);
+    passwordProblem("warm-up-to-build-the-estimator");
+    const worst = ["9".repeat(PASSWORD_MAX), "1984-02-29/".repeat(24).slice(0, PASSWORD_MAX), "qwertyuiop[]asdfghjkl;zxcvbnm,./".repeat(8),
+      "p@55w0rd!$1|3".repeat(20).slice(0, PASSWORD_MAX), Array.from({ length: PASSWORD_MAX }, (_, i) => String.fromCharCode(33 + ((i * 37) % 94))).join(""),
+      "\u{1F600}".repeat(PASSWORD_MAX)];
+    for (const pw of worst) {
+      const started = performance.now();
+      passwordProblem(pw, { email: "dana.reyes@example.com", workspaceName: "Harbor Lights" });
+      expect(performance.now() - started, pw.slice(0, 20)).toBeLessThan(250);
+    }
+  });
+
+  it("PASSWORD_MIN_STRENGTH moves the bar: 4 refuses a word with a year, 0 turns the estimate off", () => {
+    const withBar = (bar: string, check: () => void) => {
+      process.env.PASSWORD_MIN_STRENGTH = bar;
+      resetConfig();
+      try {
+        check();
+      } finally {
+        delete process.env.PASSWORD_MIN_STRENGTH;
+        resetConfig();
+      }
+    };
+    expect(passwordProblem("Summer2026!!!")).toBeNull();
+    expect(passwordProblem("password1234")).toBe("This password is too easy to guess");
+    withBar("4", () => {
+      expect(passwordProblem("Summer2026!!!")).toBe("This password is too easy to guess");
+      expect(passwordProblem("lantern-orbit-maple-quartz")).toBeNull();
+    });
+    withBar("0", () => {
+      expect(passwordProblem("password1234")).toBeNull();
+      expect(passwordProblem("short")).toMatch(/at least 12/);
+      expect(passwordProblem("aaaaaaaaaaaaaaaa")).toMatch(/repeats/);
+    });
+    // Out of range, or set but empty (which coercion would read as 0, the estimate off): the server won't start.
+    for (const bad of ["5", "", " ", "0x4", "3.0"]) {
+      withBar(bad, () => expect(() => passwordProblem("lantern-orbit-maple-quartz"), JSON.stringify(bad)).toThrow(/Invalid configuration/));
+    }
+  });
+
   it("sets a first password after a recent sign-in, refuses weak ones, and signs in with it", async () => {
     const m = await member();
     const b = await signedIn(m.email);
-    for (const [pw, why] of [["short", /at least 12/], ["password1234", /too common/], [`${m.email.split("@")[0]}-xyz-1`, /email/],
+    for (const [pw, why] of [["short", /at least 12/], ["password1234", /too easy to guess/], [`${m.email.split("@")[0]}-xyz-1`, /email/],
       [`zz${ws.name.replace(/\s/g, "")}zz!`, /workspace name/], ["aaaaaaaaaaaaaaaa", /repeats/]] as const) {
       const r = await setPassword(b, pw);
       expect(r.status, pw).toBe(422);
