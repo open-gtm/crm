@@ -5,8 +5,14 @@ import { safeEqual, sha256 } from "../lib/crypto.js";
 import { decodeId, encodeId, uuidv7 } from "../lib/ids.js";
 import { accessShortfall, grantedPermissions, loadRoleRules, recordAccess, roleCtx, unlockedBy } from "./access.js";
 import { audit } from "./audit.js";
-import { ALL_SCOPES, OWNER_ROLE, can, effectiveAccess, permissionsForScopes, roleCanUseScope, type Ctx, type Permission, type Scope, type Surface } from "./context.js";
+import { ALL_SCOPES, OWNER_ROLE, can, effectiveAccess, permissionsForScopes, roleCanUseScope, type Ctx, type Scope, type Surface } from "./context.js";
+import {
+  allApiKeys, apiKeyForUpdate, enterKeyWorkspace, expireKeyWithin, insertApiKey, keyByLookup, linkRotatedKey, memberRoleStatus, narrowToKeyLookup,
+  revokeKey, touchKey, type Owner,
+} from "./queries/keys.js";
 import { loadSchema } from "./schema.js";
+
+export type { Owner } from "./queries/keys.js";
 
 /**
  * API keys look like `hlcrm_live_<12-char lookup><40-char secret>`. The prefix is easy for
@@ -48,16 +54,14 @@ export async function authenticate(raw: string): Promise<Principal | null> {
   if (!m) return null;
   const lookup = m[2]!;
   return db().begin(async (tx) => {
-    await tx`SELECT set_config('app.key_lookup', ${lookup}, true)`;
-    const [key] = await tx<{ tenant_id: string; id: string; owner_type: MemberType; owner_id: string; secret_hash: Buffer;
-      scopes: Scope[]; expires_at: Date | null; revoked_at: Date | null }[]>`
-      SELECT tenant_id, id, owner_type, owner_id, secret_hash, scopes, expires_at, revoked_at FROM api_keys WHERE lookup = ${lookup}`;
+    await narrowToKeyLookup(tx, lookup);
+    const key = await keyByLookup(tx, lookup);
     if (!key || !safeEqual(sha256(raw), key.secret_hash)) return null;
     if (key.revoked_at || (key.expires_at && key.expires_at.getTime() <= Date.now())) return null;
-    await tx`SELECT set_config('app.key_lookup', '', true), set_config('app.tenant_id', ${key.tenant_id}, true)`;
+    await enterKeyWorkspace(tx, key.tenant_id);
     const owner = await keyOwner(tx, key.owner_type, key.owner_id);
     if (!owner || owner.disabled_at || owner.archived_at) return null;
-    await tx`UPDATE api_keys SET last_used_at = now() WHERE id = ${key.id} AND (last_used_at IS NULL OR last_used_at < now() - interval '1 minute')`;
+    await touchKey(tx, key.id);
     return {
       tenantId: key.tenant_id,
       keyId: key.id,
@@ -68,7 +72,6 @@ export async function authenticate(raw: string): Promise<Principal | null> {
 }
 
 type MemberType = "user" | "service_account";
-export interface Owner { role: string; role_id: string; access_version: string; permissions: Permission[]; disabled_at: Date | null; archived_at: Date | null }
 
 /**
  * A member's effective access through a credential holding `scopes`: role permissions ∩ what the
@@ -84,12 +87,7 @@ export async function memberAccess(tx: Tx, tenantId: string, owner: Owner, scope
 
 /** A key owner's (or session holder's) role (key, permissions and rules version) and status. */
 export async function keyOwner(tx: Tx, type: MemberType, id: string): Promise<Owner | null> {
-  const [o] = type === "user"
-    ? await tx<Owner[]>`SELECT r.key AS role, r.id AS role_id, r.access_version::text, r.permissions, m.disabled_at, r.archived_at
-                        FROM users m JOIN roles r ON r.tenant_id = m.tenant_id AND r.id = m.role_id WHERE m.id = ${id}`
-    : await tx<Owner[]>`SELECT r.key AS role, r.id AS role_id, r.access_version::text, r.permissions, m.disabled_at, r.archived_at
-                        FROM service_accounts m JOIN roles r ON r.tenant_id = m.tenant_id AND r.id = m.role_id WHERE m.id = ${id}`;
-  return o ?? null;
+  return (await memberRoleStatus(tx, type, id)) ?? null;
 }
 
 /** The record permissions an owner's role can use, including what its object rules grant (for scope checks). */
@@ -165,10 +163,8 @@ export async function createApiKey(tx: Tx, ctx: Ctx, input: CreateKeyInput, opts
   const secret = `hlcrm_${env}_${lookup}${base62(40)}`;
   const id = uuidv7();
   const expires = input.expires_in_days ? new Date(Date.now() + input.expires_in_days * 86_400_000) : null;
-  await tx`
-    INSERT INTO api_keys (tenant_id, id, owner_type, owner_id, name, lookup, secret_hash, scopes, environment, expires_at, created_by)
-    VALUES (${ctx.tenantId}, ${id}, ${ownerType}, ${ownerId}, ${input.name}, ${lookup}, ${sha256(secret)}, ${scopes},
-            ${env}, ${expires}, ${ctx.actor.id})`;
+  await insertApiKey(tx, { tenantId: ctx.tenantId, id, ownerType, ownerId, name: input.name, lookup, secretHash: sha256(secret), scopes,
+    environment: env, expiresAt: expires, createdBy: ctx.actor.id });
   await audit(tx, ctx, { action: "api_key.created", objectType: "api_key", recordId: id,
     details: { scopes, owner_type: ownerType, owner: encodeId(ownerType === "user" ? "usr" : "svc", ownerId), environment: env } });
   return { id: encodeId("key", id), name: input.name, scopes, environment: env, expires_at: expires?.toISOString() ?? null, secret };
@@ -176,10 +172,7 @@ export async function createApiKey(tx: Tx, ctx: Ctx, input: CreateKeyInput, opts
 
 export async function listApiKeys(tx: Tx, ctx: Ctx) {
   if (!can(ctx, "keys:manage")) throw forbidden("Listing all keys needs the keys:manage permission");
-  const rows = await tx<{ id: string; name: string; owner_type: string; owner_id: string; scopes: string[]; environment: string;
-    created_at: Date; expires_at: Date | null; revoked_at: Date | null; last_used_at: Date | null; lookup: string }[]>`
-    SELECT id, name, owner_type, owner_id, scopes, environment, created_at, expires_at, revoked_at, last_used_at, lookup
-    FROM api_keys ORDER BY created_at DESC`;
+  const rows = await allApiKeys(tx);
   return rows.map((r) => ({
     id: encodeId("key", r.id), name: r.name, owner: encodeId(r.owner_type === "user" ? "usr" : "svc", r.owner_id),
     scopes: r.scopes, environment: r.environment, hint: `hlcrm_${r.environment}_${r.lookup.slice(0, 4)}…`,
@@ -192,9 +185,7 @@ export async function listApiKeys(tx: Tx, ctx: Ctx) {
 async function keyForChange(tx: Tx, ctx: Ctx, publicId: string) {
   const d = decodeId(publicId);
   if (!d || d.prefix !== "key") throw notFound("API key");
-  const [key] = await tx<{ id: string; name: string; owner_type: MemberType; owner_id: string; scopes: Scope[]; environment: "live" | "test";
-    revoked_at: Date | null; expires_at: Date | null }[]>`
-    SELECT id, name, owner_type, owner_id, scopes, environment, revoked_at, expires_at FROM api_keys WHERE id = ${d.uuid} FOR UPDATE`;
+  const key = await apiKeyForUpdate(tx, d.uuid);
   if (!key) throw notFound("API key");
   const owner = await keyOwner(tx, key.owner_type, key.owner_id);
   if (!owner) throw notFound("API key");
@@ -204,7 +195,7 @@ async function keyForChange(tx: Tx, ctx: Ctx, publicId: string) {
 
 export async function revokeApiKey(tx: Tx, ctx: Ctx, publicId: string) {
   const key = await keyForChange(tx, ctx, publicId);
-  await tx`UPDATE api_keys SET revoked_at = coalesce(revoked_at, now()) WHERE id = ${key.id}`;
+  await revokeKey(tx, key.id);
   await audit(tx, ctx, { action: "api_key.revoked", objectType: "api_key", recordId: key.id });
   return { id: publicId, revoked: true };
 }
@@ -218,10 +209,9 @@ export async function rotateApiKey(tx: Tx, ctx: Ctx, publicId: string, overlapHo
     owner: encodeId(old.owner_type === "user" ? "usr" : "svc", old.owner_id),
   });
   const hours = Math.min(Math.max(overlapHours, 0), 168);
-  await tx`UPDATE api_keys SET expires_at = least(coalesce(expires_at, 'infinity'), now() + make_interval(hours => ${hours}))
-           WHERE id = ${old.id}`;
+  await expireKeyWithin(tx, old.id, hours);
   // The replacement keeps the old key's expiry: rotating must not extend a key's intended lifetime.
-  await tx`UPDATE api_keys SET rotated_from = ${old.id}, expires_at = ${old.expires_at} WHERE id = ${decodeId(created.id)!.uuid}`;
+  await linkRotatedKey(tx, decodeId(created.id)!.uuid, old.id, old.expires_at);
   await audit(tx, ctx, { action: "api_key.rotated", objectType: "api_key", recordId: old.id, details: { overlap_hours: hours } });
   return { ...created, expires_at: old.expires_at?.toISOString() ?? null, replaces: publicId, old_key_expires_in_hours: hours };
 }
