@@ -4,13 +4,13 @@ import YAML from "yaml";
 import { accessRows, type ObjectAccess } from "../access.js";
 import { CliError, EXIT, usage } from "../errors.js";
 import { clean } from "../output.js";
+import { FIELD_ACCESS_RULE, OBJECT_ACCESS_RULE, ROLE_REF, WEBHOOK_ID } from "../patterns.js";
 import type { Act } from "../program.js";
 
 /** Role editing, webhooks, the access review and the event log: the admin gaps the agent skills hit. */
 
-const WEBHOOK_ID = /^whk_[0-9A-Za-z]{26}$/;
 const roleRef = (r: string) => {
-  if (!/^[a-z0-9_]{1,64}$/i.test(r)) throw usage(`"${r}" is not a role key or ID`);
+  if (!ROLE_REF.test(r)) throw usage(`"${r}" is not a role key or ID`);
   return r;
 };
 const webhookId = (id: string) => {
@@ -45,12 +45,12 @@ export function roleBody(opts: { file?: string; key?: string; name?: string; des
   if (opts.copyFrom) body.copy_from = opts.copyFrom;
   if (opts.permissions !== undefined) body.permissions = opts.permissions.split(",").map((p) => p.trim()).filter(Boolean);
   for (const o of opts.object ?? []) {
-    const m = /^([a-z][a-z0-9_]*):(read|write|archive)=(\w+)$/.exec(o);
+    const m = OBJECT_ACCESS_RULE.exec(o);
     if (!m || !Object.hasOwn(ALLOW, m[3]!)) throw usage(`--object "${o}" must look like object:read|write|archive=allow|deny|inherit`);
     body.objects = { ...body.objects, [m[1]!]: { ...(body.objects?.[m[1]!] ?? {}), [m[2]!]: ALLOW[m[3]!]! } };
   }
   for (const f of opts.field ?? []) {
-    const m = /^([a-z][a-z0-9_]*)\.([a-z][a-z0-9_]*)=(none|read|inherit)$/.exec(f);
+    const m = FIELD_ACCESS_RULE.exec(f);
     if (!m) throw usage(`--field "${f}" must look like object.field=none|read|inherit`);
     body.fields = { ...body.fields, [m[1]!]: { ...(body.fields?.[m[1]!] ?? {}), [m[2]!]: m[3] === "inherit" ? null : m[3]! } };
   }

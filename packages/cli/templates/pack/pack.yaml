@@ -1,0 +1,8 @@
+# A schema pack: a manifest and the parts it lists. Format and safety notes: docs/packs.md
+name: my-pack
+version: 0.1.0
+description: What this pack sets up, in a sentence.
+min_server_version: 0.1.0
+modules: [core]
+parts: [schema, views]
+license: MIT

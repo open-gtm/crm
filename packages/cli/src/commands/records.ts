@@ -2,13 +2,13 @@ import type { Command } from "commander";
 import type { Context } from "../context.js";
 import { EXIT, usage } from "../errors.js";
 import { cleanLine } from "../output.js";
+import { FIELD_CONDITION, OBJECT_NAME, RECORD_ID } from "../patterns.js";
 import type { Act } from "../program.js";
 
 /** Record write commands under `crm data`: restore, duplicates, merge, and bulk update and archive (preview, then confirm). */
 
-const RECORD_ID = /^[a-z]{2,8}_[0-9A-Za-z]{26}$/;
 const objectName = (object: string) => {
-  if (!/^[a-z][a-z0-9_]{0,62}$/.test(object)) throw usage(`"${object}" is not an object name`);
+  if (!OBJECT_NAME.test(object)) throw usage(`"${object}" is not an object name`);
   return object;
 };
 const recordId = (id: string) => {
@@ -49,7 +49,7 @@ export function parseWhere(parts: string[] = []): unknown {
         throw usage(`--where "${w}" is not valid JSON`);
       }
     }
-    const m = /^([a-z0-9_.]+)(?:\[([a-z_]+)\])?=(.*)$/s.exec(w);
+    const m = FIELD_CONDITION.exec(w);
     if (!m) throw usage(`--where "${w}" must look like field=value, field[op]=value or a JSON filter`);
     const path = m[1]!.split(".");
     const op = m[2] ?? "eq";

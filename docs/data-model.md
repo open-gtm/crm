@@ -165,7 +165,7 @@ Every type can be `required`, take a `default` (checked when the field is saved)
 - **Money:** `bigint` minor units plus `currency char(3)`. In Phase 1, a CHECK makes `currency` equal the tenant's currency (see §10, Q4).
 - **Statuses:** `status text NOT NULL` holds a tenant-configurable status key, `status_category text NOT NULL` holds the system category. The service layer enforces transitions (§6). A trigger checks that the category matches the tenant's status definition.
 - **Document numbers:** `number text NOT NULL`, unique per tenant and type, assigned from `number_sequences` when the document is issued (format per tenant, for example `INV-{YYYY}-{seq:4}`).
-- **Composite foreign keys everywhere:** `(tenant_id, x_id) REFERENCES t (tenant_id, id)`. RLS policies as in [ADR 0002](decisions/0002-tenant-directory.md) and `packages/server/src/db/migrations/`.
+- **Composite foreign keys everywhere:** `(tenant_id, x_id) REFERENCES t (tenant_id, id)`. RLS policies as in [ADR 0002](decisions/0002-tenant-directory.md) and `packages/server/migrations/`.
 - **Deletion:** archive only. Hard deletes happen only in the erasure and tenant-deletion workflows.
 
 ---
