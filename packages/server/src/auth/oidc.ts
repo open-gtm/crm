@@ -10,6 +10,7 @@ import { ApiError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
 import { checkUrl, safeRequest } from "../lib/outbound.js";
 import { activeMemberships, canonicalEmail, lookupIdentity, oidcIdentity, type Membership } from "./identity.js";
+import { consumeSsoFlow, insertSsoFlow, linkSsoSubject, removeSsoLink } from "./queries.js";
 import { webCtx, type ClientMeta } from "./sessions.js";
 import { FLOW_MINUTES, completeSignIn, expired, failed, limitAddress, namedWorkspace, safeReturnTo, unavailable, withFlows, type SignInResult } from "./signin.js";
 import { isToken, newToken, serverKey, tokenHash } from "./tokens.js";
@@ -132,9 +133,8 @@ export async function startSso(returnTo: unknown, meta: ClientMeta, rawWorkspace
     throw new ApiError(502, "provider_unavailable", "The single sign-on provider can't be reached; try again later");
   }
   const browserToken = newToken();
-  await withFlows({ browser: browserToken }, (tx) => tx`
-    INSERT INTO sign_in_flows (id, browser_hash, purpose, return_to, workspace_id, expires_at)
-    VALUES (gen_random_uuid(), ${tokenHash(browserToken)}, 'oidc', ${safeReturnTo(returnTo)}, ${workspace}, now() + make_interval(mins => ${FLOW_MINUTES.oidc}))`);
+  await withFlows({ browser: browserToken }, (tx) => insertSsoFlow(tx, { browserHash: tokenHash(browserToken), returnTo: safeReturnTo(returnTo), workspaceId: workspace,
+    minutes: FLOW_MINUTES.oidc }));
   const url = new URL(doc.authorization_endpoint);
   for (const [k, v] of Object.entries({ response_type: "code", client_id: s.clientId, redirect_uri: redirectUri(), scope: "openid email profile",
     state: bound(browserToken, "state"), nonce: bound(browserToken, "nonce"), code_challenge: challenge(bound(browserToken, "pkce")), code_challenge_method: "S256" })) {
@@ -179,8 +179,7 @@ export async function finishSso(browserToken: string | null, query: { code?: str
   if (!s) throw unavailable("Single sign-on");
   limitAddress(meta);
   if (!isToken(browserToken)) throw expired();
-  const flow = await withFlows({ browser: browserToken }, async (tx) => (await tx<{ return_to: string | null; workspace_id: string | null }[]>`
-    UPDATE sign_in_flows SET consumed_at = now() WHERE purpose = 'oidc' AND consumed_at IS NULL AND expires_at > now() RETURNING return_to, workspace_id`)[0]);
+  const flow = await withFlows({ browser: browserToken }, consumeSsoFlow);
   if (!flow) throw expired();
   try {
     const state = bound(browserToken, "state");
@@ -233,11 +232,7 @@ async function ssoMembers(s: SsoSettings, subject: string, email: string, worksp
   const byEmail = (await activeMemberships(found.candidates)).filter((m) => !m.oidc && allowed(m));
   for (const m of byEmail) {
     await withTenant(m.tenantId, async (tx) => {
-      const linkedNow = await tx`
-        INSERT INTO member_credentials (tenant_id, user_id, oidc_issuer, oidc_subject, oidc_linked_at) VALUES (${m.tenantId}, ${m.userId}, ${s.issuer}, ${subject}, now())
-        ON CONFLICT (tenant_id, user_id) DO UPDATE SET oidc_issuer = EXCLUDED.oidc_issuer, oidc_subject = EXCLUDED.oidc_subject, oidc_linked_at = now()
-          WHERE member_credentials.oidc_subject IS NULL RETURNING 1`;
-      if (linkedNow.length) {
+      if (await linkSsoSubject(tx, m.tenantId, m.userId, s.issuer, subject)) {
         await audit(tx, webCtx(m.tenantId, m.userId, m.role, meta), { action: "auth.sso_linked", objectType: "user", recordId: m.userId, details: { issuer: s.issuer } });
       }
     });
@@ -251,10 +246,7 @@ async function ssoMembers(s: SsoSettings, subject: string, email: string, worksp
  * SSO off or its allowed domains exclude that email. Audited when there was a link.
  */
 export async function unlinkSso(tx: Tx, ctx: Ctx, userId: string): Promise<{ sso_linked: false; unlinked: boolean }> {
-  const rows = await tx<{ issuer: string }[]>`
-    UPDATE member_credentials c SET oidc_issuer = NULL, oidc_subject = NULL, oidc_linked_at = NULL
-    FROM (SELECT user_id, oidc_issuer FROM member_credentials WHERE user_id = ${userId} AND oidc_subject IS NOT NULL FOR UPDATE) old
-    WHERE c.user_id = old.user_id RETURNING old.oidc_issuer AS issuer`;
-  if (rows.length) await audit(tx, ctx, { action: "auth.sso_unlinked", objectType: "user", recordId: userId, details: { issuer: rows[0]!.issuer } });
-  return { sso_linked: false, unlinked: rows.length > 0 };
+  const old = await removeSsoLink(tx, userId);
+  if (old) await audit(tx, ctx, { action: "auth.sso_unlinked", objectType: "user", recordId: userId, details: { issuer: old.issuer } });
+  return { sso_linked: false, unlinked: old !== undefined };
 }

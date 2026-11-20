@@ -7,7 +7,8 @@ import { ENTITIES, isEntity, own } from "./catalog.js";
 import type { Ctx } from "./context.js";
 import type { QueryInput } from "./query.js";
 import { fetchRows, getAnyRecord, getRecord, queryRecords, serialize, type Page, type RecordOut, type SerializeOpts } from "./records.js";
-import { getObject, loadSchema, quoteIdent, type ObjectMeta, type Schema } from "./schema.js";
+import { getObject, loadSchema, type ObjectMeta, type Schema } from "./schema.js";
+import { includedEntityRows } from "./queries/records.js";
 import { resolveView } from "./views.js";
 
 /**
@@ -107,8 +108,7 @@ const pick = (rec: Record<string, unknown>, keep: Iterable<string>) => {
 
 /** Related entities by ID: one query per entity table. */
 async function entityRows(tx: Tx, to: keyof typeof ENTITIES, uuids: string[]): Promise<Map<string, Record<string, unknown>>> {
-  const cols = to === "user" ? "id, name, CASE WHEN disabled_at IS NULL THEN email::text END AS email" : to === "stage" ? "id, name, category" : "id, name";
-  const rows = await tx.unsafe<Record<string, unknown>[]>(`SELECT ${cols} FROM ${quoteIdent(ENTITIES[to].table)} WHERE id = ANY($1::uuid[])`, [uuids]);
+  const rows = await includedEntityRows(tx, to, uuids);
   return new Map(rows.map((r) => [encodeId(ENTITIES[to].prefix, r.id as string), { ...r, id: encodeId(ENTITIES[to].prefix, r.id as string), display_name: r.name }]));
 }
 

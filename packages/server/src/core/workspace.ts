@@ -4,10 +4,17 @@ import { conflict, forbidden, notFound, unprocessable } from "../lib/errors.js";
 import { decodeId, encodeId, uuidv7 } from "../lib/ids.js";
 import { audit } from "./audit.js";
 import { ACTIVITY_TYPES, DEFAULT_PIPELINE } from "./catalog.js";
-import { OWNER_ROLE, can, systemCtx, type Ctx, type Permission } from "./context.js";
+import { OWNER_ROLE, can, systemCtx, type Ctx } from "./context.js";
 import { createTenantKey } from "./encryption.js";
 import { createApiKey } from "./keys.js";
 import { loadRoleRules } from "./access.js";
+import { insertDefaultPipeline, insertStage } from "./queries/pipelines.js";
+import { keysForAccessReview, revokeKeysOf } from "./queries/keys.js";
+import { roleForShare } from "./queries/roles.js";
+import {
+  enterWorkspace, insertServiceAccount, insertSystemActivityType, insertTenant, insertUser, memberSignInFacts, membersWithRoles, memberWithRole,
+  otherActiveOwnersForUpdate, registerTenant, setMemberActive, setMemberRole, updateSignInSettings, workspaceRow, type MemberRow,
+} from "./queries/workspace.js";
 import { assertCoversRole, publicRules, resolveRole, seedSystemRoles, type RoleRow } from "./roles.js";
 import { loadSchema, seedStandardObjects } from "./schema.js";
 import { canonicalEmail, memberEmailProblem } from "../auth/identity.js";
@@ -29,24 +36,22 @@ export async function createWorkspace(input: CreateWorkspaceInput) {
   const tenantId = uuidv7();
   const ownerId = uuidv7();
   return db().begin(async (tx) => {
-    await tx`INSERT INTO tenant_directory (tenant_id) VALUES (${tenantId})`;
-    await tx`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
-    await tx`INSERT INTO tenants (tenant_id, name, currency) VALUES (${tenantId}, ${input.name}, ${currency})`;
+    await registerTenant(tx, tenantId);
+    await enterWorkspace(tx, tenantId);
+    await insertTenant(tx, tenantId, input.name, currency);
     await seedSystemRoles(tx);
     const owner = await resolveRole(tx, OWNER_ROLE);
-    await tx`INSERT INTO users (tenant_id, id, email, name, role_id) VALUES (${tenantId}, ${ownerId}, ${input.ownerEmail}, ${input.ownerName}, ${owner.id})`;
+    await insertUser(tx, { tenantId, id: ownerId, email: input.ownerEmail, name: input.ownerName, roleId: owner.id });
     const ctx: Ctx = { ...systemCtx(tenantId, "bootstrap") };
     await seedStandardObjects(tx, tenantId);
     for (const t of ACTIVITY_TYPES) {
-      await tx`INSERT INTO activity_types (tenant_id, key, label, is_system, editable)
-               VALUES (${tenantId}, ${t.key}, ${t.label}, true, ${"editable" in t ? Boolean(t.editable) : false})`;
+      await insertSystemActivityType(tx, { tenantId, key: t.key, label: t.label, editable: "editable" in t ? Boolean(t.editable) : false });
     }
     const pipelineId = uuidv7();
-    await tx`INSERT INTO pipelines (tenant_id, id, name, is_default) VALUES (${tenantId}, ${pipelineId}, ${DEFAULT_PIPELINE.name}, true)`;
+    await insertDefaultPipeline(tx, tenantId, pipelineId, DEFAULT_PIPELINE.name);
     let position = 0;
     for (const s of DEFAULT_PIPELINE.stages) {
-      await tx`INSERT INTO stages (tenant_id, id, pipeline_id, name, position, category, default_probability)
-               VALUES (${tenantId}, ${uuidv7()}, ${pipelineId}, ${s.name}, ${position++}, ${s.category}, ${s.probability})`;
+      await insertStage(tx, { tenantId, id: uuidv7(), pipelineId, name: s.name, position: position++, category: s.category, probability: s.probability });
     }
     await createTenantKey(tx, tenantId);
     await audit(tx, ctx, { action: "workspace.created", details: { name: input.name } });
@@ -62,10 +67,7 @@ export async function createWorkspace(input: CreateWorkspaceInput) {
 }
 
 export async function getWorkspace(tx: Tx) {
-  const [t] = await tx<{ tenant_id: string; name: string; kind: string; currency: string; modules: string[]; schema_version: string; created_at: Date;
-    password_sign_in: boolean; sso_sign_in: boolean; sso_allowed_domains: string[]; oauth_apps: boolean; oauth_scopes: string[] }[]>`
-    SELECT tenant_id, name, kind, currency, modules, schema_version::text, created_at, password_sign_in, sso_sign_in, sso_allowed_domains,
-           oauth_apps, oauth_scopes FROM tenants`;
+  const t = await workspaceRow(tx);
   if (!t) throw new Error("workspace missing");
   return { id: encodeId("ws", t.tenant_id), name: t.name, kind: t.kind, currency: t.currency, modules: t.modules,
     schema_version: Number(t.schema_version), created_at: t.created_at.toISOString(),
@@ -91,11 +93,8 @@ export async function setSignInSettings(tx: Tx, ctx: Ctx, input: { password?: bo
   const domains = input.sso_allowed_domains === undefined ? undefined : [...new Set(input.sso_allowed_domains.map((d) => canonicalEmail(d)))];
   const bad = domains?.filter((d) => !DOMAIN.test(d)) ?? [];
   if (bad.length) throw unprocessable(`Not an email domain (ASCII, e.g. example.com): ${bad.slice(0, 5).join(", ")}`);
-  await tx`UPDATE tenants SET password_sign_in = coalesce(${input.password ?? null}::boolean, password_sign_in),
-                              sso_sign_in = coalesce(${input.sso ?? null}::boolean, sso_sign_in),
-                              sso_allowed_domains = coalesce(${domains ?? null}::text[], sso_allowed_domains),
-                              oauth_apps = coalesce(${input.oauth_apps ?? null}::boolean, oauth_apps),
-                              oauth_scopes = coalesce(${input.oauth_scopes ? [...new Set(input.oauth_scopes)] : null}::text[], oauth_scopes)`;
+  await updateSignInSettings(tx, { password: input.password ?? null, sso: input.sso ?? null, ssoAllowedDomains: domains ?? null,
+    oauthApps: input.oauth_apps ?? null, oauthScopes: input.oauth_scopes ? [...new Set(input.oauth_scopes)] : null });
   // Turning apps off ends every connection now; narrowing scopes applies to existing tokens on their next request.
   const appsRevoked = input.oauth_apps === false ? await revokeUserGrants(tx, null, "workspace_disabled") : 0;
   await audit(tx, ctx, { action: "workspace.sign_in_changed", details: { ...(input.password !== undefined ? { password: input.password } : {}),
@@ -108,20 +107,8 @@ export async function setSignInSettings(tx: Tx, ctx: Ctx, input: { password?: bo
 // --- Members ------------------------------------------------------------------------------------
 
 type MemberType = "user" | "service_account";
-interface MemberRow { id: string; email: string | null; name: string; disabled_at: Date | null; created_at: Date;
-  role_id: string; role_key: string; role_name: string; permissions: Permission[]; access_version: string }
 
 const memberId = (type: MemberType, id: string) => encodeId(type === "user" ? "usr" : "svc", id);
-
-async function memberRows(tx: Tx, type: MemberType): Promise<MemberRow[]> {
-  return type === "user"
-    ? tx<MemberRow[]>`SELECT m.id, m.email::text AS email, m.name, m.disabled_at, m.created_at, r.id AS role_id, r.key AS role_key,
-                        r.name AS role_name, r.permissions, r.access_version::text
-                      FROM users m JOIN roles r ON r.tenant_id = m.tenant_id AND r.id = m.role_id ORDER BY m.created_at`
-    : tx<MemberRow[]>`SELECT m.id, NULL AS email, m.name, m.disabled_at, m.created_at, r.id AS role_id, r.key AS role_key,
-                        r.name AS role_name, r.permissions, r.access_version::text
-                      FROM service_accounts m JOIN roles r ON r.tenant_id = m.tenant_id AND r.id = m.role_id ORDER BY m.created_at`;
-}
 
 const roleRef = (m: MemberRow) => ({ key: m.role_key, name: m.role_name });
 
@@ -130,17 +117,13 @@ const roleRef = (m: MemberRow) => ({ key: m.role_key, name: m.role_name });
  * whether single sign-on is linked, the last sign-in and how many browser sessions are live.
  */
 async function signInFacts(tx: Tx): Promise<Map<string, { has_password: boolean; sso_linked: boolean; last_sign_in_at: string | null; active_sessions: number }>> {
-  const rows = await tx<{ id: string; has_password: boolean; sso_linked: boolean; last_sign_in_at: Date | null; active_sessions: number }[]>`
-    SELECT u.id, c.password_hash IS NOT NULL AS has_password, c.oidc_subject IS NOT NULL AS sso_linked, c.last_sign_in_at,
-           (SELECT count(*)::int FROM sessions s WHERE s.tenant_id = u.tenant_id AND s.user_id = u.id AND s.revoked_at IS NULL
-              AND s.expires_at > now() AND s.idle_expires_at > now()) AS active_sessions
-    FROM users u LEFT JOIN member_credentials c ON c.tenant_id = u.tenant_id AND c.user_id = u.id`;
+  const rows = await memberSignInFacts(tx);
   return new Map(rows.map((r) => [r.id, { has_password: Boolean(r.has_password), sso_linked: Boolean(r.sso_linked),
     last_sign_in_at: r.last_sign_in_at?.toISOString() ?? null, active_sessions: r.active_sessions }]));
 }
 
 export async function listMembers(tx: Tx) {
-  const [users, services, facts] = [await memberRows(tx, "user"), await memberRows(tx, "service_account"), await signInFacts(tx)];
+  const [users, services, facts] = [await membersWithRoles(tx, "user"), await membersWithRoles(tx, "service_account"), await signInFacts(tx)];
   return {
     users: users.map((u) => ({ id: memberId("user", u.id), email: u.email, name: u.name, role: u.role_key, role_name: u.role_name, active: !u.disabled_at,
       sign_in: facts.get(u.id) })),
@@ -167,7 +150,7 @@ export async function addMember(tx: Tx, ctx: Ctx, input: { email: string; name: 
   await assertCanAssign(tx, ctx, role, "user");
   const id = uuidv7();
   try {
-    await tx`INSERT INTO users (tenant_id, id, email, name, role_id) VALUES (${ctx.tenantId}, ${id}, ${input.email}, ${input.name ?? input.email}, ${role.id})`;
+    await insertUser(tx, { tenantId: ctx.tenantId, id, email: input.email, name: input.name ?? input.email, roleId: role.id });
   } catch (e) {
     if ((e as { code?: string }).code === "23505") throw conflict("A member with this email already exists");
     throw e;
@@ -185,7 +168,7 @@ export async function addServiceAccount(tx: Tx, ctx: Ctx, input: { name: string;
   await assertCanAssign(tx, ctx, role, "service_account");
   const id = uuidv7();
   try {
-    await tx`INSERT INTO service_accounts (tenant_id, id, name, role_id, created_by) VALUES (${ctx.tenantId}, ${id}, ${input.name}, ${role.id}, ${ctx.actor.id})`;
+    await insertServiceAccount(tx, { tenantId: ctx.tenantId, id, name: input.name, roleId: role.id, createdBy: ctx.actor.id });
   } catch (e) {
     if ((e as { code?: string }).code === "23505") throw conflict("A service account with this name already exists");
     throw e;
@@ -196,12 +179,7 @@ export async function addServiceAccount(tx: Tx, ctx: Ctx, input: { name: string;
 
 /** A member's identity and role, locked for the rest of the transaction. */
 export async function loadMember(tx: Tx, type: MemberType, id: string, lock = false) {
-  const table = type === "user" ? tx`users` : tx`service_accounts`;
-  const [m] = await tx<{ id: string; disabled_at: Date | null; role_id: string; role_key: string; permissions: Permission[]; access_version: string }[]>`
-    SELECT m.id, m.disabled_at, r.id AS role_id, r.key AS role_key, r.permissions, r.access_version::text
-    FROM ${table} m JOIN roles r ON r.tenant_id = m.tenant_id AND r.id = m.role_id
-    WHERE m.id = ${id} ${lock ? tx`FOR UPDATE OF m` : tx``}`;
-  return m ?? null;
+  return (await memberWithRole(tx, type, id, lock)) ?? null;
 }
 
 /** Parses a member ID: `usr_…` or `svc_…`, optionally restricted to one kind. */
@@ -240,37 +218,31 @@ export async function updateMember(tx: Tx, ctx: Ctx, publicId: string, patch: Up
   if (roleChanges) await assertCanAssign(tx, ctx, role, ref.type);
   if (active && !wasActive && !roleChanges) {
     // Re-enabling grants the member's role again; it must still exist and be grantable by the caller.
-    const held = await tx<RoleRow[]>`SELECT id, key, name, description, permissions, is_system, created_at, updated_at, archived_at, access_version::text
-                                     FROM roles WHERE id = ${current.role_id} FOR SHARE`;
-    if (!held[0] || held[0].archived_at) throw unprocessable("This member's role was archived; re-enable them with a new role");
-    await assertCanAssign(tx, ctx, held[0], ref.type);
+    const held = await roleForShare(tx, current.role_id);
+    if (!held || held.archived_at) throw unprocessable("This member's role was archived; re-enable them with a new role");
+    await assertCanAssign(tx, ctx, held, ref.type);
   }
   const losesOwner = current.role_key === OWNER_ROLE && wasActive && (!active || roleChanges);
   if (losesOwner) {
-    const others = await tx<{ id: string }[]>`
-      SELECT u.id FROM users u JOIN roles r ON r.tenant_id = u.tenant_id AND r.id = u.role_id
-      WHERE r.key = ${OWNER_ROLE} AND r.is_system AND u.disabled_at IS NULL AND u.id <> ${ref.id} FOR UPDATE OF u`;
+    const others = await otherActiveOwnersForUpdate(tx, ref.id);
     if (others.length === 0) throw conflict("This is the last active owner; make someone else an owner first");
   }
 
-  const table = ref.type === "user" ? tx`users` : tx`service_accounts`;
   const objectType = ref.type;
   let keysRevoked = 0;
   let sessionsRevoked = 0;
   let appsRevoked = 0;
   if (roleChanges) {
-    await tx`UPDATE ${table} SET role_id = ${role.id} WHERE id = ${ref.id}`;
+    await setMemberRole(tx, ref.type, ref.id, role.id);
     await audit(tx, ctx, { action: `${ref.type === "user" ? "member" : "service_account"}.role_changed`, objectType, recordId: ref.id,
       details: { from: current.role_key, to: role.key,
         permissions_added: role.permissions.filter((p) => !current.permissions.includes(p)),
         permissions_removed: current.permissions.filter((p) => !role.permissions.includes(p)) } });
   }
   if (active !== wasActive) {
-    await tx`UPDATE ${table} SET disabled_at = ${active ? null : tx`now()`} WHERE id = ${ref.id}`;
+    await setMemberActive(tx, ref.type, ref.id, active);
     if (!active) {
-      const revoked = await tx`UPDATE api_keys SET revoked_at = now()
-                               WHERE owner_type = ${ref.type} AND owner_id = ${ref.id} AND revoked_at IS NULL RETURNING id`;
-      keysRevoked = revoked.length;
+      keysRevoked = await revokeKeysOf(tx, ref.type, ref.id);
       // Browser sessions end in the same transaction, so a disabled person is signed out everywhere at once.
       if (ref.type === "user") sessionsRevoked = await revokeUserSessions(tx, ref.id, "member_disabled");
       // And every app they connected over OAuth, with its tokens.
@@ -280,7 +252,7 @@ export async function updateMember(tx: Tx, ctx: Ctx, publicId: string, patch: Up
       details: active ? { role: (role ?? { key: current.role_key }).key }
         : { role: current.role_key, keys_revoked: keysRevoked, ...(ref.type === "user" ? { sessions_revoked: sessionsRevoked, apps_revoked: appsRevoked } : {}) } });
   }
-  const after = (await memberRows(tx, ref.type)).find((m) => m.id === ref.id)!;
+  const after = (await membersWithRoles(tx, ref.type)).find((m) => m.id === ref.id)!;
   return { id: memberId(ref.type, ref.id), ...(after.email ? { email: after.email } : {}), name: after.name, role: after.role_key,
     role_name: after.role_name, active: !after.disabled_at, ...(keysRevoked ? { keys_revoked: keysRevoked } : {}),
     ...(sessionsRevoked ? { sessions_revoked: sessionsRevoked } : {}), ...(appsRevoked ? { apps_revoked: appsRevoked } : {}) };
@@ -292,9 +264,7 @@ export async function updateMember(tx: Tx, ctx: Ctx, publicId: string, patch: Up
  */
 export async function accessReview(tx: Tx, ctx: Ctx) {
   if (!can(ctx, "audit:read")) throw forbidden("The access review needs the audit:read permission");
-  const keys = await tx<{ id: string; owner_type: MemberType; owner_id: string; name: string; scopes: string[]; environment: string;
-    created_at: Date; last_used_at: Date | null; expires_at: Date | null; revoked_at: Date | null }[]>`
-    SELECT id, owner_type, owner_id, name, scopes, environment, created_at, last_used_at, expires_at, revoked_at FROM api_keys ORDER BY created_at`;
+  const keys = await keysForAccessReview(tx);
   const keysOf = (type: MemberType, id: string) => keys.filter((k) => k.owner_type === type && k.owner_id === id).map((k) => ({
     id: encodeId("key", k.id), name: k.name, scopes: k.scopes, environment: k.environment, created_at: k.created_at.toISOString(),
     last_used_at: k.last_used_at?.toISOString() ?? null, expires_at: k.expires_at?.toISOString() ?? null,
@@ -306,9 +276,9 @@ export async function accessReview(tx: Tx, ctx: Ctx) {
   const facts = await signInFacts(tx);
   // Apps connected over OAuth act as their member, so they are part of what each member can do.
   const grants = await listGrants(tx, null);
-  const members = [...(await memberRows(tx, "user")).map((m) => ({ m, type: "user" as const })),
+  const members = [...(await membersWithRoles(tx, "user")).map((m) => ({ m, type: "user" as const })),
     // "service_account" is a member type here, not a credential, so the secret scanner's match on the next line is silenced.
-    ...(await memberRows(tx, "service_account")).map((m) => ({ m, type: "service_account" as const }))]; // nosemgrep: generic.secrets.security.detected-google-gcm-service-account.detected-google-gcm-service-account
+    ...(await membersWithRoles(tx, "service_account")).map((m) => ({ m, type: "service_account" as const }))]; // nosemgrep: generic.secrets.security.detected-google-gcm-service-account.detected-google-gcm-service-account
   const out = [];
   for (const { m, type } of members) {
     out.push({

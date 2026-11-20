@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { describeAccess } from "../core/access.js";
+import { auditLogPage } from "../core/queries/audit.js";
 import { verifyInTx } from "../core/auditchain.js";
 import { PREVIEW_PER_TOKEN, previewCreates } from "../core/bulk.js";
 import { describeObject, listObjects, schemaChanges, schemaSummary } from "../core/describe.js";
@@ -18,6 +19,7 @@ import { actorRef } from "../core/webhooks.js";
 import { archiveRole, createRole, getRole, listRoles, permissionCatalog, roleAccess, updateRole } from "../core/roles.js";
 import { accessReview, addMember, addServiceAccount, getWorkspace, listMembers, updateMember } from "../core/workspace.js";
 import { badRequest, unprocessable } from "../lib/errors.js";
+import { memberName } from "../auth/queries.js";
 import { requireRecentSignIn } from "../auth/sessions.js";
 import { invitationUnavailable, reserveInvitation, sendInvitation } from "../auth/signin.js";
 import { encodeId } from "../lib/ids.js";
@@ -464,7 +466,7 @@ route({
     // Invitations have budgets of their own (per workspace, per sender); past them, 429 and the member isn't added.
     reserveInvitation(ctx.tenantId, ctx.actor.id);
     const workspace = (await getWorkspace(tx)).name;
-    const [inviter] = ctx.actor.type === "user" ? await tx<{ name: string }[]>`SELECT name FROM users WHERE id = ${ctx.actor.id}` : [];
+    const inviter = ctx.actor.type === "user" ? await memberName(tx, ctx.actor.id!) : undefined;
     // Sent once the member exists (after commit), and only because the caller asked.
     return { status: 201, body: { data: member }, after: () => sendInvitation(body.email, workspace, inviter?.name ?? null) };
   },
@@ -599,13 +601,7 @@ route({
   query: z.object({ limit: z.coerce.number().int().optional(), before: z.coerce.number().int().optional(), record: z.string().optional(), action: z.string().optional() }),
   handler: async ({ tx, query }) => {
     const limit = Math.min(Math.max(query.limit ?? 50, 1), 500);
-    const rows = await tx<{ seq: string; occurred_at: Date; actor_type: string; actor_id: string | null; key_id: string | null; surface: string;
-      action: string; object_type: string | null; record_id: string | null; request_id: string | null; details: unknown; sealed: boolean }[]>`
-      SELECT seq::text, occurred_at, actor_type, actor_id, key_id, surface, action, object_type, record_id, request_id, details, hash IS NOT NULL AS sealed
-      FROM audit_log
-      WHERE (${query.before ?? null}::bigint IS NULL OR seq < ${query.before ?? null}::bigint)
-        AND (${query.action ?? null}::text IS NULL OR action LIKE ${(query.action ?? "") + "%"})
-      ORDER BY audit_log.seq DESC LIMIT ${limit}`;
+    const rows = await auditLogPage(tx, { before: query.before ?? null, action: query.action ?? null, limit });
     return {
       body: {
         data: rows.map((r) => ({

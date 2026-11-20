@@ -8,6 +8,11 @@ import { safeEqual } from "../lib/crypto.js";
 import { notFound } from "../lib/errors.js";
 import { decodeId, encodeId, uuidv7 } from "../lib/ids.js";
 import { redirectHost } from "./clients.js";
+import {
+  deleteEndedCodes, deleteEndedGrants, deleteEndedTokens, enterTokenWorkspace, enterWorkspace, grantForAccess, insertGrant, insertTokenPair, liveGrants,
+  markGrantRevoked, markGrantUsed, narrowToTokenHash, replaceLiveGrants, revokeLiveGrantsOf, revokeTokensOfGrant, revokeTokensOfGrants, tokenByHash,
+  unrevokedGrantOwner, workspaceOAuth, type GrantRow,
+} from "./queries.js";
 import { ACCESS_PREFIX, REFRESH_PREFIX, RESOURCES, expandScopes, isAccessToken, newSecret, secretHash, type ResourceName } from "./scopes.js";
 
 /**
@@ -42,40 +47,32 @@ export async function issueTokens(tx: Tx, tenantId: string, grant: { id: string;
   const now = Date.now();
   const accessExp = new Date(Math.min(now + accessS * 1000, grant.expires_at.getTime()));
   const refreshExp = new Date(Math.min(now + refreshS * 1000, grant.expires_at.getTime()));
-  await tx`INSERT INTO oauth_tokens (tenant_id, id, grant_id, kind, token_hash, scopes, expires_at)
-           VALUES (${tenantId}, ${uuidv7()}, ${grant.id}, 'access', ${secretHash(access)}, ${scopes}, ${accessExp}),
-                  (${tenantId}, ${uuidv7()}, ${grant.id}, 'refresh', ${secretHash(refresh)}, NULL, ${refreshExp})`;
+  await insertTokenPair(tx, { tenantId, grantId: grant.id, scopes, access: { id: uuidv7(), hash: secretHash(access), expiresAt: accessExp },
+    refresh: { id: uuidv7(), hash: secretHash(refresh), expiresAt: refreshExp } });
   return { access, refresh, expiresIn: Math.max(1, Math.floor((accessExp.getTime() - now) / 1000)) };
 }
 
 /** Creates a grant for a redeemed code. Earlier live grants of the same member, client and resource are replaced: one connection per app and server. */
 export async function createGrant(tx: Tx, ctx: Ctx, g: { userId: string; sessionId: string; clientId: string; clientName: string; clientKind: string;
   redirectUri: string; scopes: string[]; resource: string }) {
-  const replaced = await tx<{ id: string }[]>`
-    UPDATE oauth_grants SET revoked_at = now(), revoked_reason = 'replaced'
-    WHERE user_id = ${g.userId} AND client_id = ${g.clientId} AND resource = ${g.resource} AND revoked_at IS NULL RETURNING id`;
-  if (replaced.length) await tx`UPDATE oauth_tokens SET revoked_at = now() WHERE grant_id IN ${tx(replaced.map((r) => r.id))} AND revoked_at IS NULL`;
+  const replaced = await replaceLiveGrants(tx, g.userId, g.clientId, g.resource);
+  if (replaced.length) await revokeTokensOfGrants(tx, replaced.map((r) => r.id));
   const id = uuidv7();
-  const [row] = await tx<{ expires_at: Date }[]>`
-    INSERT INTO oauth_grants (tenant_id, id, user_id, session_id, client_id, client_name, client_kind, redirect_uri, scopes, resource, expires_at)
-    VALUES (${ctx.tenantId}, ${id}, ${g.userId}, ${g.sessionId}, ${g.clientId}, ${g.clientName}, ${g.clientKind}, ${g.redirectUri}, ${g.scopes}, ${g.resource},
-            now() + make_interval(days => ${lifetimes().grantDays}))
-    RETURNING expires_at`;
+  const row = await insertGrant(tx, { tenantId: ctx.tenantId, id, ...g, days: lifetimes().grantDays });
   return { id, expires_at: row!.expires_at, replaced: replaced.map((r) => grantPublicId(r.id)) };
 }
 
 /** Revokes a grant and all its tokens. Returns false when it was already revoked. */
 export async function revokeGrant(tx: Tx, grantId: string, reason: GrantRevokeReason): Promise<boolean> {
-  const rows = await tx`UPDATE oauth_grants SET revoked_at = now(), revoked_reason = ${reason} WHERE id = ${grantId} AND revoked_at IS NULL RETURNING 1`;
-  await tx`UPDATE oauth_tokens SET revoked_at = now() WHERE grant_id = ${grantId} AND revoked_at IS NULL`;
-  return rows.length > 0;
+  const revoked = await markGrantRevoked(tx, grantId, reason);
+  await revokeTokensOfGrant(tx, grantId);
+  return revoked;
 }
 
 /** Revokes every live grant of a member (or, with no member, of the whole workspace). Returns how many. */
 export async function revokeUserGrants(tx: Tx, userId: string | null, reason: GrantRevokeReason): Promise<number> {
-  const rows = await tx<{ id: string }[]>`UPDATE oauth_grants SET revoked_at = now(), revoked_reason = ${reason}
-    WHERE revoked_at IS NULL ${userId ? tx`AND user_id = ${userId}` : tx``} RETURNING id`;
-  if (rows.length) await tx`UPDATE oauth_tokens SET revoked_at = now() WHERE grant_id IN ${tx(rows.map((r) => r.id))} AND revoked_at IS NULL`;
+  const rows = await revokeLiveGrantsOf(tx, userId, reason);
+  if (rows.length) await revokeTokensOfGrants(tx, rows.map((r) => r.id));
   return rows.length;
 }
 
@@ -99,23 +96,21 @@ export async function resolveAccessToken(token: string): Promise<OAuthPrincipal 
   if (!s || !isAccessToken(token)) return null;
   const hash = secretHash(token);
   return db().begin(async (tx) => {
-    await tx`SELECT set_config('app.oauth_token_lookup', ${hash.toString("hex")}, true)`;
-    const [t] = await tx<{ tenant_id: string; grant_id: string; kind: string; token_hash: Buffer; scopes: string[] | null; expires_at: Date; revoked_at: Date | null }[]>`
-      SELECT tenant_id, grant_id, kind, token_hash, scopes, expires_at, revoked_at FROM oauth_tokens WHERE token_hash = ${hash}`;
+    await narrowToTokenHash(tx, hash.toString("hex"));
+    const t = await tokenByHash(tx, hash);
     if (!t || t.kind !== "access" || !safeEqual(t.token_hash, hash) || t.revoked_at || t.expires_at.getTime() <= Date.now()) return null;
-    await tx`SELECT set_config('app.oauth_token_lookup', '', true), set_config('app.tenant_id', ${t.tenant_id}, true)`;
-    const [g] = await tx<{ user_id: string; client_id: string; scopes: string[]; resource: string; expires_at: Date; revoked_at: Date | null; last_used_at: Date | null }[]>`
-      SELECT user_id, client_id, scopes, resource, expires_at, revoked_at, last_used_at FROM oauth_grants WHERE id = ${t.grant_id}`;
+    await enterTokenWorkspace(tx, t.tenant_id);
+    const g = await grantForAccess(tx, t.grant_id);
     if (!g || g.revoked_at || g.expires_at.getTime() <= Date.now()) return null;
     const resource = RESOURCES.find((r) => s.resources[r] === g.resource);
     if (!resource) return null;
-    const [w] = await tx<{ oauth_apps: boolean; oauth_scopes: string[] }[]>`SELECT oauth_apps, oauth_scopes FROM tenants`;
+    const w = await workspaceOAuth(tx);
     if (!w?.oauth_apps) return null;
     const owner = await keyOwner(tx, "user", g.user_id);
     if (!owner || owner.disabled_at || owner.archived_at) return null;
     const scopes = tokenScopes(t.scopes, g.scopes, w.oauth_scopes);
     // At most once a minute, so a busy client doesn't write on every request.
-    if (!g.last_used_at || Date.now() - g.last_used_at.getTime() >= 60_000) await tx`UPDATE oauth_grants SET last_used_at = now() WHERE id = ${t.grant_id}`;
+    if (!g.last_used_at || Date.now() - g.last_used_at.getTime() >= 60_000) await markGrantUsed(tx, t.grant_id);
     return {
       tenantId: t.tenant_id, keyId: null, actor: { type: "user", id: g.user_id, role: owner.role },
       oauth: { grantId: t.grant_id, clientId: g.client_id, resource },
@@ -123,9 +118,6 @@ export async function resolveAccessToken(token: string): Promise<OAuthPrincipal 
     } satisfies OAuthPrincipal;
   }) as Promise<OAuthPrincipal | null>;
 }
-
-interface GrantRow { id: string; user_id: string; client_id: string; client_name: string; client_kind: string; redirect_uri: string; scopes: string[];
-  resource: string; created_at: Date; last_used_at: Date | null; expires_at: Date }
 
 const grantView = (r: GrantRow) => ({
   id: grantPublicId(r.id), member: encodeId("usr", r.user_id),
@@ -136,10 +128,7 @@ const grantView = (r: GrantRow) => ({
 
 /** Live grants of one member (or every member, for the access review), newest first. */
 export async function listGrants(tx: Tx, userId: string | null) {
-  const rows = await tx<GrantRow[]>`
-    SELECT id, user_id, client_id, client_name, client_kind, redirect_uri, scopes, resource, created_at, last_used_at, expires_at
-    FROM oauth_grants WHERE revoked_at IS NULL AND expires_at > now() ${userId ? tx`AND user_id = ${userId}` : tx``}
-    ORDER BY created_at DESC LIMIT ${userId ? 500 : 100_000}`;
+  const rows = await liveGrants(tx, userId, userId ? 500 : 100_000);
   return rows.map(grantView);
 }
 
@@ -147,7 +136,7 @@ export async function listGrants(tx: Tx, userId: string | null) {
 export async function grantOwner(tx: Tx, publicId: string): Promise<{ id: string; userId: string; clientId: string }> {
   const d = decodeId(publicId);
   if (d?.prefix !== "ogr") throw notFound("Connected app");
-  const [g] = await tx<{ user_id: string; client_id: string }[]>`SELECT user_id, client_id FROM oauth_grants WHERE id = ${d.uuid} AND revoked_at IS NULL`;
+  const g = await unrevokedGrantOwner(tx, d.uuid);
   if (!g) throw notFound("Connected app");
   return { id: d.uuid, userId: g.user_id, clientId: g.client_id };
 }
@@ -169,12 +158,11 @@ export async function pruneGrants(): Promise<number> {
   let n = 0;
   for (const t of await tenantIds(db())) {
     n += await db().begin(async (tx) => {
-      await tx`SELECT set_config('app.tenant_id', ${t}, true)`;
-      const codes = await tx`DELETE FROM oauth_codes WHERE expires_at < now() - interval '1 day' RETURNING 1`;
-      const tokens = await tx`DELETE FROM oauth_tokens WHERE least(expires_at, coalesce(revoked_at, 'infinity')) < now() - interval '1 day'
-                                OR (kind = 'refresh' AND used_at < now() - interval '7 days') RETURNING 1`;
-      const grants = await tx`DELETE FROM oauth_grants WHERE least(expires_at, coalesce(revoked_at, 'infinity')) < now() - interval '90 days' RETURNING 1`;
-      return codes.length + tokens.length + grants.length;
+      await enterWorkspace(tx, t);
+      const codes = await deleteEndedCodes(tx);
+      const tokens = await deleteEndedTokens(tx);
+      const grants = await deleteEndedGrants(tx);
+      return codes + tokens + grants;
     }) as number;
   }
   return n;

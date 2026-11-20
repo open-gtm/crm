@@ -1,6 +1,7 @@
 import type { Tx } from "../db/pool.js";
 import { encodeId, uuidv7 } from "../lib/ids.js";
 import type { Ctx } from "./context.js";
+import { insertAuditEntry } from "./queries/audit.js";
 
 export interface AuditEntry {
   action: string;
@@ -19,9 +20,6 @@ export interface AuditEntry {
 export async function audit(tx: Tx, ctx: Ctx, entry: AuditEntry): Promise<void> {
   const details = { ...entry.details, ...(ctx.session ? { session: encodeId("ses", ctx.session.id) } : {}),
     ...(ctx.oauth ? { oauth_grant: encodeId("ogr", ctx.oauth.grantId), oauth_client: ctx.oauth.clientId } : {}) };
-  await tx`
-    INSERT INTO audit_log (tenant_id, id, actor_type, actor_id, key_id, surface, action, object_type, record_id, request_id, details)
-    VALUES (${ctx.tenantId}, ${uuidv7()}, ${ctx.actor.type}, ${ctx.actor.id}, ${ctx.keyId}, ${ctx.surface},
-            ${entry.action}, ${entry.objectType ?? null}, ${entry.recordId ?? null}, ${ctx.requestId},
-            ${tx.json(details as never)})`;
+  await insertAuditEntry(tx, { tenantId: ctx.tenantId, id: uuidv7(), actorType: ctx.actor.type, actorId: ctx.actor.id, keyId: ctx.keyId, surface: ctx.surface,
+    action: entry.action, objectType: entry.objectType ?? null, recordId: entry.recordId ?? null, requestId: ctx.requestId, details });
 }
