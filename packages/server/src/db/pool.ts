@@ -1,6 +1,7 @@
 import postgres from "postgres";
 import { config } from "../config.js";
 import { ConfigError } from "../lib/errors.js";
+import { countOwnedTables, currentRole } from "./queries.js";
 
 export type Sql = postgres.Sql;
 export type Tx = postgres.TransactionSql;
@@ -35,8 +36,7 @@ export async function closeDb(): Promise<void> {
  * Tenant isolation depends on this, so it is checked at every startup.
  */
 export async function assertSafeDbRole(sql: Sql = db()): Promise<void> {
-  const [role] = await sql<{ rolname: string; rolsuper: boolean; rolbypassrls: boolean }[]>`
-    SELECT rolname, rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user`;
+  const role = await currentRole(sql);
   if (!role) throw new Error("Could not read the current database role");
   if (role.rolsuper || role.rolbypassrls) {
     throw new ConfigError(
@@ -44,8 +44,7 @@ export async function assertSafeDbRole(sql: Sql = db()): Promise<void> {
         "Connect as the hlcrm_app role (see deploy/postgres/init-roles.sh).",
     );
   }
-  const [owner] = await sql<{ n: number }[]>`
-    SELECT count(*)::int AS n FROM pg_tables WHERE schemaname = 'public' AND tableowner = current_user`;
+  const owner = await countOwnedTables(sql);
   if ((owner?.n ?? 0) > 0) {
     throw new ConfigError("Refusing to start: the app role owns tables. Run migrations as hlcrm_migrator instead.");
   }

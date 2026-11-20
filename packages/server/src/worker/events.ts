@@ -4,11 +4,15 @@ import { runAutomationsForEvent } from "../core/automations.js";
 import { systemCtx } from "../core/context.js";
 import {
   attempt, buildRequest, enqueueDelivery, matchesPattern, recordForPayload, recordAttempt,
-  type DeliveryRow, type EventRow, type WebhookRow,
+  type DeliveryRow,
 } from "../core/webhooks.js";
 import { withTenant } from "../db/tx.js";
 import { ApiError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
+import {
+  claimDueEvents, deleteExpiredConfirmTokens, deleteOldAutomationRuns, deleteOldAutomationUsage, deleteOldDeliveries, deleteOldEvents, leaseDueDeliveries,
+  liveWebhook, liveWebhooksByIds, markEventsProcessed, recordEventFailure, releaseDeliveries, renewLease, subscribedWebhooks,
+} from "./queries.js";
 
 /** Delay before each retry of a failed event: 6 attempts in all over about 4 hours. */
 export const EVENT_RETRY_DELAYS_S = [10, 60, 300, 1800, 3 * 3600];
@@ -31,12 +35,9 @@ function eventFailureReason(err: unknown): string {
  */
 export async function processEvents(tenantId: string, batch = 100, until = Infinity): Promise<number> {
   return withTenant(tenantId, async (tx) => {
-    const events = await tx<(EventRow & { attempts: number })[]>`
-      SELECT id, type, object_type, record_id, occurred_at, actor_type, actor_id, surface, data, causation_depth, automation_id, attempts
-      FROM outbox_events WHERE processed_at IS NULL AND dead_at IS NULL AND (next_attempt_at IS NULL OR next_attempt_at <= now())
-      ORDER BY occurred_at, id LIMIT ${batch} FOR UPDATE SKIP LOCKED`;
+    const events = await claimDueEvents(tx, batch);
     if (events.length === 0) return 0;
-    const webhooks = await tx<WebhookRow[]>`SELECT * FROM webhooks WHERE archived_at IS NULL AND cardinality(events) > 0`;
+    const webhooks = await subscribedWebhooks(tx);
     const ctx = systemCtx(tenantId, "events");
     const done: string[] = [];
     let handled = 0;
@@ -50,7 +51,7 @@ export async function processEvents(tenantId: string, batch = 100, until = Infin
           await handleEventForAlerts(sp, tenantId, e);
           const ruleHooks = new Set(await alertWebhooks(sp, e));
           if (ruleHooks.size) {
-            const targets = await sp<WebhookRow[]>`SELECT * FROM webhooks WHERE id = ANY(${[...ruleHooks]}::uuid[]) AND archived_at IS NULL`;
+            const targets = await liveWebhooksByIds(sp, [...ruleHooks]);
             for (const w of targets) await enqueueDelivery(sp, ctx, { webhook: w, event: e, consumer: "alert" });
           }
           const subs = webhooks.filter((w) => w.events.some((p) => matchesPattern(p, e.type)));
@@ -67,15 +68,14 @@ export async function processEvents(tenantId: string, batch = 100, until = Infin
         const attempts = e.attempts + 1;
         const dead = attempts >= EVENT_MAX_ATTEMPTS;
         const delay = EVENT_RETRY_DELAYS_S[Math.min(attempts - 1, EVENT_RETRY_DELAYS_S.length - 1)]! * (0.8 + Math.random() * 0.4);
-        await tx`UPDATE outbox_events SET attempts = ${attempts}, last_error = ${eventFailureReason(err)},
-                   next_attempt_at = ${dead ? null : new Date(Date.now() + delay * 1000)}, dead_at = ${dead ? new Date() : null}
-                 WHERE id = ${e.id}`;
+        await recordEventFailure(tx, { id: e.id, attempts, lastError: eventFailureReason(err),
+          nextAttemptAt: dead ? null : new Date(Date.now() + delay * 1000), deadAt: dead ? new Date() : null });
         const line = { tenantId, event: e.id, type: e.type, attempt: attempts, err: (err as Error).message };
         if (dead) logger.error(line, "event dead-lettered after its last attempt; its automations and webhooks did not run");
         else logger.warn(line, "event processing failed; will retry");
       }
     }
-    if (done.length) await tx`UPDATE outbox_events SET processed_at = now() WHERE id = ANY(${done}::uuid[])`;
+    if (done.length) await markEventsProcessed(tx, done);
     return handled;
   });
 }
@@ -122,20 +122,7 @@ const PER_ENDPOINT = 5;
 
 export async function deliverDue(tenantId: string, limit = 100): Promise<number> {
   const lease = randomUUID();
-  const claimed = await withTenant(tenantId, (tx) => tx<DeliveryRow[]>`
-    WITH due AS (
-      SELECT id FROM (
-        SELECT d.id, row_number() OVER (PARTITION BY d.webhook_id ORDER BY d.next_attempt_at, d.id) AS n
-        FROM webhook_deliveries d JOIN webhooks w ON w.tenant_id = d.tenant_id AND w.id = d.webhook_id
-        WHERE (d.status = 'pending' OR (d.status = 'sending' AND d.locked_until < now()))
-          AND d.next_attempt_at <= now() AND w.archived_at IS NULL
-          AND (d.consumer LIKE 'test:%' OR (w.enabled AND (w.circuit_open_until IS NULL OR w.circuit_open_until < now())))
-      ) ranked WHERE n <= ${PER_ENDPOINT}
-      LIMIT ${limit}
-    )
-    UPDATE webhook_deliveries d SET status = 'sending', locked_until = now() + make_interval(secs => ${LEASE_SECONDS}), lease_token = ${lease}::uuid
-    FROM due WHERE d.id = due.id AND (d.status = 'pending' OR (d.status = 'sending' AND d.locked_until < now()))
-    RETURNING d.*`);
+  const claimed = await withTenant(tenantId, (tx) => leaseDueDeliveries(tx, { perEndpoint: PER_ENDPOINT, limit, leaseSeconds: LEASE_SECONDS, lease }));
   if (claimed.length === 0) return 0;
   const byHook = new Map<string, DeliveryRow[]>();
   for (const d of claimed.sort((a, b) => a.next_attempt_at.getTime() - b.next_attempt_at.getTime() || (a.id < b.id ? -1 : 1))) {
@@ -153,9 +140,7 @@ export async function deliverDue(tenantId: string, limit = 100): Promise<number>
         // endpoint's queue briefly behind the failed delivery instead of hammering it.
         const rest = list.slice(i + 1).map((r) => r.id);
         if (rest.length) {
-          await withTenant(tenantId, (tx) => tx`
-            UPDATE webhook_deliveries SET status = 'pending', locked_until = NULL, lease_token = NULL, next_attempt_at = now() + interval '30 seconds'
-            WHERE id = ANY(${rest}::uuid[]) AND lease_token = ${lease}::uuid`);
+          await withTenant(tenantId, (tx) => releaseDeliveries(tx, rest, lease));
         }
         return;
       }
@@ -167,11 +152,9 @@ export async function deliverDue(tenantId: string, limit = 100): Promise<number>
 /** Renews the lease and signs the request (fresh timestamp, current webhook row), or null if the lease was lost. */
 async function prepareSend(tenantId: string, d: DeliveryRow, lease: string) {
   return withTenant(tenantId, async (tx) => {
-    const [held] = await tx`
-      UPDATE webhook_deliveries SET locked_until = now() + make_interval(secs => ${LEASE_SECONDS})
-      WHERE id = ${d.id} AND status = 'sending' AND lease_token = ${lease}::uuid RETURNING 1`;
+    const held = await renewLease(tx, d.id, lease, LEASE_SECONDS);
     if (!held) return null;
-    const [w] = await tx<WebhookRow[]>`SELECT * FROM webhooks WHERE id = ${d.webhook_id} AND archived_at IS NULL`;
+    const w = await liveWebhook(tx, d.webhook_id);
     if (!w) return null;
     return { w, req: await buildRequest(tx, tenantId, w, d) };
   });
@@ -180,10 +163,10 @@ async function prepareSend(tenantId: string, d: DeliveryRow, lease: string) {
 /** Drops processed events, runs and finished deliveries older than the 90-day retention window, and spent confirm tokens once they have expired (they can't be replayed then anyway). */
 export async function pruneHistory(tenantId: string): Promise<void> {
   await withTenant(tenantId, async (tx) => {
-    await tx`DELETE FROM webhook_deliveries WHERE created_at < now() - interval '90 days' AND status IN ('succeeded', 'dead')`;
-    await tx`DELETE FROM automation_runs WHERE started_at < now() - interval '90 days' AND status NOT IN ('queued', 'running')`;
-    await tx`DELETE FROM automation_usage WHERE window_start < now() - interval '2 days'`;
-    await tx`DELETE FROM outbox_events WHERE (processed_at IS NOT NULL OR dead_at IS NOT NULL) AND occurred_at < now() - interval '90 days'`;
-    await tx`DELETE FROM confirm_tokens WHERE expires_at < now()`;
+    await deleteOldDeliveries(tx);
+    await deleteOldAutomationRuns(tx);
+    await deleteOldAutomationUsage(tx);
+    await deleteOldEvents(tx);
+    await deleteExpiredConfirmTokens(tx);
   });
 }

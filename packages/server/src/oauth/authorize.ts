@@ -6,6 +6,7 @@ import { keyOwner } from "../core/keys.js";
 import type { Tx } from "../db/pool.js";
 import { uuidv7 } from "../lib/ids.js";
 import { RECENT_SIGN_IN_SECONDS } from "../auth/sessions.js";
+import { consentWorkspace, countLiveGrants, insertCode, memberNameAndEmail } from "./queries.js";
 import { ClientError, isLoopback, redirectHost, redirectMatches, resolveClient, type Client } from "./clients.js";
 import { CODE_PREFIX, DEFAULT_SCOPES, RESOURCE_SCOPES, RESOURCES, expandScopes, isScope, newSecret, satisfies, secretHash, type ResourceName } from "./scopes.js";
 
@@ -133,8 +134,8 @@ export interface ConsentPlan {
  * to `ops:read` when only reading is allowed. Unknown scopes (`openid`, `offline_access`) are ignored.
  */
 export async function planConsent(tx: Tx, ctx: Ctx, req: AuthzRequest): Promise<ConsentPlan> {
-  const [t] = await tx<{ name: string; oauth_apps: boolean; oauth_scopes: string[] }[]>`SELECT name, oauth_apps, oauth_scopes FROM tenants`;
-  const [u] = await tx<{ name: string; email: string }[]>`SELECT name, email::text FROM users WHERE id = ${ctx.actor.id}`;
+  const t = await consentWorkspace(tx);
+  const u = await memberNameAndEmail(tx, ctx.actor.id!);
   const owner = await keyOwner(tx, "user", ctx.actor.id!);
   const usable = owner ? [...owner.permissions, ...grantedPermissions(await loadRoleRules(tx, ctx.tenantId, owner.role_id, owner.access_version))] : [];
   const asked = req.requested.length ? req.requested : DEFAULT_SCOPES[req.resource];
@@ -173,12 +174,12 @@ const consentDetails = (req: AuthzRequest, scopes: Scope[]) => ({ client_id: req
 
 /** Issues a code after the member approved: single use, CODE_SECONDS, bound to everything the token request must repeat. */
 export async function issueCode(tx: Tx, ctx: Ctx, req: AuthzRequest, plan: ConsentPlan): Promise<string> {
-  const [live] = await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM oauth_grants WHERE user_id = ${ctx.actor.id} AND revoked_at IS NULL AND expires_at > now()`;
-  if (live!.n >= MAX_LIVE_GRANTS) throw new AuthorizeError("temporarily_unavailable", `You have ${MAX_LIVE_GRANTS} connected apps; disconnect some first`, null);
+  const live = await countLiveGrants(tx, ctx.actor.id!);
+  if (live >= MAX_LIVE_GRANTS) throw new AuthorizeError("temporarily_unavailable", `You have ${MAX_LIVE_GRANTS} connected apps; disconnect some first`, null);
   const code = newSecret(CODE_PREFIX);
-  await tx`INSERT INTO oauth_codes (tenant_id, id, code_hash, user_id, session_id, client_id, client_name, client_kind, redirect_uri, code_challenge, resource, scopes, expires_at)
-           VALUES (${ctx.tenantId}, ${uuidv7()}, ${secretHash(code)}, ${ctx.actor.id}, ${ctx.session!.id}, ${req.client.clientId}, ${req.client.name}, ${req.client.kind},
-                   ${req.redirectUri}, ${req.codeChallenge}, ${req.resourceUrl}, ${plan.granted}, now() + make_interval(secs => ${CODE_SECONDS}))`;
+  await insertCode(tx, { tenantId: ctx.tenantId, id: uuidv7(), codeHash: secretHash(code), userId: ctx.actor.id!, sessionId: ctx.session!.id,
+    clientId: req.client.clientId, clientName: req.client.name, clientKind: req.client.kind, redirectUri: req.redirectUri, codeChallenge: req.codeChallenge,
+    resource: req.resourceUrl, scopes: plan.granted, seconds: CODE_SECONDS });
   await audit(tx, ctx, { action: "oauth.consent_granted", objectType: "user", recordId: ctx.actor.id, details: consentDetails(req, plan.granted) });
   return code;
 }
