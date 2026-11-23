@@ -164,7 +164,7 @@ objects:
     label: Property
     plural_label: Properties
     id_prefix: prop           # record IDs look like prop_01J…
-    owned: true               # adds an owner field
+    owned: true               # adds an owner field (a member; set, filter and show it like a contact's owner)
     display_field: address
     fields:
       - { name: address, type: text, required: true }

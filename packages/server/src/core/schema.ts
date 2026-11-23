@@ -8,7 +8,7 @@ import { pluralize } from "../lib/plural.js";
 import { masterKey } from "../config.js";
 import { audit } from "./audit.js";
 import {
-  CATALOG, ENTITIES, isEntity,
+  CATALOG, ENTITIES, isEntity, OWNER_FIELD,
   type FieldOptions, type FieldType, type JsonShape, type Sensitivity,
 } from "./catalog.js";
 import type { Ctx } from "./context.js";
@@ -347,7 +347,17 @@ export async function createObject(tx: Tx, ctx: Ctx, input: ObjectInput, dryRun:
     id_prefix: prefix, module: null, is_system: false, table_name: null, display_field: null,
     owned: input.owned ?? false, hidden: false, fields: [], byName: new Map(),
   };
-  const fields = input.fields ?? [];
+  // An owned object has an owner field of its own (below). A document that lists it (an export does) may relabel and place it, nothing else.
+  const ownerInput = draft.owned ? (input.fields ?? []).find((f) => f.api_name === OWNER_FIELD.api_name) : undefined;
+  if (ownerInput && (ownerInput.type !== "relation" || ownerInput.options?.to !== "user" || (ownerInput.options.cardinality ?? "many_to_one") !== "many_to_one")) {
+    throw unprocessable(`An owned object already has an "${OWNER_FIELD.api_name}" field (the member who owns the record); give this field another name`);
+  }
+  checkText({ label: ownerInput?.label, description: ownerInput?.description });
+  const ownerField = { api_name: OWNER_FIELD.api_name, type: OWNER_FIELD.type, label: ownerInput?.label ?? OWNER_FIELD.label,
+    description: ownerInput?.description ?? OWNER_FIELD.description ?? "", options: OWNER_FIELD.options ?? {} };
+  const fields = (input.fields ?? []).filter((f) => f !== ownerInput);
+  // Where the owner goes among the fields: where the document lists it, otherwise last.
+  const ownerAt = !draft.owned ? -1 : ownerInput ? input.fields!.indexOf(ownerInput) : fields.length;
   if (fields.length > 200) throw unprocessable("An object can have at most 200 fields");
   for (const f of fields) {
     validateFieldInput(schema, f, draft);
@@ -364,16 +374,27 @@ export async function createObject(tx: Tx, ctx: Ctx, input: ObjectInput, dryRun:
     { change: "object_created", object: input.api_name, after: { label: draft.label, id_prefix: prefix, display_field: displayField, owned: draft.owned } },
     ...fields.map((f) => ({ change: "field_added", object: input.api_name, field: f.api_name, after: fieldSummary(f) })),
   ];
+  if (draft.owned) changes.splice(1 + ownerAt, 0, { change: "field_added", object: input.api_name, field: ownerField.api_name, after: fieldSummary(ownerField) });
   if (dryRun) return { dry_run: true, schema_version: schema.version, changes };
 
   const objectId = uuidv7();
   await insertCustomObject(tx, { tenantId: ctx.tenantId, id: objectId, apiName: input.api_name, label: draft.label, pluralLabel: draft.plural_label,
     description: draft.description, idPrefix: prefix, displayField, owned: draft.owned, createdBy: ctx.actor.id });
   let version = await recordChange(tx, ctx, { ...changes[0]!, object_id: objectId });
-  let position = 0;
-  for (const f of fields) {
-    const fieldId = await insertField(tx, ctx, { id: objectId }, f, position++);
-    version = await recordChange(tx, ctx, { change: "field_added", object: input.api_name, field: f.api_name, after: fieldSummary(f), object_id: objectId, field_id: fieldId });
+  // The fields in the order of `changes`, the owner among them.
+  const ordered: (FieldInput | null)[] = [...fields];
+  if (draft.owned) ordered.splice(ownerAt, 0, null);
+  for (const [position, f] of ordered.entries()) {
+    let fieldId: string;
+    if (f) fieldId = await insertField(tx, ctx, { id: objectId }, f, position);
+    else {
+      // Kept in records.owner_id, as a standard object's owner is in its table's owner_id: the same field to set, filter and show.
+      fieldId = uuidv7();
+      await insertStandardField(tx, { tenantId: ctx.tenantId, id: fieldId, objectId, apiName: ownerField.api_name, storageKey: `sys_${OWNER_FIELD.column}`,
+        label: ownerField.label, description: ownerField.description, type: ownerField.type, column: OWNER_FIELD.column, readOnly: false, required: false,
+        options: ownerField.options, sensitivity: "standard", position });
+    }
+    version = await recordChange(tx, ctx, { ...changes[1 + position]!, object_id: objectId, field_id: fieldId });
   }
   return { dry_run: false, schema_version: version, changes };
 }
