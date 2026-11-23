@@ -66,10 +66,12 @@ export interface CatalogObject {
   fields: CatalogField[];
 }
 
-const owner: CatalogField = {
+/** The owner of an owned object's records: on the standard objects below, and on every owned custom object (core/schema.ts). */
+export const OWNER_FIELD: CatalogField = {
   api_name: "owner", label: "Owner", type: "relation", column: "owner_id",
   description: "The user who owns this record.", options: { to: "user", cardinality: "many_to_one" },
 };
+const owner = OWNER_FIELD;
 
 const lifecycle: SelectValue[] = [
   { key: "subscriber", label: "Subscriber", category: "subscriber" },

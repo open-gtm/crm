@@ -178,7 +178,7 @@ describe("custom objects and fields", () => {
     };
     const dry = await call("POST", "/v1/objects", { key: ws.keys.admin, body: { ...def, dry_run: true } });
     expect(dry.status).toBe(200);
-    expect(dry.json.changes).toHaveLength(7);
+    expect(dry.json.changes).toHaveLength(8); // the object, its six fields, and the owner field an owned object gets
     const made = await call("POST", "/v1/objects", { key: ws.keys.admin, body: def });
     expect(made.status).toBe(201);
 
@@ -199,6 +199,70 @@ describe("custom objects and fields", () => {
     expect(restrictedFilter.status).toBe(422);
     const spec = await call("GET", "/v1/openapi.json", { key: ws.keys.ops });
     expect(spec.json.components.schemas.property.required).toEqual(["address"]);
+  });
+
+  it("an owned custom object has an owner field to set, filter and show, like a contact's", async () => {
+    // As a pack installs it, with a view that shows the owner.
+    const pack = { manifest: { name: "appointments", version: "1.0.0", parts: ["schema", "views"] },
+      schema: { objects: [{ name: "appointment", id_prefix: "appt", display_field: "title", owned: true, fields: [{ name: "title", type: "text", required: true }] },
+        { name: "room", id_prefix: "room", fields: [{ name: "title", type: "text" }] }] },
+      views: [{ name: "Upcoming appointments", object: "appointment", columns: ["title", "owner"] }] };
+    const plan = await call("POST", "/v1/packs/plan", { key: ws.keys.admin, body: { pack } });
+    expect(plan.status, JSON.stringify(plan.json).slice(0, 400)).toBe(200);
+    const applied = await call("POST", "/v1/packs/apply", { key: ws.keys.admin, body: { pack, plan_token: plan.json.plan_token } });
+    expect(applied.status, JSON.stringify(applied.json).slice(0, 400)).toBe(200);
+
+    const described = await call("GET", "/v1/objects/appointment", { key: ws.keys.admin });
+    const owner = described.json.data.fields.find((f: { name: string }) => f.name === "owner");
+    expect(owner).toMatchObject({ type: "relation", standard: true, relation: { to: "user", cardinality: "many_to_one" } });
+    // An object that is not owned gets none.
+    expect((await call("GET", "/v1/objects/room", { key: ws.keys.admin })).json.data.fields.map((f: { name: string }) => f.name)).toEqual(["title"]);
+
+    const m = await call("POST", "/v1/members", { key: ws.keys.admin, body: { email: email("appt-owner"), name: "Appt Owner", role: "member" } });
+    expect(m.status).toBe(201);
+    const member = m.json.data.id as string;
+    // Without an owner the creator owns it, as before; with one, that member does.
+    const mine = await create(ws.keys.ops, "appointment", { title: "Mine" });
+    expect(mine.owner).toBe(ws.ownerId);
+    const theirs = await create(ws.keys.ops, "appointment", { title: "Theirs", owner: member });
+    expect(theirs.owner).toBe(member);
+
+    const filtered = await call("POST", "/v1/query", { key: ws.keys.ops, body: { object: "appointment", where: { field: "owner", op: "eq", value: member } } });
+    expect(filtered.json.data.map((r: { title: string }) => r.title)).toEqual(["Theirs"]);
+    const byEmail = await call("POST", "/v1/query", { key: ws.keys.ops, body: { object: "appointment", where: { path: ["owner", "name"], op: "eq", value: "Appt Owner" } } });
+    expect(byEmail.json.data.map((r: { title: string }) => r.title)).toEqual(["Theirs"]);
+
+    // Changing it, clearing it, and assign_owner all go through the same field.
+    const moved = await call("PATCH", `/v1/objects/appointment/records/${mine.id}`, { key: ws.keys.ops, body: { owner: member } });
+    expect(moved.json.data.owner).toBe(member);
+    const cleared = await call("PATCH", `/v1/objects/appointment/records/${mine.id}`, { key: ws.keys.ops, body: { owner: null } });
+    expect(cleared.json.data.owner).toBeNull();
+    const assigned = await call("POST", "/v1/ops/assign_owner", { key: ws.keys.ops, body: { record: mine.id, owner: member } });
+    expect(assigned.status, JSON.stringify(assigned.json)).toBe(200);
+    expect((await call("GET", `/v1/records/${mine.id}`, { key: ws.keys.ops })).json.data.owner).toBe(member);
+    // An owner must be a member of this workspace.
+    const stranger = await call("POST", "/v1/objects/appointment/records", { key: ws.keys.ops, body: { title: "No one's", owner: `usr_${member.slice(4).split("").reverse().join("")}` } });
+    expect(stranger.status).toBe(422);
+
+    // The field is the platform's: relabeled, not renamed, archived or taken by another field.
+    expect((await call("PATCH", "/v1/objects/appointment/fields/owner", { key: ws.keys.admin, body: { label: "Host" } })).status).toBe(200);
+    expect((await call("PATCH", "/v1/objects/appointment/fields/owner", { key: ws.keys.admin, body: { api_name: "host" } })).status).toBe(403);
+    expect((await call("POST", "/v1/objects/appointment/fields/owner/archive", { key: ws.keys.admin, body: { dry_run: true } })).status).toBe(403);
+    expect((await call("POST", "/v1/objects/appointment/fields", { key: ws.keys.admin, body: { api_name: "owner", type: "text" } })).status).toBe(409);
+    const clash = await call("POST", "/v1/objects", { key: ws.keys.admin, body: { api_name: "booking", owned: true, fields: [{ api_name: "owner", type: "text" }] } });
+    expect(clash.status).toBe(422);
+
+    // A schema export lists the field, and the export applies to a workspace that lacks the object.
+    const doc = (await call("GET", "/v1/schema/export", { key: ws.keys.admin })).json;
+    const exported = doc.objects.find((o: { name: string }) => o.name === "appointment");
+    expect(exported.fields.map((f: { name: string }) => f.name)).toEqual(["title", "owner"]);
+    const other = await newWorkspace("API owner field copy");
+    const { id: _id, ...copy } = exported;
+    const document = { format: doc.format, objects: [{ ...copy, fields: copy.fields.map(({ id: _f, ...f }: { id: string }) => f) }] };
+    const copied = await call("POST", "/v1/schema/apply", { key: other.keys.admin, body: { document, accept_drift: true } });
+    expect(copied.status, JSON.stringify(copied.json).slice(0, 400)).toBe(200);
+    const there = (await call("GET", "/v1/objects/appointment", { key: other.keys.admin })).json.data.fields;
+    expect(there.filter((f: { name: string }) => f.name === "owner")).toMatchObject([{ label: "Host", standard: true }]);
   });
 
   it("stores restricted values encrypted at rest", async () => {
