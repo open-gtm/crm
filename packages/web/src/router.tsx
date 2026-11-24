@@ -150,6 +150,8 @@ const settingsWorkspace = createRoute({ getParentRoute: () => settingsRoute, pat
 const settingsMembers = createRoute({ getParentRoute: () => settingsRoute, path: "/members", component: lazyRouteComponent(() => import("./features/settings/MembersSettings"), "MembersSettings") });
 const settingsRoles = createRoute({ getParentRoute: () => settingsRoute, path: "/roles", component: lazyRouteComponent(() => import("./features/settings/RolesSettings"), "RolesSettings") });
 const settingsRole = createRoute({ getParentRoute: () => settingsRoute, path: "/roles/$roleId", component: lazyRouteComponent(() => import("./features/settings/RolesSettings"), "RoleDetail") });
+const settingsPermissionSets = createRoute({ getParentRoute: () => settingsRoute, path: "/permission-sets", component: lazyRouteComponent(() => import("./features/settings/RolesSettings"), "PermissionSetsSettings") });
+const settingsPermissionSet = createRoute({ getParentRoute: () => settingsRoute, path: "/permission-sets/$roleId", component: lazyRouteComponent(() => import("./features/settings/RolesSettings"), "PermissionSetDetail") });
 const settingsKeys = createRoute({ getParentRoute: () => settingsRoute, path: "/api-keys", component: lazyRouteComponent(() => import("./features/settings/ApiKeysSettings"), "ApiKeysSettings") });
 const settingsWebhooks = createRoute({ getParentRoute: () => settingsRoute, path: "/webhooks", component: lazyRouteComponent(() => import("./features/settings/WebhooksSettings"), "WebhooksSettings") });
 const settingsWebhook = createRoute({ getParentRoute: () => settingsRoute, path: "/webhooks/$webhookId", component: lazyRouteComponent(() => import("./features/settings/WebhooksSettings"), "WebhookDetail") });
@@ -158,7 +160,7 @@ const settingsSchema = createRoute({ getParentRoute: () => settingsRoute, path: 
 const settingsSchemaObject = createRoute({ getParentRoute: () => settingsRoute, path: "/schema/$schemaObject", component: lazyRouteComponent(() => import("./features/settings/SchemaSettings"), "SchemaObject") });
 const settingsAutomations = createRoute({ getParentRoute: () => settingsRoute, path: "/automations", component: lazyRouteComponent(() => import("./features/settings/AutomationsSettings"), "AutomationsSettings") });
 const settingsPacks = createRoute({ getParentRoute: () => settingsRoute, path: "/packs", component: lazyRouteComponent(() => import("./features/settings/AutomationsSettings"), "PacksSettings") });
-const settingsChildren = [settingsIndex, settingsAccount, settingsNotifications, settingsWorkspace, settingsMembers, settingsRoles, settingsRole, settingsKeys, settingsWebhooks, settingsWebhook, settingsAudit, settingsSchema, settingsSchemaObject, settingsAutomations, settingsPacks];
+const settingsChildren = [settingsIndex, settingsAccount, settingsNotifications, settingsWorkspace, settingsMembers, settingsRoles, settingsRole, settingsPermissionSets, settingsPermissionSet, settingsKeys, settingsWebhooks, settingsWebhook, settingsAudit, settingsSchema, settingsSchemaObject, settingsAutomations, settingsPacks];
 
 const routeTree = rootRoute.addChildren([
   signInRoute,

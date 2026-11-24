@@ -18,7 +18,7 @@ export const PERMISSIONS = {
   "restricted:read": "See the values of restricted fields",
   "schema:manage": "Change objects, fields, pipelines and modules",
   "members:manage": "Add, change and disable members and service accounts",
-  "roles:manage": "Create and change roles",
+  "roles:manage": "Create and change roles and permission sets",
   "keys:manage": "Create, rotate and revoke API keys for other members, and list all keys",
   "webhooks:manage": "Manage webhook endpoints and their deliveries",
   "automations:manage": "Manage automations",
@@ -138,8 +138,11 @@ export interface RecordAccess {
 /** Who is acting, on which tenant, through which surface. Passed to every service call. */
 export interface Ctx {
   tenantId: string;
-  /** `role` is the role's key (owner, admin, member, read_only or a custom role's key). */
-  actor: { type: ActorType; id: string | null; role: string };
+  /**
+   * `role` is the role's key (owner, admin, member, read_only or a custom role's key). `permissionSets` are the
+   * keys of the permission sets the member holds on top of it (ADR 0013); absent means none.
+   */
+  actor: { type: ActorType; id: string | null; role: string; permissionSets?: string[] };
   keyId: string | null;
   /**
    * The browser session, when a signed-in person (not an API key) is acting. `signedInAt` is when they

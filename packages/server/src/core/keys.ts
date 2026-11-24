@@ -3,7 +3,7 @@ import { db, type Tx } from "../db/pool.js";
 import { forbidden, notFound, unprocessable } from "../lib/errors.js";
 import { safeEqual, sha256 } from "../lib/crypto.js";
 import { decodeId, encodeId, uuidv7 } from "../lib/ids.js";
-import { accessShortfall, grantedPermissions, loadRoleRules, recordAccess, roleCtx, unlockedBy } from "./access.js";
+import { accessShortfall, grantedPermissions, loadMemberAccess, recordAccess, roleCtx, unlockedBy } from "./access.js";
 import { audit } from "./audit.js";
 import { ALL_SCOPES, OWNER_ROLE, can, effectiveAccess, permissionsForScopes, roleCanUseScope, type Ctx, type Scope, type Surface } from "./context.js";
 import {
@@ -65,7 +65,7 @@ export async function authenticate(raw: string): Promise<Principal | null> {
     return {
       tenantId: key.tenant_id,
       keyId: key.id,
-      actor: { type: key.owner_type, id: key.owner_id, role: owner.role },
+      actor: actorOf(key.owner_type, key.owner_id, owner),
       ...(await memberAccess(tx, key.tenant_id, owner, key.scopes)),
     } satisfies Principal;
   });
@@ -73,15 +73,23 @@ export async function authenticate(raw: string): Promise<Principal | null> {
 
 type MemberType = "user" | "service_account";
 
+/** Everything the member can do: their role and the permission sets they hold, combined (ADR 0013). */
+const accessOf = (tx: Tx, tenantId: string, owner: Owner) =>
+  loadMemberAccess(tx, tenantId, { id: owner.role_id, permissions: owner.permissions, access_version: owner.access_version }, owner.sets);
+
+/** The actor of a request made as this member: their role's key and the keys of the sets they hold. */
+export const actorOf = (type: MemberType, id: string, owner: Owner): Ctx["actor"] =>
+  ({ type, id, role: owner.role, ...(owner.sets.length ? { permissionSets: owner.sets.map((s) => s.key) } : {}) });
+
 /**
- * A member's effective access through a credential holding `scopes`: role permissions ∩ what the
- * scopes unlock, the scopes the role can use, and the role's object and field rules.
+ * A member's effective access through a credential holding `scopes`: the permissions of their role and
+ * permission sets ∩ what the scopes unlock, the scopes those can use, and their combined object and field rules.
  */
 export async function memberAccess(tx: Tx, tenantId: string, owner: Owner, scopes: Iterable<Scope>):
   Promise<Pick<Principal, "scopes" | "permissions" | "records">> {
-  const rules = await loadRoleRules(tx, tenantId, owner.role_id, owner.access_version);
-  const access = effectiveAccess(owner.permissions, scopes, grantedPermissions(rules));
-  const records = recordAccess(rules, unlockedBy(permissionsForScopes(access.scopes)), `${owner.role_id}:${owner.access_version}`);
+  const member = await accessOf(tx, tenantId, owner);
+  const access = effectiveAccess(member.permissions, scopes, grantedPermissions(member.rules));
+  const records = recordAccess(member.rules, unlockedBy(permissionsForScopes(access.scopes)), member.version);
   return { scopes: access.scopes, permissions: access.permissions, ...(records ? { records } : {}) };
 }
 
@@ -90,9 +98,10 @@ export async function keyOwner(tx: Tx, type: MemberType, id: string): Promise<Ow
   return (await memberRoleStatus(tx, type, id)) ?? null;
 }
 
-/** The record permissions an owner's role can use, including what its object rules grant (for scope checks). */
-async function usablePermissions(tx: Tx, ctx: Ctx, owner: Owner): Promise<string[]> {
-  return [...owner.permissions, ...grantedPermissions(await loadRoleRules(tx, ctx.tenantId, owner.role_id, owner.access_version))];
+/** The permissions a member's role and permission sets can use, including what their object rules grant (for scope checks). */
+export async function usablePermissions(tx: Tx, ctx: Pick<Ctx, "tenantId">, owner: Owner): Promise<string[]> {
+  const member = await accessOf(tx, ctx.tenantId, owner);
+  return [...member.permissions, ...grantedPermissions(member.rules)];
 }
 
 const isSelf = (ctx: Ctx, type: MemberType, id: string) => ctx.actor.type === type && ctx.actor.id === id;
@@ -106,10 +115,11 @@ async function assertMayManageKeysOf(tx: Tx, ctx: Ctx, type: MemberType, id: str
   if (owner.role === OWNER_ROLE && ctx.actor.role !== OWNER_ROLE) throw forbidden("Only an owner can manage an owner's keys");
   if (isSelf(ctx, type, id)) return;
   if (!can(ctx, "keys:manage")) throw forbidden("Managing other members' keys needs the keys:manage permission");
-  const over = owner.permissions.filter((p) => !ctx.permissions.has(p));
+  const member = await accessOf(tx, ctx.tenantId, owner);
+  const over = member.permissions.filter((p) => !ctx.permissions.has(p));
   if (over.length) throw forbidden(`The key owner's role has permissions you don't hold: ${over.join(", ")}`);
   // Record access counts too: a key for someone who can read an object you can't would read it for you.
-  const target = roleCtx(ctx, { key: owner.role, permissions: owner.permissions }, await loadRoleRules(tx, ctx.tenantId, owner.role_id, owner.access_version), owner.access_version, { restricted: true });
+  const target = roleCtx(ctx, { key: owner.role, permissions: member.permissions }, member.rules, member.version, { restricted: true });
   const short = accessShortfall(ctx, await loadSchema(tx), target);
   if (short.length) throw forbidden(`The key owner's role has record access you don't: ${short.slice(0, 10).join("; ")}`);
 }

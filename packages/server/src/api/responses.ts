@@ -167,7 +167,7 @@ export const BASE_SCHEMAS: Record<string, JsonSchema> = {
       has_password: { type: "boolean", description: "The member has set a password (they can confirm it's them with it)" },
       sso_linked: { type: "boolean", description: "The member is linked to the single sign-on provider" } }),
     workspace: object({ id: str, name: str, sign_in: ref("SignInSettings") }),
-    role: str, permissions: list(str),
+    role: str, permission_sets: { ...list(str), description: "Keys of the permission sets held on top of the role" }, permissions: list(str),
     server: strict({
       connected_apps: { type: "boolean", description: "OAuth for MCP is turned on on this server (MCP_PUBLIC_URL), so members can connect apps; the workspace may still refuse it (sign_in.oauth_apps)" },
     }),
@@ -261,7 +261,8 @@ export const BASE_SCHEMAS: Record<string, JsonSchema> = {
   Member: object({
     id: { type: "string", description: "usr_… for a member, svc_… for a service account" },
     email: { type: "string", description: "Members only" }, name: str,
-    role: { type: "string", description: "The role's key" }, role_name: str, active: bool,
+    role: { type: "string", description: "The role's key" }, role_name: str,
+    permission_sets: { ...list(str), description: "Keys of the permission sets held on top of the role (ADR 0013)" }, active: bool,
     sign_in: ref("MemberSignIn"),
     keys_revoked: { type: "integer", description: "After disabling: the API keys revoked with it (absent when none)" },
     sessions_revoked: { type: "integer", description: "After disabling a member: the browser sessions ended (absent when none)" },
@@ -270,7 +271,18 @@ export const BASE_SCHEMAS: Record<string, JsonSchema> = {
   }, ["id", "name", "role", "role_name", "active"]),
   MemberSignIn: object({ has_password: bool, sso_linked: bool, last_sign_in_at: nullable(time), active_sessions: int }),
   Role: object({
-    id: str, key: str, name: str, description: str, permissions: list(str), is_system: bool, ...recordRules,
+    id: str, key: str, name: str, description: str, permissions: list(str),
+    record_permissions: { ...list(str), description: "The permissions about records (records:*, restricted:read); objects and fields refine them" },
+    feature_permissions: { ...list(str), description: "The permissions for features of the CRM (managing the schema, automations, members, …)" },
+    is_system: bool, ...recordRules,
+    created_at: time, updated_at: time, archived_at: nullable(time),
+    active_members: { type: "integer", description: "Active members and service accounts holding it" },
+  }),
+  PermissionSet: object({
+    id: { type: "string", description: "pset_…" }, key: str, name: str, description: str, permissions: list(str),
+    record_permissions: { ...list(str), description: "The permissions about records (records:*, restricted:read); objects and fields refine them" },
+    feature_permissions: { ...list(str), description: "The permissions for features of the CRM (managing the schema, automations, members, …)" },
+    ...recordRules,
     created_at: time, updated_at: time, archived_at: nullable(time),
     active_members: { type: "integer", description: "Active members and service accounts holding it" },
   }),
@@ -347,7 +359,9 @@ export const R = {
     generated_at: time,
     members: list(object({
       id: str, type: enumOf("user", "service_account"), email: { type: "string", description: "Members only" }, name: str, active: bool,
-      role: object({ key: str, name: str }), permissions: list(str), record_rules: object(recordRules), created_at: time,
+      role: object({ key: str, name: str }), permissions: { ...list(str), description: "The role's permissions" }, record_rules: object(recordRules),
+      permission_sets: list(object({ key: str, name: str, permissions: list(str), record_rules: object(recordRules) })),
+      effective_permissions: { ...list(str), description: "The role's permissions and every permission set's, together" }, created_at: time,
       keys: list(object({ id: str, name: str, scopes: list(str), environment: enumOf("live", "test"), created_at: time,
         last_used_at: nullable(time), expires_at: nullable(time), revoked_at: nullable(time), usable: bool })),
       sign_in: { ...ref("MemberSignIn"), description: "Members only" },
@@ -355,4 +369,6 @@ export const R = {
     }, ["id", "type", "name", "active", "role", "permissions", "record_rules", "created_at", "keys"])),
   })),
   roles: dataList(ref("Role")),
+  permissionSet: data(ref("PermissionSet")),
+  permissionSets: dataList(ref("PermissionSet")),
 };

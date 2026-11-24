@@ -1,16 +1,16 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { LogOut, MoreHorizontal, Plug, Plus, UserCheck, UserX } from "lucide-react";
+import { LogOut, MoreHorizontal, Plug, Plus, ShieldPlus, UserCheck, UserX } from "lucide-react";
 import { useState } from "react";
 import { ProblemView } from "@/components/feedback";
 import { Avatar } from "@/components/pickers";
 import { Button } from "@/components/ui/button";
 import { FormField, Input, NativeSelect } from "@/components/ui/input";
-import { Badge, Skeleton, Switch } from "@/components/ui/misc";
+import { Badge, Checkbox, Skeleton, Switch } from "@/components/ui/misc";
 import { ConfirmDialog, Dialog, DialogContent, Menu, MenuContent, MenuItem, MenuTrigger } from "@/components/ui/overlays";
 import { useToast } from "@/components/ui/toast";
 import { useApi } from "@/lib/api/context";
 import { asProblem } from "@/lib/api/problem";
-import type { MemberUser, Members, Role, SessionRow } from "@/lib/api/types";
+import type { MemberUser, Members, Role, ServiceAccount, SessionRow } from "@/lib/api/types";
 import { formatDateTime, formatRelative } from "@/lib/format";
 import { useSession } from "@/lib/session";
 import { describeAgent } from "./AccountSettings";
@@ -21,6 +21,9 @@ export function useRoles() {
   return useAdmin<{ data: Role[] }>(["roles"], "/v1/roles");
 }
 
+/** Whose permission sets are being edited: a member or a service account (they are changed on different routes). */
+type SetsTarget = { id: string; name: string; permission_sets?: string[]; kind: "members" | "service-accounts" };
+
 /** Members: add (optionally emailing an invitation), change role, disable or re-enable, see and end their sessions. */
 export function MembersSettings() {
   const s = useSession();
@@ -29,6 +32,8 @@ export function MembersSettings() {
   const toast = useToast();
   const members = useAdmin<{ data: Members }>(["members"], "/v1/members");
   const roles = useRoles();
+  const sets = useAdmin<{ data: Role[] }>(["permission-sets"], "/v1/permission-sets");
+  const [setsOf, setSetsOf] = useState<SetsTarget | null>(null);
   const [adding, setAdding] = useState(false);
   const [sessionsOf, setSessionsOf] = useState<MemberUser | null>(null);
   const [appsOf, setAppsOf] = useState<MemberUser | null>(null);
@@ -44,12 +49,24 @@ export function MembersSettings() {
     onError: (e) => toast.error(e, "Couldn't change the member"),
   });
   const roleOptions = (roles.data?.data ?? []).filter((r) => !r.archived_at);
+  const setOptions = (sets.data?.data ?? []).filter((r) => !r.archived_at);
+  const setName = (key: string) => setOptions.find((x) => x.key === key)?.name ?? key;
+  /** The sets a member holds, as a button that opens the dialog to change them (plain text for yourself: nobody changes their own). */
+  const setsCell = (m: MemberUser | ServiceAccount, kind: SetsTarget["kind"], locked: boolean) => {
+    const held = m.permission_sets ?? [];
+    const text = held.length ? held.map(setName).join(", ") : "None";
+    return locked ? <span className="text-sm text-muted">{text}</span> : (
+      <Button size="sm" variant="ghost" aria-label={`Permission sets of ${m.name}: ${text}`} onClick={() => setSetsOf({ id: m.id, name: m.name, permission_sets: held, kind })}>
+        <ShieldPlus /> <span className="max-w-48 truncate">{text}</span>
+      </Button>
+    );
+  };
   return (
     <>
       <Section title="Members" description="People who can sign in to this workspace. Service accounts (for integrations) are listed below."
         actions={<Button size="sm" variant="primary" onClick={() => setAdding(true)}><Plus /> Add member</Button>}>
         {members.isPending ? <Skeleton className="h-24" /> : members.error ? <ProblemView error={members.error} onRetry={() => members.refetch()} compact /> : (
-          <SimpleTable label="Members" head={["Member", "Role", "Sign-in", "Status", ""]}>
+          <SimpleTable label="Members" head={["Member", "Role", "Permission sets", "Sign-in", "Status", ""]}>
             {members.data.data.users.map((m) => {
               const self = m.id === s.member.id;
               return (
@@ -62,6 +79,7 @@ export function MembersSettings() {
                       {roleOptions.map((r) => <option key={r.id} value={r.key}>{r.name}</option>)}
                     </NativeSelect>
                   </td>
+                  <td className="px-4 py-2">{setsCell(m, "members", self || !m.active)}</td>
                   <td className="px-4 py-2 text-sm text-muted">
                     {m.sign_in?.last_sign_in_at ? `Last ${formatRelative(m.sign_in.last_sign_in_at)}` : "Never signed in"}
                     {m.sign_in ? <span className="block">{[m.sign_in.has_password && "password", m.sign_in.sso_linked && "SSO", `${m.sign_in.active_sessions} session${m.sign_in.active_sessions === 1 ? "" : "s"}`].filter(Boolean).join(" · ")}</span> : null}
@@ -88,15 +106,19 @@ export function MembersSettings() {
       </Section>
       {members.data?.data.service_accounts.length ? (
         <Section title="Service accounts" description="Integrations and agents. They use API keys and never sign in.">
-          <SimpleTable label="Service accounts" head={["Name", "Role", "Status"]}>
+          <SimpleTable label="Service accounts" head={["Name", "Role", "Permission sets", "Status"]}>
             {members.data.data.service_accounts.map((a) => (
-              <tr key={a.id}><td className="px-4 py-2 font-medium">{a.name}</td><td className="px-4 py-2">{a.role_name ?? a.role}</td><td className="px-4 py-2">{a.active ? <Badge tone="success">Active</Badge> : <Badge>Disabled</Badge>}</td></tr>
+              <tr key={a.id}><td className="px-4 py-2 font-medium">{a.name}</td><td className="px-4 py-2">{a.role_name ?? a.role}</td><td className="px-4 py-2">{setsCell(a, "service-accounts", !a.active)}</td><td className="px-4 py-2">{a.active ? <Badge tone="success">Active</Badge> : <Badge>Disabled</Badge>}</td></tr>
             ))}
           </SimpleTable>
         </Section>
       ) : null}
       {adding ? <AddMemberDialog roles={roleOptions} onClose={() => setAdding(false)} onAdded={() => {
         setAdding(false);
+        void refresh();
+      }} /> : null}
+      {setsOf ? <MemberSetsDialog target={setsOf} sets={setOptions} onClose={() => setSetsOf(null)} onSaved={() => {
+        setSetsOf(null);
         void refresh();
       }} /> : null}
       {appsOf ? <MemberAppsDialog member={appsOf} onClose={() => setAppsOf(null)} /> : null}
@@ -139,6 +161,50 @@ function AddMemberDialog({ roles, onClose, onAdded }: { roles: Role[]; onClose: 
           )}</FormField>
           <label className="flex items-center gap-3 text-base"><Switch checked={invite} onCheckedChange={setInvite} /> Email them an invitation</label>
         </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Choose the permission sets a member holds on top of their role. Saving sends the whole list. */
+function MemberSetsDialog({ target, sets, onClose, onSaved }: { target: SetsTarget; sets: Role[]; onClose: () => void; onSaved: () => void }) {
+  const api = useApi();
+  const toast = useToast();
+  const [chosen, setChosen] = useState<Set<string>>(new Set(target.permission_sets ?? []));
+  const [error, setError] = useState<string | null>(null);
+  const save = useMutation({
+    mutationFn: () => api.patch(`/v1/${target.kind}/${encodeURIComponent(target.id)}`, { permission_sets: [...chosen] }),
+    onSuccess: () => {
+      toast.toast({ tone: "success", title: `Permission sets of ${target.name} changed` });
+      onSaved();
+    },
+    onError: (e) => setError(asProblem(e).detail),
+  });
+  const toggle = (key: string, on: boolean) => {
+    const next = new Set(chosen);
+    if (on) next.add(key); else next.delete(key);
+    setChosen(next);
+  };
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent title={`Permission sets of ${target.name}`} description="Each set adds to what their role allows. You can give only sets whose permissions and record access you hold yourself."
+        footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" busy={save.isPending} onClick={() => {
+          setError(null);
+          save.mutate();
+        }}>Save</Button></>}>
+        {error ? <p role="alert" className="mb-3 rounded-md border border-danger/40 bg-danger-soft px-3 py-2 text-base text-danger-fg">{error}</p> : null}
+        {sets.length === 0 ? <p className="text-base text-muted">There are no permission sets yet. Create one in Settings, under Permission sets.</p> : (
+          <ul className="grid gap-2.5">
+            {sets.map((x) => (
+              <li key={x.id}>
+                <label className="flex items-start gap-2 text-base">
+                  <Checkbox checked={chosen.has(x.key)} onCheckedChange={(v) => toggle(x.key, v === true)} className="mt-0.5" />
+                  <span>{x.name}<span className="block text-sm text-muted">{x.description || `${x.permissions.length} permission${x.permissions.length === 1 ? "" : "s"}`}</span></span>
+                </label>
+              </li>
+            ))}
+          </ul>
+        )}
       </DialogContent>
     </Dialog>
   );

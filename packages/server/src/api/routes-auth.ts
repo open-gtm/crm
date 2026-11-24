@@ -37,6 +37,7 @@ route({
         member: { id: encodeId("usr", ctx.actor.id!), email: row!.email, name: row!.name, has_password: row!.has_password, sso_linked: row!.sso_linked },
         workspace: await getWorkspace(tx),
         role: ctx.actor.role,
+        permission_sets: ctx.actor.permissionSets ?? [],
         permissions: [...ctx.permissions],
         // What this server has turned on, so the app needn't probe for it (OAuth for MCP answers its discovery document only when on).
         server: { connected_apps: oauthSettings() !== null },

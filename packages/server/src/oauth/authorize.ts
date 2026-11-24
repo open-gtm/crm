@@ -1,8 +1,7 @@
 import { oauthSettings } from "../config.js";
-import { grantedPermissions, loadRoleRules } from "../core/access.js";
 import { audit } from "../core/audit.js";
 import { roleCanUseScope, type Ctx, type Scope } from "../core/context.js";
-import { keyOwner } from "../core/keys.js";
+import { keyOwner, usablePermissions } from "../core/keys.js";
 import type { Tx } from "../db/pool.js";
 import { uuidv7 } from "../lib/ids.js";
 import { RECENT_SIGN_IN_SECONDS } from "../auth/sessions.js";
@@ -137,7 +136,7 @@ export async function planConsent(tx: Tx, ctx: Ctx, req: AuthzRequest): Promise<
   const t = await consentWorkspace(tx);
   const u = await memberNameAndEmail(tx, ctx.actor.id!);
   const owner = await keyOwner(tx, "user", ctx.actor.id!);
-  const usable = owner ? [...owner.permissions, ...grantedPermissions(await loadRoleRules(tx, ctx.tenantId, owner.role_id, owner.access_version))] : [];
+  const usable = owner ? await usablePermissions(tx, ctx, owner) : [];
   const asked = req.requested.length ? req.requested : DEFAULT_SCOPES[req.resource];
   // The workspace's list follows the same hierarchy as tokens: allowing ops:write allows ops:read.
   const workspaceAllows = new Set<Scope>(expandScopes(t!.oauth_scopes));

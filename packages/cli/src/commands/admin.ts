@@ -5,7 +5,15 @@ import { EXIT, usage } from "../errors.js";
 import { clean } from "../output.js";
 import { CONNECTED_APP_ID, KEY_ID, MEMBER_ID, ROLE_REF, SESSION_ID, USER_ID } from "../patterns.js";
 import type { Act } from "../program.js";
-import { registerManage } from "./manage.js";
+import { registerManage, registerPermissionSets } from "./manage.js";
+
+/** `--permission-sets a,b` as the API's list; "none" (or nothing) is the empty list, which takes every set away. */
+const setList = (v: string): string[] => (v.trim() === "none" ? [] : v.split(",").map((x) => x.trim()).filter(Boolean));
+/** ", permission sets a, b" for a member that holds any. */
+const heldSets = (data: Record<string, unknown>): string => {
+  const sets = Array.isArray(data.permission_sets) ? data.permission_sets.map(String) : [];
+  return sets.length ? `, permission sets ${sets.map(clean).join(", ")}` : "";
+};
 
 const SCOPES = ["admin", "ops:write", "ops:read", "restricted:read"];
 
@@ -72,41 +80,45 @@ export function registerAdmin(program: Command, act: Act): void {
     const { data } = await ctx.client().get<{ data: { users: Record<string, unknown>[]; service_accounts: Record<string, unknown>[] } }>("/v1/members");
     if (ctx.g.json) return ctx.out.data({ data });
     ctx.out.table([...data.users.map((u) => ({ ...u, kind: "member" })), ...data.service_accounts.map((s) => ({ ...s, kind: "service account" }))],
-      ["id", "kind", "name", "email", "role", "active"]);
+      ["id", "kind", "name", "email", "role", "permission_sets", "active"]);
   }));
   members.command("add")
     .description("Add a member (or a service account with --service-account)")
     .requiredOption("--name <name>", "display name")
     .requiredOption("--role <role>", "role key (admin, member, read_only, a custom role) or role_… ID")
     .option("--email <email>", "the member's email (members only)")
+    .option("--permission-sets <list>", "comma-separated permission sets (keys or pset_… IDs) to hold on top of the role")
     .option("--service-account", "add a service account for an integration or agent instead of a person")
-    .action(act(async (ctx, opts: { name: string; role: string; email?: string; serviceAccount?: boolean }) => {
+    .action(act(async (ctx, opts: { name: string; role: string; email?: string; permissionSets?: string; serviceAccount?: boolean }) => {
       if (!opts.serviceAccount && !opts.email) throw usage("--email is required for a member (or pass --service-account)");
+      const sets = opts.permissionSets !== undefined ? { permission_sets: setList(opts.permissionSets) } : {};
       const { data } = opts.serviceAccount
-        ? await ctx.client().post<{ data: Record<string, unknown> }>("/v1/service-accounts", { name: opts.name, role: opts.role })
-        : await ctx.client().post<{ data: Record<string, unknown> }>("/v1/members", { name: opts.name, role: opts.role, email: opts.email });
+        ? await ctx.client().post<{ data: Record<string, unknown> }>("/v1/service-accounts", { name: opts.name, role: opts.role, ...sets })
+        : await ctx.client().post<{ data: Record<string, unknown> }>("/v1/members", { name: opts.name, role: opts.role, email: opts.email, ...sets });
       if (ctx.g.json) return ctx.out.data({ data });
-      ctx.out.line(`Added ${String(data.id)} (${clean(String(data.name))}) with role ${String(data.role)}.`);
+      ctx.out.line(`Added ${String(data.id)} (${clean(String(data.name))}) with role ${String(data.role)}${heldSets(data)}.`);
     }));
   members.command("update <id>")
-    .description("Change a member's or service account's role, or disable/enable it (disabling revokes its keys)")
+    .description("Change a member's or service account's role or permission sets, or disable/enable it (disabling revokes its keys)")
     .option("--role <role>", "new role")
+    .option("--permission-sets <list>", "the permission sets to hold, comma-separated: the whole list (sets left out are taken away); \"none\" takes them all away")
     .option("--disable", "disable it")
     .option("--enable", "enable it again")
-    .action(act(async (ctx, id: string, opts: { role?: string; disable?: boolean; enable?: boolean }) => {
+    .action(act(async (ctx, id: string, opts: { role?: string; permissionSets?: string; disable?: boolean; enable?: boolean }) => {
       if (!MEMBER_ID.test(id)) throw usage(`"${id}" is not a member (usr_…) or service account (svc_…) ID`);
       if (opts.disable && opts.enable) throw usage("--disable and --enable cannot be combined");
-      if (!opts.role && !opts.disable && !opts.enable) throw usage("Nothing to change: pass --role, --disable or --enable");
+      if (!opts.role && opts.permissionSets === undefined && !opts.disable && !opts.enable) throw usage("Nothing to change: pass --role, --permission-sets, --disable or --enable");
       if (opts.disable) await ctx.confirm(`Disable ${id} and revoke all its keys? [y/N] `, `Disabling ${id} revokes all its keys`);
       const path = id.startsWith("usr_") ? `/v1/members/${id}` : `/v1/service-accounts/${id}`;
       const { data } = await ctx.client().patch<{ data: Record<string, unknown> }>(path, {
-        ...(opts.role ? { role: opts.role } : {}), ...(opts.disable ? { active: false } : opts.enable ? { active: true } : {}),
+        ...(opts.role ? { role: opts.role } : {}), ...(opts.permissionSets !== undefined ? { permission_sets: setList(opts.permissionSets) } : {}),
+        ...(opts.disable ? { active: false } : opts.enable ? { active: true } : {}),
       });
       if (ctx.g.json) return ctx.out.data({ data });
-      ctx.out.line(`Updated ${id}: role ${String(data.role)}, ${data.active ? "active" : "disabled"}.`);
+      ctx.out.line(`Updated ${id}: role ${String(data.role)}${heldSets(data)}, ${data.active ? "active" : "disabled"}.`);
     }));
 
-  const roles = program.command("roles").description("Roles and their permissions");
+  const roles = program.command("roles").description("Roles and their permissions (every member has one)");
   roles.command("list").description("List roles").action(act(async (ctx) => {
     const { data } = await ctx.client().get<{ data: Record<string, unknown>[] }>("/v1/roles");
     if (ctx.g.json) return ctx.out.data({ data });
@@ -206,4 +218,5 @@ export function registerAdmin(program: Command, act: Act): void {
     }));
 
   registerManage(program, act, roles, audit);
+  registerPermissionSets(program, act);
 }

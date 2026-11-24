@@ -99,25 +99,25 @@ export async function restoreField(tx: Tx, id: string): Promise<void> {
 /** A live role's definition, as a pack compares it. */
 export async function liveRoleDefinition(tx: Tx, id: string): Promise<{ id: string; name: string; description: string; permissions: string[]; access_version: string } | undefined> {
   const [r] = await tx<{ id: string; name: string; description: string; permissions: string[]; access_version: string }[]>`
-      SELECT id, name, description, permissions, access_version::text FROM roles WHERE id = ${id} AND archived_at IS NULL`;
+      SELECT id, name, description, permissions, access_version::text FROM roles WHERE id = ${id} AND kind = 'role' AND archived_at IS NULL`;
   return r;
 }
 
 /** True when the role exists and isn't archived. */
 export async function isRoleLive(tx: Tx, id: string): Promise<boolean> {
-  const [r] = await tx`SELECT 1 FROM roles WHERE id = ${id} AND archived_at IS NULL`;
+  const [r] = await tx`SELECT 1 FROM roles WHERE id = ${id} AND kind = 'role' AND archived_at IS NULL`;
   return Boolean(r);
 }
 
 /** True when a live role has this key. */
 export async function roleKeyTaken(tx: Tx, key: string): Promise<boolean> {
-  const [taken] = await tx`SELECT 1 FROM roles WHERE key = ${key} AND archived_at IS NULL`;
+  const [taken] = await tx`SELECT 1 FROM roles WHERE key = ${key} AND kind = 'role' AND archived_at IS NULL`;
   return Boolean(taken);
 }
 
 /** The keys of those of these roles that are live. */
 export async function liveRoleKeys(tx: Tx, ids: string[]): Promise<{ key: string }[]> {
-  return tx<{ key: string }[]>`SELECT key FROM roles WHERE id = ANY(${ids}::uuid[]) AND archived_at IS NULL`;
+  return tx<{ key: string }[]>`SELECT key FROM roles WHERE id = ANY(${ids}::uuid[]) AND kind = 'role' AND archived_at IS NULL`;
 }
 
 /** A view's name, definition and version: what a pack compares with what it last wrote. */

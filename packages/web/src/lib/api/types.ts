@@ -51,6 +51,8 @@ export interface SessionInfo {
   member: { id: string; email: string; name: string; has_password: boolean; sso_linked: boolean };
   workspace: Workspace;
   role: string;
+  /** Keys of the permission sets the member holds on top of their role. */
+  permission_sets?: string[];
   permissions: string[];
   /** What this server has turned on: connecting apps over OAuth for the MCP servers (MCP_PUBLIC_URL). */
   server: { connected_apps: boolean };
@@ -178,24 +180,26 @@ export interface SessionRow {
 }
 
 export interface MemberUser {
-  id: string; email: string; name: string; role: string; role_name: string; active: boolean;
+  id: string; email: string; name: string; role: string; role_name: string; permission_sets?: string[]; active: boolean;
   sign_in?: { has_password: boolean; sso_linked: boolean; last_sign_in_at: string | null; active_sessions: number };
 }
-export interface ServiceAccount { id: string; name: string; role: string; role_name?: string; active: boolean }
+export interface ServiceAccount { id: string; name: string; role: string; role_name?: string; permission_sets?: string[]; active: boolean }
 export interface Members { users: MemberUser[]; service_accounts: ServiceAccount[] }
 
 export interface RoleObjectRule { read: boolean | null; write: boolean | null; archive: boolean | null }
 export interface Role {
-  id: string; key: string; name: string; description: string | null; permissions: string[]; is_system: boolean;
+  /** `is_system` is absent on a permission set (there are no system sets). */
+  id: string; key: string; name: string; description: string | null; permissions: string[]; is_system?: boolean;
   objects: Record<string, RoleObjectRule>; fields: Record<string, Record<string, "none" | "read">>;
   created_at: string; updated_at: string; archived_at: string | null; active_members: number;
 }
-export interface PermissionInfo { key: string; description: string; requires: string[] }
+/** `category`: "records" is what may be done with records (objects and fields refine it); "features" is a feature of the CRM. */
+export interface PermissionInfo { key: string; description: string; category?: "records" | "features"; requires: string[] }
 export interface AccessRow {
   object: string; read: boolean; write: boolean; archive: boolean; rule: RoleObjectRule | null;
   fields: Record<string, FieldAccess>; restricted_fields: { field: string; values: "visible" | "redacted" }[];
 }
-export interface RoleAccess { role: string; permissions: string[]; objects: AccessRow[] }
+export interface RoleAccess { role?: string; permission_set?: string; permissions: string[]; objects: AccessRow[] }
 
 export interface ApiKey {
   id: string; name: string; owner: string; scopes: string[]; environment: "live" | "test"; hint: string;
