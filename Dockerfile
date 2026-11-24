@@ -20,7 +20,7 @@ RUN pnpm --filter @hl-crm-db/web build && cp -r packages/web/dist /web \
 RUN mkdir -p /out/data/blobs
 
 # Runtime: distroless (no shell, no package manager, no npm), running as a non-root user.
-FROM gcr.io/distroless/nodejs26-debian13:nonroot@sha256:1d736cf8b5716c07a245301f92717143215d248fd55771ee1936ef4b3302e531
+FROM gcr.io/distroless/nodejs26-debian13:nonroot@sha256:ffa8a7545403036c94ec76674b5dbac2d425af2d679147cdf3e30180071487b7
 LABEL org.opencontainers.image.title="hl-crm-db" \
       org.opencontainers.image.description="Open-source headless CRM backend: REST API, web UI, MCP servers and worker" \
       org.opencontainers.image.source="https://github.com/open-gtm/crm" \
