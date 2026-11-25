@@ -240,6 +240,25 @@ test.describe("as the owner", () => {
     await shot(page, "board-light");
   });
 
+  test("list layouts against the real API: a calendar month, a board and a grouped table", async () => {
+    // The month of a seeded deal's close date, read from the API so the test doesn't depend on today's date.
+    const { adminKey, ids } = readState();
+    const deal = (await (await page.request.get(`/v1/objects/deal/records/${ids.deal}`, { headers: { Authorization: `Bearer ${adminKey}` } })).json()).data as { name: string; expected_close_date: string };
+    await page.goto(`/o/deal?layout=calendar&by=expected_close_date&month=${deal.expected_close_date.slice(0, 7)}`);
+    await expect(page.getByRole("table", { name: /^Deals in .*, by expected close date$/ }).getByRole("link", { name: deal.name })).toBeVisible();
+    // The list remembers its layout, so put deals back to the table for the tests that follow.
+    await page.getByRole("button", { name: "Table" }).click();
+    await expect(page.getByRole("grid")).toBeVisible();
+
+    await page.goto("/o/project?layout=board&by=phase");
+    await expect(page.getByRole("region", { name: /^Planned/ }).getByRole("link", { name: "Warehouse robots" })).toBeVisible();
+
+    await page.goto("/o/project?group=kind");
+    // Groups start closed, with their count and totals; opening one loads its records.
+    await page.getByRole("button", { name: /^Build 1 project Budget \$25,000\.00/ }).click();
+    await expect(page.getByRole("table", { name: /^Projects: Build/ }).getByRole("link", { name: "Warehouse robots" })).toBeVisible();
+  });
+
   test("the board and counted lists in several tabs at once: heavy requests queue and retry, no error toasts", async ({ browser }) => {
     // One session in four tabs: the board (an aggregate per pipeline and counted lists) and three counted lists, loaded at
     // once and twice over. The server allows a member 2 heavy requests at a time; each tab queues its own two and retries
