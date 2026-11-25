@@ -77,6 +77,20 @@ export function fromLocalInput(v: string): string | null {
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
+/** A file's size for people: 512 B, 3.4 KB, 1.2 MB. */
+export function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "";
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB"];
+  let v = n / 1024;
+  let u = 0;
+  while (v >= 1024 && u < units.length - 1) {
+    v /= 1024;
+    u++;
+  }
+  return `${v >= 100 ? Math.round(v) : Math.round(v * 10) / 10} ${units[u]}`;
+}
+
 export function pluralize(n: number, one: string, many: string): string {
   return `${n.toLocaleString()} ${n === 1 ? one : many}`;
 }

@@ -186,6 +186,12 @@ export interface MemberUser {
 export interface ServiceAccount { id: string; name: string; role: string; role_name?: string; permission_sets?: string[]; active: boolean }
 export interface Members { users: MemberUser[]; service_accounts: ServiceAccount[] }
 
+/** A file attached to a record. `content_type` is detected by the server, for showing; downloads are always attachments. */
+export interface FileInfo {
+  id: string; record: string; name: string; size: number; content_type: string; sha256: string; scan_status: string;
+  uploaded_by: string | null; created_at: string;
+}
+
 export interface RoleObjectRule { read: boolean | null; write: boolean | null; archive: boolean | null }
 export interface Role {
   /** `is_system` is absent on a permission set (there are no system sets). */

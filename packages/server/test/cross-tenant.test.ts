@@ -27,7 +27,7 @@ const NO_ID_ROUTES = new Set([
   "POST /v1/objects/:object/fields", "PATCH /v1/objects/:object/fields/:field", "POST /v1/objects/:object/fields/:field/archive",
   "GET /v1/pipelines", "POST /v1/pipelines", "GET /v1/objects/:object/records", "GET /v1/search", "GET /v1/me/tasks",
   "GET /v1/members", "GET /v1/api-keys", "GET /v1/audit-log", "GET /v1/audit/verify",
-  "GET /v1/access-review", "GET /v1/permissions", "GET /v1/roles", "GET /v1/permission-sets",
+  "GET /v1/access-review", "GET /v1/permissions", "GET /v1/roles", "GET /v1/permission-sets", "GET /v1/files/limits",
   "GET /v1/webhooks", "POST /v1/webhooks", "GET /v1/automations",
   "GET /v1/me/notifications", "GET /v1/me/attention", "GET /v1/me/notification-preferences", "PATCH /v1/me/notification-preferences",
   "GET /v1/me/alerts", "GET /v1/alerts", "GET /v1/schema/export", "GET /v1/objects/:object/export",
@@ -65,6 +65,10 @@ beforeAll(async () => {
   const contact = await create(b.keys.ops, "contact", { first_name: "Bea", email: "bea@b-secret.example", account: acct.id });
   const deal = await create(b.keys.ops, "deal", { name: "B deal", primary_contact: contact.id });
   const lead = await create(b.keys.ops, "lead", { contact: contact.id, status: "qualified" });
+  const file = await app.request(`/v1/records/${contact.id}/files?name=b-secret.txt`, { method: "POST", headers: { Authorization: `Bearer ${b.keys.ops}` },
+    body: new TextEncoder().encode("B Secret file") });
+  if (file.status !== 201) throw new Error(`setup: file ${file.status}`);
+  bIds.file = ((await file.json()) as { data: { id: string } }).data.id;
   const keys = await call("GET", "/v1/api-keys", { key: b.keys.admin });
   const hook = await call("POST", "/v1/webhooks", { key: b.keys.admin, body: { url: "https://b-secret.example/hook", events: ["contact.*"] } });
   const auto = await call("POST", "/v1/automations", { key: b.keys.admin, body: {
@@ -134,7 +138,7 @@ describe("cross-tenant isolation", () => {
         const kind = Object.values(r.idParams!)[0];
         const byKind: Record<string, string | undefined> = { key: bIds.key, webhook: bIds.webhook, automation: bIds.automation, delivery: bIds.delivery,
           alert: bIds.alert, notification: bIds.notification, member: bIds.user, service_account: bIds.service_account, role: bIds.role,
-          permission_set: bIds.permission_set, session: bIds.session, view: bIds.view, grant: bIds.grant };
+          permission_set: bIds.permission_set, file: bIds.file, session: bIds.session, view: bIds.view, grant: bIds.grant };
         const path = r.path.replace(":object", object).replace(":id", byKind[kind!] ?? id!);
         const body = r.method === "GET" || r.method === "DELETE" ? undefined : r.path.endsWith("/records/:id") ? { name: "x" }
           : r.path.endsWith("/test") && r.path.includes("automations") ? { record: bIds.contact }

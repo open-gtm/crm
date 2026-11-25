@@ -19,7 +19,8 @@ export function fakeFetch(handler: Handler) {
   const fn = async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), "http://localhost");
     const headers = Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>).map(([k, v]) => [k.toLowerCase(), v]));
-    const call: Call = { method: init?.method ?? "GET", path: url.pathname, query: url.searchParams, body: init?.body ? JSON.parse(String(init.body)) : undefined, headers };
+    const call: Call = { method: init?.method ?? "GET", path: url.pathname, query: url.searchParams, // A file upload's body is the file itself, not JSON.
+      body: init?.body instanceof Blob ? init.body : init?.body ? JSON.parse(String(init.body)) : undefined, headers };
     calls.push(call);
     const r = handler(call) ?? { status: 404, body: { code: "not_found", detail: `No fake for ${call.method} ${call.path}`, status: 404 } };
     const status = r.status ?? 200;

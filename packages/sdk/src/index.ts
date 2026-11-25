@@ -57,6 +57,12 @@ export interface RequestOptions {
 }
 
 /** A thin, typed client for the hl-crm-db REST API. The CLI and MCP servers use it. */
+/** A file attached to a record. `content_type` is detected by the server; downloads are always sent as attachments. */
+export interface FileInfo {
+  id: string; record: string; name: string; size: number; content_type: string; sha256: string; scan_status: string;
+  uploaded_by: string | null; created_at: string;
+}
+
 export class HlCrmClient {
   private readonly baseUrl: string;
 
@@ -137,6 +143,45 @@ export class HlCrmClient {
         Number.isFinite(retry) && retry >= 0 ? retry : undefined);
     }
     return { status: res.status, headers: res.headers, text };
+  }
+
+  /**
+   * A request whose body, or whose answer, is bytes rather than JSON: a file upload (POST with `body`) or a
+   * file download. Errors are the same problem documents as everywhere else.
+   */
+  private async sendBytes(method: "GET" | "POST", path: string, opts: { query?: RequestOptions["query"]; body?: Uint8Array; idempotencyKey?: string; timeoutMs?: number }):
+    Promise<{ headers: Headers; bytes: Uint8Array }> {
+    const url = this.url(path);
+    for (const [k, v] of Object.entries(opts.query ?? {})) if (v !== undefined) url.searchParams.set(k, String(v));
+    const headers: Record<string, string> = { Authorization: `Bearer ${this.opts.apiKey}`, Accept: "*/*", "X-HLCRM-Surface": this.opts.surface ?? "api" };
+    if (opts.body) headers["Content-Type"] = "application/octet-stream";
+    if (method !== "GET") headers["Idempotency-Key"] = opts.idempotencyKey ?? newIdempotencyKey();
+    const res = await (this.opts.fetch ?? fetch)(url, { method, headers, ...(opts.body ? { body: new Blob([opts.body as BlobPart]) } : {}), redirect: "error",
+      signal: AbortSignal.timeout(opts.timeoutMs ?? Math.max(this.opts.timeoutMs ?? 30_000, 120_000)) });
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (!res.ok) {
+      const p = (parseJson(new TextDecoder().decode(bytes)) ?? {}) as { code?: string; detail?: string; errors?: unknown; request_id?: string };
+      const retry = Number(res.headers.get("retry-after") ?? NaN);
+      throw new HlCrmError(res.status, p.code ?? "http_error", p.detail ?? `HTTP ${res.status}`, p.errors, p.request_id ?? res.headers.get("x-request-id") ?? undefined,
+        Number.isFinite(retry) && retry >= 0 ? retry : undefined);
+    }
+    return { headers: res.headers, bytes };
+  }
+
+  /** GET /v1/records/{id}/files: the files attached to a record. */
+  listFiles(recordId: string) {
+    return this.get<{ data: FileInfo[] }>(`/v1/records/${encodeURIComponent(recordId)}/files`);
+  }
+
+  /** POST /v1/records/{id}/files: attaches a file (its bytes and its name) to a record. */
+  async uploadFile(recordId: string, name: string, data: Uint8Array, opts: { idempotencyKey?: string } = {}): Promise<{ data: FileInfo }> {
+    const { bytes } = await this.sendBytes("POST", `/v1/records/${encodeURIComponent(recordId)}/files`, { query: { name }, body: data, ...opts });
+    return parseJson(new TextDecoder().decode(bytes)) as { data: FileInfo };
+  }
+
+  /** GET /v1/files/{id}/content: a file's bytes. */
+  async downloadFile(fileId: string): Promise<Uint8Array> {
+    return (await this.sendBytes("GET", `/v1/files/${encodeURIComponent(fileId)}/content`, {})).bytes;
   }
 
   get<T = unknown>(path: string, query?: RequestOptions["query"]) {

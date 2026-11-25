@@ -151,7 +151,29 @@ Every type can be `required`, take a `default` (checked when the field is saved)
 
 **duration.** Whole seconds, from 0 to 10^11. Input is a number of seconds, numeric text, or an ISO 8601 duration made of weeks, days, hours, minutes and whole seconds (`PT1H30M`, `P2W`, `P1DT2H`). Years and months are refused because they have no fixed length, and so are fractional seconds. Filters take the same forms. `validation.min` and `validation.max` are in seconds. The suggested display is compact, largest unit first, with zero units left out: `1d 2h 3m 4s`, `1h 30m`, `0s`.
 
-**Not built: files and attachments.** See the proposal in [ADR 0011](decisions/0011-files-and-attachments.md).
+**Files** are attached to records, not held in a field: see [Files and notes](#files-and-notes) below. A `file` field type is not built ([ADR 0011](decisions/0011-files-and-attachments.md)).
+
+### Files and notes
+
+**Files.** Any record of any object can have files attached (up to 100): a signed contract on a deal, a résumé on a candidate, a photo on a custom object's record. A file follows its record's object access: read on the object lists and downloads its files, write attaches and removes them. Knowing a file's ID gives nothing.
+
+```sh
+# Attach: the request body is the file's bytes, name= is its name
+curl -s -X POST "localhost:8787/v1/records/deal_…/files?name=contract.pdf" -H "Authorization: Bearer $KEY" --data-binary @contract.pdf
+curl -s localhost:8787/v1/records/deal_…/files -H "Authorization: Bearer $KEY"                 # list
+curl -s -OJ localhost:8787/v1/files/file_…/content -H "Authorization: Bearer $KEY"            # download
+curl -s -X DELETE localhost:8787/v1/files/file_… -H "Authorization: Bearer $KEY"              # remove
+```
+
+- **Limits.** 10 MB per file and 1 GB per workspace by default (`FILE_MAX_MB`, `FILE_QUOTA_MB`); `GET /v1/files/limits` shows them. The 1 MB limit on JSON bodies is unchanged.
+- **Where the bytes are.** In Postgres by default (`file_blobs`), so one backup covers everything. `FILE_STORE=s3` keeps new files in an S3-compatible bucket (`S3_ENDPOINT`, `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`), sealed with the workspace's data key: the bucket alone can't be read, so `HLCRM_MASTER_KEY` and the database are needed to restore them. Back the bucket up with the database.
+- **No virus scanner is built in.** Files are `unscanned` and are always sent as a download (`attachment`, `application/octet-stream`, `nosniff`), never opened in the page. The `content_type` a file shows is detected from its first bytes; the uploader's is ignored.
+- **Names** are one line with no `/`, `\` or control character.
+- **A file's record.** Archiving a record keeps its files (they can be read, not added to). A merge moves the duplicates' files to the survivor. Removing a file deletes its bytes; its row stays, marked removed, so the audit log still names it.
+- **Audited:** `file.uploaded`, `file.downloaded` and `file.deleted`, with the file's ID and size, not its name.
+- **Not built:** events for files (automations and webhooks don't see them), a scanner hook, and file columns in CSV exports.
+
+**Notes.** A note is the `note` activity: a `subject` (its title) and a `body`, related to one or more records, and editable afterwards (other activities are history and aren't). A note's body is **Markdown**: headings, lists, bold, italic, code and links. The web UI shows notes formatted in a Notes section on every record page, with an editor and a preview, and renders the Markdown itself: HTML in a note is shown as text, and a link is a link only when it is a plain `http(s)`, `mailto` or `tel` address. A note is a record, so it carries files like any other: attach to the note's ID (`act_…`). Through the API, the CLI and MCP, a note is written with `log_activity` and changed with a normal update, as before.
 
 ---
 

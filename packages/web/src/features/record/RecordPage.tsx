@@ -23,6 +23,8 @@ import { ObjectIcon } from "@/meta/icons";
 import { FieldControl, FieldValue, RecordLink } from "@/meta/registry";
 import { recordRoute } from "@/router";
 import { applyServerErrors, bodyFrom, checkForm, RecordFields, useRecordForm } from "./RecordForm";
+import { Files } from "./Files";
+import { Notes } from "./Notes";
 import { RelatedLists } from "./RelatedLists";
 import { Timeline } from "./Timeline";
 
@@ -169,6 +171,8 @@ function RecordBody({ meta, id }: { meta: ObjectMeta; id: string }) {
         <div className="flex min-w-0 flex-col gap-6">
           <FieldSection title="Details" fields={standard.length ? standard : custom} meta={meta} record={r} save={save} readOnly={archived} />
           {standard.length && custom.length ? <FieldSection title="Custom fields" fields={custom} meta={meta} record={r} save={save} readOnly={archived} /> : null}
+          <Notes recordId={id} />
+          <Files recordId={id} canWrite={Boolean(meta.access.write) && !archived} />
           <RelatedLists object={meta.name} id={id} name={r.display_name ?? ""} />
           <SystemSection record={r} />
         </div>

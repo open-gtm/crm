@@ -15,6 +15,7 @@ import {
   archiveMergedRecords, bumpLinkHolders, countAlertReferences, countReferenceRows, dropDuplicateDeadlines, insertMerge, lockMerges, mergedInto,
   moveDeadlines, moveGuardedReferences, moveNotifications, resolveDuplicateNotifications, runReferenceStatement, type ReferenceRow,
 } from "./queries/merge.js";
+import { countFilesOf, moveFiles } from "./queries/files.js";
 
 /**
  * Merging duplicate records (POST /v1/ops/merge_records). One survivor takes the duplicates' place:
@@ -103,6 +104,9 @@ export const REFERENCES: Reference[] = [
   { table: "record_links", column: "from_id", into: "record_registry", policy: "own" },
   { table: "records", column: "id", into: "record_registry", policy: "own" },
   { table: "merges", column: "survivor_id", into: "record_registry", policy: "own" },
+  // A file belongs to its record. A merge moves the duplicates' files to the survivor with a statement of its own
+  // (moveFiles, below, like alert state), so every document is kept: files are not values the survivor could already have.
+  { table: "files", column: "record_id", into: "record_registry", policy: "own" },
 ];
 
 /** Tables whose rows app.merge_move changes (migration 013): the immutability triggers allow it only there. */
@@ -368,6 +372,7 @@ async function countReferences(tx: Tx, obj: ObjectMeta, dups: string[]): Promise
     total += n;
   }
   total += await countAlertReferences(tx, dups);
+  total += await countFilesOf(tx, dups);
   if (total > MERGE_MAX_REFERENCES) {
     throw unprocessable(`This merge would move ${total} references to the survivor; one merge moves at most ${MERGE_MAX_REFERENCES}. `
       + "Merge fewer duplicates at a time (or move some of their references first)");
@@ -476,7 +481,11 @@ async function repoint(tx: Tx, ctx: Ctx, schema: Schema, obj: ObjectMeta, surviv
   nt.archived = (await resolveDuplicateNotifications(tx, survivor, dups))
     .map((x) => ({ k: [x.id], from: x.record_id, holder: x.id }));
   nt.moved = (await moveNotifications(tx, survivor, dups)).map((x) => ({ k: [x.id], from: x.old, holder: x.id }));
-  for (const m of [dl, nt]) if (m.moved.length + m.dropped.length + m.archived.length) log.push(m);
+  // The duplicates' files go to the survivor: a merge loses no document.
+  check();
+  const fl: Moved = { table: "files", column: "record_id", moved: [], dropped: [], archived: [], cleared: [] };
+  fl.moved = (await moveFiles(tx, survivor, dups)).map((x) => ({ k: [x.id], from: x.old, holder: x.id }));
+  for (const m of [dl, nt, fl]) if (m.moved.length + m.dropped.length + m.archived.length) log.push(m);
 
   // One event per record whose reference moved: its normal event, with the IDs that moved (filtered per reader by field, like any update).
   const records: { object: string; record: string; fields: string[] }[] = [];

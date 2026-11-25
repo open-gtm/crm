@@ -372,6 +372,11 @@ crm apps list                                # apps your key's member connected 
 crm apps list --member usr_01JD…             # a member's connected apps (members:manage)
 crm apps revoke ogr_01JD…                    # disconnect one
 
+crm files list deal_01JD…                    # the files attached to a record
+crm files attach deal_01JD… ./contract.pdf   # --name to keep it under another name
+crm files download file_01JD…                # to the file's name here, or --output path
+crm files remove file_01JD…                  # deletes its bytes; asks first
+
 crm roles list
 crm roles get member                 # permissions, object and field rules, and the record access they give
 crm roles create --key assistant --name Assistant --permissions records:read,records:write --object deal:read=deny --object deal:write=deny --field contact.phone=read
@@ -412,6 +417,7 @@ crm events list --status dead                   # events whose automations and w
 - The CLI uses API keys only; it has no browser sign-in and no OAuth sign-in. Connected apps are described in [`mcp/oauth.md`](mcp/oauth.md). People's sign-in is described in [`sign-in.md`](sign-in.md).
 - `roles get` shows the role's object and field rules and, from `GET /v1/roles/{id}/access`, what they add up to per object; `--json` returns both (`data`, `access`).
 - `roles create` and `roles update` take flags, a file (`--file`, YAML or JSON with `key`, `name`, `description`, `permissions`, `copy_from`, `objects` and `fields` as in `POST /v1/roles`), or both (flags win). `--object object:read|write|archive=allow|deny|inherit` and `--field object.field=none|read|inherit` are repeatable; `inherit` clears a rule. `update` changes only what it names, and `--permissions` replaces the list. `archive` asks first.
+- `files` needs read on the record's object to list and download, and write to attach and remove. `download` never replaces an existing file without asking, and never writes through a symbolic link. See [`data-model.md`](data-model.md#files-and-notes).
 - `permission-sets` takes the same flags and file as `roles` (`POST /v1/permission-sets`). A permission set adds to a member's role; see [`permissions.md`](permissions.md#permission-sets). `members update --permission-sets` sends the whole list.
 - `automations create` and `update` read the API's shape (`name`, `trigger`, `condition`, `actions`, `hourly_cap`, `run_roles`; see [`automations.md`](automations.md)) from a YAML or JSON file. They send it as a dry run first and print the summary (every URL and email recipient as written), warnings and, for a schedule, the next runs on stderr; then they ask. Under `--no-input`, `--yes` is required, as for every confirmation. A `dry_run` key in the file is refused. Secret header values in the file are sent once and never printed back; `get` shows them as `null`, and `null` in an update keeps the stored value.
 - `automations run` shows the dry run (each step: the exact HTTP request, the email recipient, records it would change) and asks before queueing the run. A member who may run an automation through its `run_roles` but can't manage it gets no dry run; the CLI says so and still asks. `resume` asks too, since it starts sends again.

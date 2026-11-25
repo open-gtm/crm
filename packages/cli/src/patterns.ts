@@ -7,6 +7,7 @@
 const id = (prefix: string) => new RegExp(`^${prefix}_[0-9A-Za-z]{26}$`);
 
 export const KEY_ID = id("key");
+export const FILE_ID = id("file");
 export const USER_ID = id("usr");
 /** A person (usr_…) or a service account (svc_…). */
 export const MEMBER_ID = id("(usr|svc)");

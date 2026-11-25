@@ -4,6 +4,9 @@ import { ConfigError } from "./lib/errors.js";
 /** WEB_UI as config() reads it: on unless "false" or "0", in any case and with spaces trimmed (like TRUST_PROXY's "true"/"1"). */
 export const webUiOn = (raw: string | undefined): boolean => !["false", "0"].includes((raw ?? "true").trim().toLowerCase());
 
+/** An empty value (Docker Compose passes `${VAR:-}` as "") is the same as leaving the variable out. */
+const unsetWhenEmpty = <T extends z.ZodTypeAny>(schema: T) => z.preprocess((v) => (v === "" ? undefined : v), schema);
+
 const Env = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("production"),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal", "silent"]).default("info"),
@@ -14,6 +17,18 @@ const Env = z.object({
   MCP_PORT: z.coerce.number().int().default(8788),
   HLCRM_API_URL: z.string().default("http://localhost:8787"),
   BLOB_DIR: z.string().default("./data/blobs"),
+  /** Where the bytes of files attached to records live (ADR 0011): in Postgres, or in an S3-compatible store. */
+  FILE_STORE: z.enum(["postgres", "s3"]).default("postgres"),
+  /** The largest file one upload may hold, in MB. */
+  FILE_MAX_MB: z.coerce.number().int().min(1).max(100).default(10),
+  /** How much one workspace's files may hold in all, in MB. */
+  FILE_QUOTA_MB: z.coerce.number().int().min(1).default(1024),
+  /** FILE_STORE=s3: the store's endpoint (https://s3.eu-central-1.amazonaws.com, or a MinIO or R2 address), bucket, region and credentials. */
+  S3_ENDPOINT: unsetWhenEmpty(z.string().url().optional()),
+  S3_BUCKET: unsetWhenEmpty(z.string().optional()),
+  S3_REGION: unsetWhenEmpty(z.string().default("us-east-1")),
+  S3_ACCESS_KEY_ID: unsetWhenEmpty(z.string().optional()),
+  S3_SECRET_ACCESS_KEY: unsetWhenEmpty(z.string().optional()),
   AUDIT_SEAL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
   AUDIT_ANCHOR_INTERVAL_MS: z.coerce.number().int().positive().default(3_600_000),
   /** Lets webhooks target http:// URLs and private addresses (for internal self-hosted targets). Metadata IPs stay blocked. */
