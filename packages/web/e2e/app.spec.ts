@@ -247,8 +247,11 @@ test.describe("as the owner", () => {
     await page.goto(`/o/deal?layout=calendar&by=expected_close_date&month=${deal.expected_close_date.slice(0, 7)}`);
     await expect(page.getByRole("table", { name: /^Deals in .*, by expected close date$/ }).getByRole("link", { name: deal.name })).toBeVisible();
     // The list remembers its layout, so put deals back to the table for the tests that follow.
+    // The choice is saved a moment after it is made; wait for that, or leaving the page drops it.
+    const saved = page.waitForResponse((r) => r.url().includes("/v1/me/preferences") && r.request().method() === "PUT" && (r.request().postData() ?? "").includes('"layout":null'));
     await page.getByRole("button", { name: "Table" }).click();
     await expect(page.getByRole("grid")).toBeVisible();
+    await saved;
 
     await page.goto("/o/project?layout=board&by=phase");
     await expect(page.getByRole("region", { name: /^Planned/ }).getByRole("link", { name: "Warehouse robots" })).toBeVisible();
