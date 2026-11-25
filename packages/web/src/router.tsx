@@ -61,7 +61,8 @@ export function stringifySearch(search: Record<string, unknown>): string {
 
 const str = (v: unknown, max = 200) => (typeof v === "string" && v.length <= max ? v : undefined);
 
-export interface ListSearch { view?: string; sort?: string; cols?: string; filter?: unknown }
+/** `layout`: how the list is shown (a table when absent). `by`: the field a board's columns or a calendar's days come from. `group`: the field a table's rows are grouped by. `month`: the calendar's month. */
+export interface ListSearch { view?: string; sort?: string; cols?: string; filter?: unknown; layout?: "board" | "calendar"; by?: string; group?: string; month?: string }
 export function validateListSearch(s: Record<string, unknown>): ListSearch {
   const out: ListSearch = {};
   const view = str(s.view, 64);
@@ -71,6 +72,15 @@ export function validateListSearch(s: Record<string, unknown>): ListSearch {
   const cols = typeof s.cols === "string" && s.cols.length <= 6000 ? s.cols : undefined;
   if (cols !== undefined) out.cols = cols;
   if (s.filter !== undefined && s.filter !== null) out.filter = s.filter;
+  if (s.layout === "board" || s.layout === "calendar") out.layout = s.layout;
+  const name = (v: unknown) => {
+    const x = str(v, 64);
+    return x && /^[a-z][a-z0-9_]*$/.test(x) ? x : undefined;
+  };
+  if (name(s.by)) out.by = name(s.by);
+  if (name(s.group)) out.group = name(s.group);
+  const month = str(s.month, 7);
+  if (month && /^\d{4}-(0[1-9]|1[0-2])$/.test(month)) out.month = month;
   return out;
 }
 

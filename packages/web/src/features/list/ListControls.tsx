@@ -1,9 +1,9 @@
-import { ArrowDown, ArrowDownUp, ArrowUp, Columns3, Plus, RotateCcw, X } from "lucide-react";
+import { ArrowDown, ArrowDownUp, ArrowUp, CalendarDays, Columns3, Kanban, Plus, RotateCcw, Table2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/misc";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/overlays";
-import type { ObjectMeta, Sort } from "@/lib/api/types";
+import type { FieldMeta, ObjectMeta, Sort } from "@/lib/api/types";
 import { plainLabel } from "@/lib/text";
 import { canSort, sortableParts, visibleFields } from "@/meta/fields";
 
@@ -89,5 +89,49 @@ export function SortMenu({ meta, sort, onChange }: { meta: ObjectMeta; sort: Sor
         </div>
       </PopoverContent>
     </Popover>
+  );
+}
+
+export type ListLayout = "table" | "board" | "calendar";
+
+/**
+ * How the list is shown: a table (optionally grouped by a field), a board with a column per value of a
+ * select or status field, or a calendar by a date field. A layout the object has no field for isn't offered.
+ */
+export function LayoutMenu({ layout, onLayout, boardBy, boardFields, onBoardBy, dateBy, dateFields, onDateBy, groupBy, groupFields, onGroupBy }: {
+  layout: ListLayout; onLayout: (l: ListLayout) => void;
+  boardBy: FieldMeta | undefined; boardFields: FieldMeta[]; onBoardBy: (name: string) => void;
+  dateBy: FieldMeta | undefined; dateFields: FieldMeta[]; onDateBy: (name: string) => void;
+  groupBy: FieldMeta | undefined; groupFields: FieldMeta[]; onGroupBy: (name: string | null) => void;
+}) {
+  const options: { key: ListLayout; label: string; icon: React.ReactNode; show: boolean }[] = [
+    { key: "table", label: "Table", icon: <Table2 />, show: true },
+    { key: "board", label: "Board", icon: <Kanban />, show: boardFields.length > 0 },
+    { key: "calendar", label: "Calendar", icon: <CalendarDays />, show: dateFields.length > 0 },
+  ];
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <div role="group" aria-label="Show as" className="flex items-center">
+        {options.filter((o) => o.show).map((o) => (
+          <Button key={o.key} size="sm" variant={layout === o.key ? undefined : "ghost"} aria-pressed={layout === o.key} onClick={() => onLayout(o.key)}>{o.icon} {o.label}</Button>
+        ))}
+      </div>
+      {layout === "board" && boardFields.length > 1 ? (
+        <NativeSelect aria-label="Board columns" className="h-7 w-40 text-sm" value={boardBy?.name ?? ""} onChange={(e) => onBoardBy(e.target.value)}>
+          {boardFields.map((f) => <option key={f.name} value={f.name}>By {plainLabel(f.label).toLowerCase()}</option>)}
+        </NativeSelect>
+      ) : null}
+      {layout === "calendar" && dateFields.length > 1 ? (
+        <NativeSelect aria-label="Calendar date" className="h-7 w-44 text-sm" value={dateBy?.name ?? ""} onChange={(e) => onDateBy(e.target.value)}>
+          {dateFields.map((f) => <option key={f.name} value={f.name}>By {plainLabel(f.label).toLowerCase()}</option>)}
+        </NativeSelect>
+      ) : null}
+      {layout === "table" && groupFields.length ? (
+        <NativeSelect aria-label="Group by" className="h-7 w-44 text-sm" value={groupBy?.name ?? ""} onChange={(e) => onGroupBy(e.target.value || null)}>
+          <option value="">No grouping</option>
+          {groupFields.map((f) => <option key={f.name} value={f.name}>Group by {plainLabel(f.label).toLowerCase()}</option>)}
+        </NativeSelect>
+      ) : null}
+    </div>
   );
 }

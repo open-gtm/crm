@@ -10,6 +10,13 @@ What it does:
 - **Settings,** each shown only when the role allows it: account, sessions and password, and **connected apps** (MCP clients such as Claude connected through OAuth: see and disconnect them); the workspace's sign-in methods, including whether members may connect apps and with which scopes (owner only); members, with each member's connected apps for whoever has `members:manage`; roles with object and field rules and the effective access; API keys; webhooks with deliveries; the audit log; a read-only schema browser; a read-only **Automations** list (trigger, state, last run; pause and resume with `automations:manage`) and a read-only **Installed packs** list. Automations and packs are created and edited with the `crm` CLI or the API (docs/automations.md, docs/packs.md); the app only shows them, with links to those guides.
 - **Everywhere:** a command palette (⌘K / Ctrl+K) to search records and run commands, light and dark themes (following the system, or chosen and saved to your account), keyboard support, readable error messages with the request ID.
 
+## Lists and record pages
+
+Every screen is built from the workspace's metadata, so these work for custom objects and fields with no change ([ADR 0015](../../docs/decisions/0015-record-ui-layouts.md)):
+
+- **A list** can be shown as a table (optionally grouped by a field, with counts and totals per group), as a board with a column per value of a select or status field, or as a calendar by a date field. The choice is in the address (`?layout=board&by=status`, `?layout=calendar&by=due_at&month=2027-02`, `?group=owner`) and is remembered per object for each member. `src/features/list/layouts.ts` decides which fields each can use.
+- **A record page** shows the object's fields in sections. Someone who manages the schema arranges them under Settings → Schema → the object → Record page layout; without a layout, the object's own fields are under Details and custom ones under Custom fields. Notes, files, related records and the timeline follow.
+
 ## Running it in development
 
 The app is a Vite + React single-page app. In development Vite serves it on `http://localhost:5173` and forwards `/v1` and `/auth` to the API, so the browser sees one origin.

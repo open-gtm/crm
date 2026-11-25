@@ -29,6 +29,8 @@ const NO_ID_ROUTES = new Set([
   "GET /v1/members", "GET /v1/api-keys", "GET /v1/audit-log", "GET /v1/audit/verify",
   "GET /v1/access-review", "GET /v1/permissions", "GET /v1/roles", "GET /v1/permission-sets", "GET /v1/files/limits",
   "GET /v1/commerce-settings", "PATCH /v1/commerce-settings",
+  // A record page's layout names an object and its fields, never an ID.
+  "GET /v1/objects/:object/layout", "PUT /v1/objects/:object/layout", "DELETE /v1/objects/:object/layout",
   "GET /v1/webhooks", "POST /v1/webhooks", "GET /v1/automations",
   "GET /v1/me/notifications", "GET /v1/me/attention", "GET /v1/me/notification-preferences", "PATCH /v1/me/notification-preferences",
   "GET /v1/me/alerts", "GET /v1/alerts", "GET /v1/schema/export", "GET /v1/objects/:object/export",
