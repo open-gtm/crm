@@ -16,7 +16,7 @@ Version: **0.1 (Phase 1, MVP).** The software has had automated testing (unit, i
 - **Schema packs.** Shareable workspace setups (objects, fields, pipelines, roles, shared views), with two MIT example packs (recruiting, support desk).
 - **Quotes and orders.** A quote is made for a deal, priced by its lines, sent (then fixed), revised, and accepted, which makes an order and marks the deal won. Both behaviours are workspace settings.
 - **Files and notes.** Files attached to any record (Postgres by default, S3-compatible as an option, sealed with the workspace's key there), always served as downloads; notes in Markdown, shown formatted, that can carry files.
-- **Web UI.** Lists with filters, sorting and saved views; record pages with timelines, notes and files; a deals board; tasks and inbox; command palette; settings for members, roles, API keys, webhooks, audit log, schema, and read-only automations and installed packs.
+- **Web UI.** Lists with filters, sorting and saved views, as a table, a board for any object, a calendar or a grouped table with totals; record pages with timelines, notes and files, with sections that can be arranged per object; a deals board; tasks and inbox; command palette; settings for members, roles, API keys, webhooks, audit log, schema, and read-only automations and installed packs.
 
 ## Next
 

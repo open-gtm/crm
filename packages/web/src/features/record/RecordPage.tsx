@@ -25,6 +25,7 @@ import { recordRoute } from "@/router";
 import { applyServerErrors, bodyFrom, checkForm, RecordFields, useRecordForm } from "./RecordForm";
 import { Files } from "./Files";
 import { Notes } from "./Notes";
+import { arrangeFields, usePageLayout } from "./pageLayout";
 import { RelatedLists } from "./RelatedLists";
 import { Timeline } from "./Timeline";
 
@@ -67,6 +68,7 @@ function RecordBody({ meta, id }: { meta: ObjectMeta; id: string }) {
   const toast = useToast();
   const navigate = useNavigate();
   const rec = useRecord(meta, id);
+  const layout = usePageLayout(meta.name);
   const [editingAll, setEditingAll] = useState(false);
   const [archiving, setArchiving] = useState(false);
   const [conflict, setConflict] = useState(false);
@@ -128,8 +130,8 @@ function RecordBody({ meta, id }: { meta: ObjectMeta; id: string }) {
   const headerFacts = facts.filter((f) => !(meta.name === "deal" && (f.name === "stage" || f.name === "status")));
   const inHeader = new Set([...headerFacts.map((f) => f.name), ...(meta.name === "deal" ? ["stage"] : [])]);
   const fields = visibleFields(meta).filter((f) => !inHeader.has(f.name));
-  const standard = fields.filter((f) => f.standard);
-  const custom = fields.filter((f) => !f.standard);
+  // The sections come from the object's page layout when someone arranged one, else the default split.
+  const sections = arrangeFields(fields, layout.data);
   return (
     <div className="pb-10">
       <div className="border-b border-line bg-surface px-4 pb-4 pt-3 md:px-6">
@@ -170,8 +172,7 @@ function RecordBody({ meta, id }: { meta: ObjectMeta; id: string }) {
 
       <div className="grid gap-6 px-4 pt-5 md:px-6 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,26rem)]">
         <div className="flex min-w-0 flex-col gap-6">
-          <FieldSection title="Details" fields={standard.length ? standard : custom} meta={meta} record={r} save={save} readOnly={archived} />
-          {standard.length && custom.length ? <FieldSection title="Custom fields" fields={custom} meta={meta} record={r} save={save} readOnly={archived} /> : null}
+          {sections.map((sec) => <FieldSection key={sec.title} title={sec.title} fields={sec.fields} meta={meta} record={r} save={save} readOnly={archived} />)}
           <Notes recordId={id} />
           <Files recordId={id} canWrite={Boolean(meta.access.write) && !archived} />
           <RelatedLists object={meta.name} id={id} name={r.display_name ?? ""} />

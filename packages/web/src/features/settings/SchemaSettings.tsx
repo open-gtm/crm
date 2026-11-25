@@ -6,6 +6,7 @@ import { Badge, Skeleton } from "@/components/ui/misc";
 import { optionLabel } from "@/meta/fields";
 import { navObjects, useDescribe, useObjects } from "@/meta/hooks";
 import { ObjectIcon } from "@/meta/icons";
+import { LayoutEditor } from "./LayoutEditor";
 import { Section, SimpleTable } from "./SettingsLayout";
 import { DocsLink } from "@/lib/docs";
 
@@ -73,6 +74,7 @@ export function SchemaObject() {
           </SimpleTable>
         </Section>
       )}
+      {meta.data ? <LayoutEditor meta={meta.data} /> : null}
     </>
   );
 }

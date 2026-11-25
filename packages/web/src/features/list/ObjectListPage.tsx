@@ -23,8 +23,12 @@ import { listRoute } from "@/router";
 import { BulkDialog } from "./BulkDialog";
 import { DataTable } from "./DataTable";
 import { FilterButton } from "./FilterBuilder";
-import { ColumnsMenu, SortMenu } from "./ListControls";
+import { GroupedList } from "./GroupedList";
+import { boardFields, calendarFields, groupFields, monthOf } from "./layouts";
+import { ColumnsMenu, LayoutMenu, SortMenu, type ListLayout } from "./ListControls";
 import { nextSearch, resolveList, type ListUrl } from "./listState";
+import { RecordBoard } from "./RecordBoard";
+import { RecordCalendar } from "./RecordCalendar";
 import { useViews, ViewsMenu } from "./ViewsMenu";
 
 const PAGE_SIZE = 100;
@@ -76,12 +80,15 @@ function ListBody({ meta }: { meta: ObjectMeta }) {
     if (restored.current || !prefs.isSuccess) return;
     restored.current = true;
     const p = prefs.data?.[listPrefKey(meta.name)] as ListPref | undefined;
-    if (!p || search.view || search.cols !== undefined || search.filter !== undefined || search.sort !== undefined) return;
+    if (!p || search.view || search.cols !== undefined || search.filter !== undefined || search.sort !== undefined || search.layout || search.group) return;
     const next: ListUrl = {};
     if (p.view) next.view = p.view;
     if (p.columns?.length) next.cols = p.columns.join(",");
+    if (p.layout === "board" || p.layout === "calendar") next.layout = p.layout;
+    if (p.by) next.by = p.by;
+    if (p.group) next.group = p.group;
     if (next.view) setRestoredView(next.view);
-    if (next.view || next.cols) setSearch(next);
+    if (Object.keys(next).length) setSearch(next);
   }, [prefs.isSuccess, prefs.data, meta.name, search, setSearch]);
 
   const view = search.view ? views.data?.find((v) => v.id === search.view) : undefined;
@@ -103,7 +110,8 @@ function ListBody({ meta }: { meta: ObjectMeta }) {
   const list = resolveList(search, meta, views.data, viewFilter);
 
   // Remember the view and the column layout (not filters: those belong to views and links).
-  const prefValue = JSON.stringify({ view: list.viewId ?? null, columns: list.columnsOverridden ? list.columns : undefined });
+  const prefValue = JSON.stringify({ view: list.viewId ?? null, columns: list.columnsOverridden ? list.columns : undefined,
+    layout: search.layout ?? null, by: search.by ?? null, group: search.group ?? null });
   const lastSaved = useRef<string | null>(null);
   const debouncedPref = useDebounced(prefValue, 300);
   useEffect(() => {
@@ -119,6 +127,23 @@ function ListBody({ meta }: { meta: ObjectMeta }) {
 
   const where = useDebounced(list.where, 350);
   const waitingForView = Boolean(search.view) && views.isPending;
+
+  // How the list is shown. A layout the object has no field for (or a field that is gone) falls back to the table.
+  const boards = useMemo(() => boardFields(meta), [meta]);
+  const dates = useMemo(() => calendarFields(meta), [meta]);
+  const groups = useMemo(() => groupFields(meta), [meta]);
+  const layout: ListLayout = search.layout === "board" && boards.length ? "board" : search.layout === "calendar" && dates.length ? "calendar" : "table";
+  const boardBy = boards.find((f) => f.name === search.by) ?? boards[0];
+  const dateBy = dates.find((f) => f.name === search.by) ?? dates[0];
+  const groupBy = layout === "table" ? groups.find((f) => f.name === search.group) : undefined;
+  const plainTable = layout === "table" && !groupBy;
+  // The other layouts ask for their own slices of the same list: the filter in the URL, else the view's.
+  const baseWhere = list.filterOverridden ? where : view?.status === "ok" ? view.where ?? undefined : undefined;
+  const showAs = (change: Partial<Pick<ListUrl, "layout" | "by" | "group" | "month">>) => {
+    const next: ListUrl = { ...search, ...change };
+    for (const k of ["layout", "by", "group", "month"] as const) if (next[k] === undefined) delete next[k];
+    setSearch(next);
+  };
   const params = { view: list.viewId, where, sort: list.sort, fields: list.fields, include: list.include };
   const rows = useInfiniteQuery({
     queryKey: qk.list(meta.name, params),
@@ -131,7 +156,7 @@ function ListBody({ meta }: { meta: ObjectMeta }) {
     }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => last.next_cursor ?? undefined,
-    enabled: !waitingForView,
+    enabled: !waitingForView && plainTable,
   });
   const records = useMemo(() => rows.data?.pages.flatMap((p) => p.data) ?? [], [rows.data]);
   const first = rows.data?.pages[0];
@@ -177,7 +202,7 @@ function ListBody({ meta }: { meta: ObjectMeta }) {
         title={meta.plural_label}
         subtitle={first?.total !== undefined ? (
           <span aria-live="polite">{first.total_capped ? `More than ${first.total.toLocaleString()}` : first.total.toLocaleString()} {first.total === 1 ? meta.label.toLowerCase() : meta.plural_label.toLowerCase()}{filterActive || list.viewId ? " match" : ""}</span>
-        ) : rows.isPending ? <Skeleton className="mt-1 h-3 w-24" /> : null}
+        ) : rows.isPending && plainTable ? <Skeleton className="mt-1 h-3 w-24" /> : null}
         actions={canCreate ? <Button variant="primary" onClick={() => setCreating(true)}><Plus /><span className="truncate">New {meta.label.toLowerCase()}</span></Button> : null}
       />
       <div className="flex flex-wrap items-center gap-2 border-b border-line bg-surface px-4 py-2 md:px-6" role="toolbar" aria-label="List controls">
@@ -186,9 +211,15 @@ function ListBody({ meta }: { meta: ObjectMeta }) {
           onApply={(id) => setSearch(nextSearch(search, { view: id }))} />
         <span className="mx-1 h-5 w-px bg-line" aria-hidden />
         <FilterButton meta={meta} value={list.filter} onChange={(g: Group | null) => setSearch(nextSearch(search, { filter: g ?? (list.viewId ? { kind: "group", conj: "and", children: [] } : null) }))} />
-        <SortMenu meta={meta} sort={list.sort} onChange={(s: Sort[]) => setSearch(nextSearch(search, { sort: s }))} />
-        <ColumnsMenu meta={meta} columns={list.columns} overridden={list.columnsOverridden}
-          onChange={(c) => setSearch(nextSearch(search, { columns: c }))} onReset={() => setSearch(nextSearch(search, { columns: null }))} />
+        {layout === "table" ? <SortMenu meta={meta} sort={list.sort} onChange={(s: Sort[]) => setSearch(nextSearch(search, { sort: s }))} /> : null}
+        {layout === "calendar" ? null : <ColumnsMenu meta={meta} columns={list.columns} overridden={list.columnsOverridden}
+          onChange={(c) => setSearch(nextSearch(search, { columns: c }))} onReset={() => setSearch(nextSearch(search, { columns: null }))} />}
+        <span className="mx-1 h-5 w-px bg-line" aria-hidden />
+        <LayoutMenu layout={layout}
+          onLayout={(l) => showAs({ layout: l === "table" ? undefined : l, by: undefined, month: undefined })}
+          boardBy={boardBy} boardFields={boards} onBoardBy={(n) => showAs({ by: n })}
+          dateBy={dateBy} dateFields={dates} onDateBy={(n) => showAs({ by: n })}
+          groupBy={groupBy} groupFields={groups} onGroupBy={(n) => showAs({ group: n ?? undefined })} />
         {list.modified ? (
           <Button size="sm" variant="ghost" onClick={() => setSearch({ ...(list.viewId ? { view: list.viewId } : {}) })}>
             <RotateCcw /> {list.viewId ? "Reset to view" : "Reset"}
@@ -210,7 +241,13 @@ function ListBody({ meta }: { meta: ObjectMeta }) {
             <Button size="icon-sm" variant="subtle" aria-label="Dismiss" onClick={() => setNote(null)}><X /></Button>
           </div>
         ) : null}
-        {rows.error && !rows.data && viewError ? (
+        {waitingForView && !plainTable ? <ListSkeleton /> : layout === "board" && boardBy ? (
+          <RecordBoard meta={meta} field={boardBy} where={baseWhere} cardFields={list.columns} />
+        ) : layout === "calendar" && dateBy ? (
+          <RecordCalendar meta={meta} field={dateBy} where={baseWhere} month={search.month ?? monthOf(new Date())} onMonth={(m) => showAs({ month: m === monthOf(new Date()) ? undefined : m })} />
+        ) : groupBy ? (
+          <GroupedList meta={meta} field={groupBy} where={baseWhere} columns={list.columns} sort={list.sort} />
+        ) : rows.error && !rows.data && viewError ? (
           <div className="p-6">
             <EmptyState icon={<FilterX />} title="This view can't be shown"
               action={<Button onClick={() => setSearch({})}>Show all {plainLabel(meta.plural_label).toLowerCase()}</Button>}>

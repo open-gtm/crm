@@ -10,7 +10,7 @@ import { canSort, defaultColumns, includable, isVisible, partFields, sortablePar
  * table makes, and back.
  */
 
-export interface ListUrl { view?: string; sort?: string; cols?: string; filter?: unknown }
+export interface ListUrl { view?: string; sort?: string; cols?: string; filter?: unknown; layout?: "board" | "calendar"; by?: string; group?: string; month?: string }
 
 export interface ResolvedList {
   viewId: string | undefined;
@@ -78,6 +78,7 @@ export function nextSearch(cur: ListUrl, change: { filter?: Group | null; sort?:
     delete out.filter;
     delete out.sort;
     delete out.cols;
+    // How the list is shown (table, board, calendar, grouping) is the member's choice, not the view's: it stays.
   }
   if (change.filter !== undefined) {
     if (change.filter === null) delete out.filter; else out.filter = packFilter(change.filter);
