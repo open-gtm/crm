@@ -11,13 +11,14 @@ import { qk } from "@/lib/keys";
 import { RecordLink } from "@/meta/registry";
 import { dayOf, monthGrid, monthOf, monthStart, whereForMonth, ymd } from "./layouts";
 
-const MAX = 500;
+// The API returns at most 200 records per request (the limit of /v1/query).
+const MAX = 200;
 const PER_DAY = 4;
 const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
 /**
  * A month of records, each on the day of a date or date-time field (a date-time's day is the reader's
- * local day). One request per month, of at most 500 records; when a month holds more, the calendar says
+ * local day). One request per month, of at most 200 records; when a month holds more, the calendar says
  * so. A day shows its first few records and opens to show the rest.
  */
 export function RecordCalendar({ meta, field, where, month, onMonth }: { meta: ObjectMeta; field: FieldMeta; where: Where | undefined; month: string; onMonth: (m: string) => void }) {
