@@ -1,5 +1,6 @@
 import type { Tx } from "../../db/pool.js";
 import type { Permission, Scope } from "../context.js";
+import { memberSetsColumn, type HeldSetRow } from "./roles.js";
 
 /**
  * The SQL of API keys (core/keys.ts; ADR 0012): looking a presented key up, its owner's role, and creating,
@@ -37,14 +38,16 @@ export async function touchKey(tx: Tx, id: string): Promise<void> {
 }
 
 /** A key owner's (or session holder's) role and status. */
-export interface Owner { role: string; role_id: string; access_version: string; permissions: Permission[]; disabled_at: Date | null; archived_at: Date | null }
+export interface Owner { role: string; role_id: string; access_version: string; permissions: Permission[]; disabled_at: Date | null; archived_at: Date | null;
+  /** The permission sets the member holds (ADR 0013). `permissions` is the role's alone. */
+  sets: HeldSetRow[] }
 
 /** A member's role (key, ID, permissions and rules version), whether they are disabled and whether the role is archived. */
 export async function memberRoleStatus(tx: Tx, type: MemberType, id: string): Promise<Owner | undefined> {
   const [o] = type === "user"
-    ? await tx<Owner[]>`SELECT r.key AS role, r.id AS role_id, r.access_version::text, r.permissions, m.disabled_at, r.archived_at
+    ? await tx<Owner[]>`SELECT r.key AS role, r.id AS role_id, r.access_version::text, r.permissions, m.disabled_at, r.archived_at, ${memberSetsColumn(tx, "user")}
                         FROM users m JOIN roles r ON r.tenant_id = m.tenant_id AND r.id = m.role_id WHERE m.id = ${id}`
-    : await tx<Owner[]>`SELECT r.key AS role, r.id AS role_id, r.access_version::text, r.permissions, m.disabled_at, r.archived_at
+    : await tx<Owner[]>`SELECT r.key AS role, r.id AS role_id, r.access_version::text, r.permissions, m.disabled_at, r.archived_at, ${memberSetsColumn(tx, "service_account")}
                         FROM service_accounts m JOIN roles r ON r.tenant_id = m.tenant_id AND r.id = m.role_id WHERE m.id = ${id}`;
   return o;
 }

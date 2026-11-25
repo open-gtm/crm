@@ -34,7 +34,7 @@ The two keys:
 - **Admin key**: changes the shape of the CRM (objects, fields, pipelines), manages members and keys, and can read and write data.
 - **Ops key**: everyday work with records. It cannot change the schema.
 
-**Roles and permissions.** Each member has one role (owner, admin, member, read_only, or a custom role you define), and a role is a set of permissions, optionally with rules per object and per field. A key's scopes can only narrow what its member's role allows, never widen it. Roles are managed in the web UI (Settings → Roles), with `crm roles` or through the REST API. See [`docs/permissions.md`](docs/permissions.md), including its limits.
+**Roles and permissions.** Each member has one role (owner, admin, member, read_only, or a custom role you define), and a role is a set of permissions, optionally with rules per object and per field. A member can also hold permission sets, which add access on top of the role: per object and field, and per feature. A key's scopes can only narrow what its member is allowed, never widen it. Roles and permission sets are managed in the web UI (Settings → Roles, Settings → Permission sets), with `crm roles` and `crm permission-sets` or through the REST API. See [`docs/permissions.md`](docs/permissions.md), including its limits.
 
 Optional demo data: `docker compose run --rm api seed` creates a separate "Demo Co" workspace with accounts, contacts, deals and leads, and prints its keys.
 

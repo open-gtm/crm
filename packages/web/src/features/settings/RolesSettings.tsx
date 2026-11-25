@@ -17,23 +17,56 @@ import { useDescribes, useObjects } from "@/meta/hooks";
 import { useRoles } from "./MembersSettings";
 import { Section, SimpleTable, useAdmin } from "./SettingsLayout";
 
-export function RolesSettings() {
+/**
+ * Roles and permission sets are built and edited the same way (permissions, object rules, field rules).
+ * A member has exactly one role; permission sets are extra, a member can hold several, and their access
+ * is everything their role and sets allow together.
+ */
+type Kind = "role" | "permission_set";
+const KINDS = {
+  role: {
+    api: "/v1/roles", list: "/settings/roles", detail: "/settings/roles/$roleId", listKey: "roles", title: "Roles", one: "role", One: "Role",
+    blurb: "A role is a set of permissions, plus (for custom roles) rules per object and per field. Every member has one.",
+    empty: "No roles.",
+  },
+  permission_set: {
+    api: "/v1/permission-sets", list: "/settings/permission-sets", detail: "/settings/permission-sets/$roleId", listKey: "permission-sets",
+    title: "Permission sets", one: "permission set", One: "Permission set",
+    blurb: "A permission set adds access on top of a member's role: what they can do with each object and field, and which features they can use. A member can hold several, and gets everything their role and their sets allow. Assign them in Members.",
+    empty: "No permission sets yet.",
+  },
+} as const;
+
+export function usePermissionSets() {
+  return useAdmin<{ data: Role[] }>(["permission-sets"], "/v1/permission-sets");
+}
+
+export const RolesSettings = () => <DefinitionList kind="role" />;
+export const PermissionSetsSettings = () => <DefinitionList kind="permission_set" />;
+export const RoleDetail = () => <DefinitionDetail kind="role" />;
+export const PermissionSetDetail = () => <DefinitionDetail kind="permission_set" />;
+
+function DefinitionList({ kind }: { kind: Kind }) {
+  const k = KINDS[kind];
   const s = useSession();
-  const roles = useRoles();
+  const asRoles = useRoles();
+  const asSets = usePermissionSets();
+  const roles = kind === "role" ? asRoles : asSets;
   const [creating, setCreating] = useState(false);
   const navigate = useNavigate();
+  const rows = roles.data?.data.filter((r) => !r.archived_at) ?? [];
   return (
-    <Section title="Roles" description="A role is a set of permissions, plus (for custom roles) rules per object and per field. Every member has one."
-      actions={s.can("roles:manage") ? <Button size="sm" variant="primary" onClick={() => setCreating(true)}><Plus /> New role</Button> : null}>
-      {roles.isPending ? <Skeleton className="h-24" /> : roles.error ? <ProblemView error={roles.error} compact /> : (
+    <Section title={k.title} description={k.blurb}
+      actions={s.can("roles:manage") ? <Button size="sm" variant="primary" onClick={() => setCreating(true)}><Plus /> New {k.one}</Button> : null}>
+      {roles.isPending ? <Skeleton className="h-24" /> : roles.error ? <ProblemView error={roles.error} compact /> : rows.length === 0 ? <EmptyState title={k.empty} /> : (
         <ul className="-m-4 divide-y divide-line">
-          {roles.data.data.filter((r) => !r.archived_at).map((r) => (
+          {rows.map((r) => (
             <li key={r.id}>
-              <Link to="/settings/roles/$roleId" params={{ roleId: r.key }} className="flex items-center gap-3 px-4 py-3 hover:bg-surface-2">
+              <Link to={k.detail} params={{ roleId: r.key }} className="flex items-center gap-3 px-4 py-3 hover:bg-surface-2">
                 <Shield className="size-4 text-muted" aria-hidden />
                 <div className="min-w-0 flex-1">
-                  <p className="font-medium">{r.name} {r.is_system ? <Badge>System</Badge> : <Badge tone="accent">Custom</Badge>}</p>
-                  <p className="truncate text-sm text-muted">{r.description ?? `${r.permissions.length} permissions`}</p>
+                  <p className="font-medium">{r.name} {kind === "permission_set" ? null : r.is_system ? <Badge>System</Badge> : <Badge tone="accent">Custom</Badge>}</p>
+                  <p className="truncate text-sm text-muted">{r.description || `${r.permissions.length} permission${r.permissions.length === 1 ? "" : "s"}`}</p>
                 </div>
                 <span className="text-sm text-subtle">{r.active_members} member{r.active_members === 1 ? "" : "s"}</span>
                 <ChevronRight className="size-4 text-subtle" aria-hidden />
@@ -42,9 +75,9 @@ export function RolesSettings() {
           ))}
         </ul>
       )}
-      {creating ? <RoleEditor onClose={() => setCreating(false)} onSaved={(r) => {
+      {creating ? <RoleEditor kind={kind} onClose={() => setCreating(false)} onSaved={(r) => {
         setCreating(false);
-        void navigate({ to: "/settings/roles/$roleId", params: { roleId: r.key } });
+        void navigate({ to: k.detail, params: { roleId: r.key } });
       }} /> : null}
     </Section>
   );
@@ -52,48 +85,60 @@ export function RolesSettings() {
 
 const tri = (v: boolean | null | undefined) => (v === true ? <Check className="size-4 text-success" aria-label="yes" /> : <Minus className="size-4 text-subtle" aria-label="no" />);
 
-export function RoleDetail() {
+function DefinitionDetail({ kind }: { kind: Kind }) {
+  const k = KINDS[kind];
   const { roleId } = useParamsSafe();
   const s = useSession();
   const api = useApi();
   const qc = useQueryClient();
   const toast = useToast();
   const navigate = useNavigate();
-  const role = useAdmin<{ data: Role }>(["role", roleId], `/v1/roles/${encodeURIComponent(roleId)}`);
-  const access = useAdmin<{ data: RoleAccess }>(["role-access", roleId], `/v1/roles/${encodeURIComponent(roleId)}/access`);
+  const role = useAdmin<{ data: Role }>([kind, roleId], `${k.api}/${encodeURIComponent(roleId)}`);
+  const access = useAdmin<{ data: RoleAccess }>([`${kind}-access`, roleId], `${k.api}/${encodeURIComponent(roleId)}/access`);
+  const perms = useAdmin<{ data: PermissionInfo[] }>(["permissions"], "/v1/permissions");
   const [editing, setEditing] = useState(false);
   const [archiving, setArchiving] = useState(false);
   const labels = useSchemaLabels(access.data?.data.objects.map((o) => o.object) ?? []);
   const archive = useMutation({
-    mutationFn: () => api.delete(`/v1/roles/${encodeURIComponent(roleId)}`),
+    mutationFn: () => api.delete(`${k.api}/${encodeURIComponent(roleId)}`),
     onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["admin", "roles"] });
-      toast.toast({ tone: "success", title: "Role archived" });
-      void navigate({ to: "/settings/roles" });
+      void qc.invalidateQueries({ queryKey: ["admin", k.listKey] });
+      toast.toast({ tone: "success", title: `${k.One} archived` });
+      void navigate({ to: k.list });
     },
     onError: (e) => {
       setArchiving(false);
-      toast.error(e, "Couldn't archive the role");
+      toast.error(e, `Couldn't archive the ${k.one}`);
     },
   });
   if (role.error) return <ProblemView error={role.error} />;
   if (!role.data) return <Skeleton className="h-64 max-w-4xl" />;
   const r = role.data.data;
-  const held = s.role === r.key;
+  const held = kind === "role" ? s.role === r.key : (s.permission_sets ?? []).includes(r.key);
   const editable = s.can("roles:manage") && !r.is_system && !held;
+  const catalog = perms.data?.data ?? [];
+  const records = r.permissions.filter((p) => isRecordPermission(catalog, p));
+  const features = r.permissions.filter((p) => !isRecordPermission(catalog, p));
+  const chips = (list: string[]) => (
+    <ul className="flex flex-wrap gap-1.5">{list.length ? list.map((p) => <li key={p}><Badge title={p}>{capFirst(PERMISSION_LABELS[p] ?? p)}</Badge></li>) : <li className="text-base text-muted">None</li>}</ul>
+  );
   return (
     <>
-      <Link to="/settings/roles" className="mb-3 inline-flex items-center gap-1 text-sm text-muted hover:text-fg"><ArrowLeft className="size-3.5" /> Roles</Link>
+      <Link to={k.list} className="mb-3 inline-flex items-center gap-1 text-sm text-muted hover:text-fg"><ArrowLeft className="size-3.5" /> {k.title}</Link>
       <Section title={r.name} description={r.description ?? undefined}
         actions={editable ? <><Button size="sm" onClick={() => setEditing(true)}><Pencil /> Edit</Button><Button size="sm" variant="danger-ghost" onClick={() => setArchiving(true)}>Archive…</Button></> : null}>
         <p className="mb-3 text-sm text-muted">
           Key <code className="font-mono">{r.key}</code> · {r.active_members} active member{r.active_members === 1 ? "" : "s"}
-          {r.is_system ? " · System roles can't be changed; make a custom role from one instead." : held ? " · You hold this role, so you can't change it." : ""}
+          {r.is_system ? " · System roles can't be changed; make a custom role from one instead." : held ? ` · You hold this ${k.one}, so you can't change it.` : ""}
         </p>
-        <h3 className="mb-2 text-sm font-medium text-muted">Permissions</h3>
-        <ul className="flex flex-wrap gap-1.5">{r.permissions.length ? r.permissions.map((p) => <li key={p}><Badge title={p}>{capFirst(PERMISSION_LABELS[p] ?? p)}</Badge></li>) : <li className="text-base text-muted">None</li>}</ul>
+        <h3 className="mb-2 text-sm font-medium text-muted">Objects and fields: for every object, unless a rule below says otherwise</h3>
+        {chips(records)}
+        <h3 className="mb-2 mt-4 text-sm font-medium text-muted">Features</h3>
+        {chips(features)}
       </Section>
-      <Section title="Effective record access" description="What holders of this role can do with each object, after its permissions and rules. Fields with a rule are listed.">
+      <Section title={kind === "role" ? "Effective record access" : "Record access this set gives"}
+        description={kind === "role" ? "What holders of this role can do with each object, after its permissions and rules. Fields with a rule are listed. Permission sets a member holds add to this."
+          : "What this set gives by itself, per object. A member gets this together with their role and their other sets: the widest access wins."}>
         {access.isPending ? <Skeleton className="h-40" /> : access.error ? <ProblemView error={access.error} compact /> : (
           <SimpleTable label="Effective access" head={["Object", "Read", "Write", "Archive", "Limited fields", "Restricted values"]}>
             {access.data.data.objects.map((o) => (
@@ -107,17 +152,21 @@ export function RoleDetail() {
           </SimpleTable>
         )}
       </Section>
-      {editing ? <RoleEditor role={r} onClose={() => setEditing(false)} onSaved={() => {
+      {editing ? <RoleEditor kind={kind} role={r} onClose={() => setEditing(false)} onSaved={() => {
         setEditing(false);
         void qc.invalidateQueries({ queryKey: ["admin"] });
       }} /> : null}
-      <ConfirmDialog open={archiving} onOpenChange={setArchiving} danger busy={archive.isPending} confirmLabel="Archive role" title={`Archive ${r.name}?`}
-        description="A role can be archived only when no active member holds it." onConfirm={() => archive.mutate()} />
+      <ConfirmDialog open={archiving} onOpenChange={setArchiving} danger busy={archive.isPending} confirmLabel={`Archive ${k.one}`} title={`Archive ${r.name}?`}
+        description={`A ${k.one} can be archived only when no active member holds it.`} onConfirm={() => archive.mutate()} />
     </>
   );
 }
 
 const capFirst = (x: string) => x.charAt(0).toUpperCase() + x.slice(1);
+
+/** True for the permissions about records (objects and fields refine them); everything else is a feature. */
+const isRecordPermission = (catalog: PermissionInfo[], key: string) =>
+  (catalog.find((c) => c.key === key)?.category ?? (/^(records|restricted):/.test(key) ? "records" : "features")) === "records";
 
 /** Labels for objects and fields by API name, from describe (the API name when it can't be read). */
 function useSchemaLabels(objects: string[]) {
@@ -145,8 +194,13 @@ type Allow = "inherit" | "allow" | "deny";
 const toAllow = (v: boolean | null | undefined): Allow => (v === true ? "allow" : v === false ? "deny" : "inherit");
 const fromAllow = (a: Allow) => (a === "allow" ? true : a === "deny" ? false : null);
 
-/** Create or change a custom role: permissions (with what they require added for you), object rules, field rules. */
-function RoleEditor({ role, onClose, onSaved }: { role?: Role; onClose: () => void; onSaved: (r: Role) => void }) {
+/**
+ * Create or change a custom role or a permission set, in its two areas: objects and fields (the record
+ * permissions, which apply to every object, and rules per object and per field), and features (with what
+ * a feature requires added for you).
+ */
+function RoleEditor({ kind, role, onClose, onSaved }: { kind: Kind; role?: Role; onClose: () => void; onSaved: (r: Role) => void }) {
+  const k = KINDS[kind];
   const api = useApi();
   const perms = useAdmin<{ data: PermissionInfo[] }>(["permissions"], "/v1/permissions");
   const objects = useObjects();
@@ -154,7 +208,7 @@ function RoleEditor({ role, onClose, onSaved }: { role?: Role; onClose: () => vo
   const [key, setKey] = useState(role?.key ?? "");
   const [name, setName] = useState(role?.name ?? "");
   const [description, setDescription] = useState(role?.description ?? "");
-  const [permissions, setPermissions] = useState<Set<string>>(new Set(role?.permissions ?? ["records:read"]));
+  const [permissions, setPermissions] = useState<Set<string>>(new Set(role?.permissions ?? (kind === "role" ? ["records:read"] : [])));
   const [objectRules, setObjectRules] = useState<Record<string, RoleObjectRule>>(role?.objects ?? {});
   const [fieldRules, setFieldRules] = useState<Record<string, Record<string, "none" | "read">>>(role?.fields ?? {});
   const [openObject, setOpenObject] = useState<string | null>(null);
@@ -186,6 +240,13 @@ function RoleEditor({ role, onClose, onSaved }: { role?: Role; onClose: () => vo
     setFieldRules(copy);
   };
 
+  const permissionBox = (p: PermissionInfo) => (
+    <label key={p.key} className="flex items-start gap-2 text-base">
+      <Checkbox checked={permissions.has(p.key)} onCheckedChange={(v) => toggle(p.key, v === true)} className="mt-0.5" />
+      <span><code className="font-mono text-sm">{p.key}</code><span className="block text-sm text-muted">{p.description}</span></span>
+    </label>
+  );
+
   const save = useMutation({
     mutationFn: async () => {
       // A PATCH changes only what it names: rules that were removed are sent as null.
@@ -201,8 +262,8 @@ function RoleEditor({ role, onClose, onSaved }: { role?: Role; onClose: () => vo
       }
       const body = { name: name.trim(), description: description.trim() || undefined, permissions: [...permissions], objects: objs, fields };
       return role
-        ? (await api.patch<{ data: Role }>(`/v1/roles/${encodeURIComponent(role.key)}`, body)).data
-        : (await api.post<{ data: Role }>("/v1/roles", { key: key.trim(), ...body, objects: objectRules, fields: fieldRules })).data;
+        ? (await api.patch<{ data: Role }>(`${k.api}/${encodeURIComponent(role.key)}`, body)).data
+        : (await api.post<{ data: Role }>(k.api, { key: key.trim(), ...body, objects: objectRules, fields: fieldRules })).data;
     },
     onSuccess: onSaved,
     onError: (e) => setError(asProblem(e).detail),
@@ -210,8 +271,8 @@ function RoleEditor({ role, onClose, onSaved }: { role?: Role; onClose: () => vo
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent title={role ? `Edit ${role.name}` : "New role"} size="xl"
-        footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" type="submit" form="role-form" busy={save.isPending} disabled={!name.trim() || (!role && !key.trim())}>Save role</Button></>}>
+      <DialogContent title={role ? `Edit ${role.name}` : `New ${k.one}`} size="xl"
+        footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" type="submit" form="role-form" busy={save.isPending} disabled={!name.trim() || (!role && !key.trim())}>Save {k.one}</Button></>}>
         <form id="role-form" className="grid gap-5" onSubmit={(e) => {
           e.preventDefault();
           setError(null);
@@ -224,18 +285,12 @@ function RoleEditor({ role, onClose, onSaved }: { role?: Role; onClose: () => vo
             <FormField label="Description" className="sm:col-span-2">{(p) => <Textarea {...p} rows={2} value={description} onChange={(e) => setDescription(e.target.value)} />}</FormField>
           </div>
           <fieldset>
-            <legend className="mb-2 text-sm font-medium text-muted">Permissions (adding one also adds what it requires)</legend>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {catalog.map((p) => (
-                <label key={p.key} className="flex items-start gap-2 text-base">
-                  <Checkbox checked={permissions.has(p.key)} onCheckedChange={(v) => toggle(p.key, v === true)} className="mt-0.5" />
-                  <span><code className="font-mono text-sm">{p.key}</code><span className="block text-sm text-muted">{p.description}</span></span>
-                </label>
-              ))}
+            <legend className="mb-1 text-base font-medium">Objects and fields</legend>
+            <p className="mb-2 text-sm text-muted">For every object{kind === "permission_set" ? " (leave these off to give access object by object below)" : ""}:</p>
+            <div className="mb-3 grid gap-2 sm:grid-cols-2">
+              {catalog.filter((p) => isRecordPermission(catalog, p.key)).map(permissionBox)}
             </div>
-          </fieldset>
-          <fieldset>
-            <legend className="mb-2 text-sm font-medium text-muted">Object and field rules (inherit follows the permissions above)</legend>
+            <p className="mb-2 text-sm text-muted">Per object and field (inherit follows the choices above):</p>
             {/* A focusable region, so the table can be scrolled sideways from the keyboard on a phone. */}
             <div className="overflow-x-auto rounded-md border border-line focus-visible:outline-2 focus-visible:outline-focus" role="region" aria-label="Object and field rules" tabIndex={0}>
               <table className="w-full min-w-[34rem] text-base">
@@ -268,7 +323,14 @@ function RoleEditor({ role, onClose, onSaved }: { role?: Role; onClose: () => vo
                 </tbody>
               </table>
             </div>
-            <p className="mt-2 text-sm text-subtle">Roles that manage automations, webhooks, alerts or the schema must have unrestricted record access; the server says so if a rule conflicts.</p>
+          </fieldset>
+          <fieldset>
+            <legend className="mb-1 text-base font-medium">Features</legend>
+            <p className="mb-2 text-sm text-muted">What holders can do in the CRM beyond records. Adding one also adds what it requires.</p>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {catalog.filter((p) => !isRecordPermission(catalog, p.key)).map(permissionBox)}
+            </div>
+            <p className="mt-2 text-sm text-subtle">{k.One}s that manage automations, webhooks, alerts or the schema must have unrestricted record access; the server says so if a rule conflicts.</p>
           </fieldset>
         </form>
       </DialogContent>

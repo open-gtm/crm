@@ -6,7 +6,7 @@ Version: **0.1 (Phase 1, MVP).** The software has had automated testing (unit, i
 
 ## Built
 
-- **Foundations.** One Docker image with `api`, `mcp`, `worker` and `migrate` commands; Postgres as the only required dependency; workspaces isolated with row-level security; roles and permissions with per-object and per-field rules; scoped API keys; field-level encryption for restricted values; a tamper-evident audit log.
+- **Foundations.** One Docker image with `api`, `mcp`, `worker` and `migrate` commands; Postgres as the only required dependency; workspaces isolated with row-level security; roles and permissions with per-object and per-field rules, and permission sets that add access on top of a role; scoped API keys; field-level encryption for restricted values; a tamper-evident audit log.
 - **Schema engine.** Standard objects (contacts, accounts, leads, deals, activities, tasks) plus custom objects and fields in one call; 19 field types including address, json, rating, percent and duration; relations; pipelines; schema history.
 - **Records API.** REST `/v1` with an OpenAPI document, idempotency keys, `If-Match`, filters across relations, sorting, counts, aggregates, saved views, search, merges, duplicate finder, bulk changes, restore and timelines.
 - **MCP servers.** Ops and admin servers over HTTP and stdio, dry-run by default for changes, confirmation tokens, OAuth for remote clients (not yet verified against the hosted clients themselves; see below).

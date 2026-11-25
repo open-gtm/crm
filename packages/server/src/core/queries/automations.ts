@@ -1,5 +1,6 @@
 import type { Tx } from "../../db/pool.js";
 import type { AutomationRow, Step, Trigger } from "../automation-defs.js";
+import { memberSetsColumn, type HeldSetRow } from "./roles.js";
 
 /**
  * The SQL of automation definitions, the workspace's automation settings and the email suppression list
@@ -109,25 +110,27 @@ export async function compiledConditionRows(tx: Tx, text: string, params: unknow
 // --- Roles an automation's access is checked against ------------------------------------------------
 
 /** A role, enough to build its context. */
-export interface RoleForCtx { id: string; key: string; permissions: string[]; access_version: string }
+export interface RoleForCtx { id: string; key: string; permissions: string[]; access_version: string; sets?: HeldSetRow[] }
 
 /** The roles that aren't archived, by key. */
 export async function liveRoles(tx: Tx): Promise<RoleForCtx[]> {
   return tx<RoleForCtx[]>`
-    SELECT id, key, permissions, access_version::text FROM roles WHERE archived_at IS NULL ORDER BY key`;
+    SELECT id, key, permissions, access_version::text FROM roles WHERE kind = 'role' AND archived_at IS NULL ORDER BY key`;
 }
 
 /** A member's role, whatever its state. */
 export async function roleOfUser(tx: Tx, userId: string): Promise<RoleForCtx | undefined> {
   const [m] = await tx<RoleForCtx[]>`
-        SELECT r.id, r.key, r.permissions, r.access_version::text FROM users u JOIN roles r ON r.tenant_id = u.tenant_id AND r.id = u.role_id WHERE u.id = ${userId}`;
+        SELECT r.id, r.key, r.permissions, r.access_version::text, ${memberSetsColumn(tx, "user")}
+        FROM users m JOIN roles r ON r.tenant_id = m.tenant_id AND r.id = m.role_id WHERE m.id = ${userId}`;
   return m;
 }
 
 /** A service account's role, whatever its state. */
 export async function roleOfServiceAccount(tx: Tx, serviceAccountId: string): Promise<RoleForCtx | undefined> {
   const [m] = await tx<RoleForCtx[]>`
-        SELECT r.id, r.key, r.permissions, r.access_version::text FROM service_accounts s JOIN roles r ON r.tenant_id = s.tenant_id AND r.id = s.role_id WHERE s.id = ${serviceAccountId}`;
+        SELECT r.id, r.key, r.permissions, r.access_version::text, ${memberSetsColumn(tx, "service_account")}
+        FROM service_accounts m JOIN roles r ON r.tenant_id = m.tenant_id AND r.id = m.role_id WHERE m.id = ${serviceAccountId}`;
   return m;
 }
 

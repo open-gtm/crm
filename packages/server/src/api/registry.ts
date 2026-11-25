@@ -48,7 +48,7 @@ export interface RouteDef<B = unknown, Q = unknown> {
   body?: z.ZodType<B>;
   query?: z.ZodType<Q>;
   /** Path params that hold record or entity IDs, for the cross-tenant test harness. */
-  idParams?: Record<string, "record" | "key" | "webhook" | "automation" | "delivery" | "notification" | "alert" | "member" | "service_account" | "role" | "session" | "view" | "grant">;
+  idParams?: Record<string, "record" | "key" | "webhook" | "automation" | "delivery" | "notification" | "alert" | "member" | "service_account" | "role" | "permission_set" | "session" | "view" | "grant">;
   /**
    * "session": only a signed-in person (browser session) may call it, never an API key: it acts on the
    * person's own sign-in (their session, their password). Unset: keys and sessions alike.

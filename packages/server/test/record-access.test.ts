@@ -337,7 +337,7 @@ describe("managing another member's sign-in follows record access", () => {
     for (const [method, path] of [["GET", `/v1/members/${wider.id}/sessions`], ["POST", `/v1/members/${wider.id}/sessions/revoke`]] as const) {
       const r = await call(method, path, { key: manager.key });
       expect(r.status, path).toBe(403);
-      expect(r.json.detail, path).toMatch(/This member's role has record access you don't: deal/);
+      expect(r.json.detail, path).toMatch(/This member has record access you don't: deal/);
     }
     expect((await call("GET", `/v1/members/${peer.id}/sessions`, { key: manager.key })).status).toBe(200);
     expect((await call("GET", `/v1/members/${wider.id}/sessions`, { key: ws.keys.admin })).status).toBe(200);

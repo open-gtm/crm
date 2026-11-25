@@ -2,7 +2,7 @@ import { config, oauthSettings } from "../config.js";
 import { audit } from "../core/audit.js";
 import { tenantIds } from "../core/auditchain.js";
 import type { Ctx, Scope } from "../core/context.js";
-import { keyOwner, memberAccess, type Principal } from "../core/keys.js";
+import { actorOf, keyOwner, memberAccess, type Principal } from "../core/keys.js";
 import { db, type Tx } from "../db/pool.js";
 import { safeEqual } from "../lib/crypto.js";
 import { notFound } from "../lib/errors.js";
@@ -112,7 +112,7 @@ export async function resolveAccessToken(token: string): Promise<OAuthPrincipal 
     // At most once a minute, so a busy client doesn't write on every request.
     if (!g.last_used_at || Date.now() - g.last_used_at.getTime() >= 60_000) await markGrantUsed(tx, t.grant_id);
     return {
-      tenantId: t.tenant_id, keyId: null, actor: { type: "user", id: g.user_id, role: owner.role },
+      tenantId: t.tenant_id, keyId: null, actor: actorOf("user", g.user_id, owner),
       oauth: { grantId: t.grant_id, clientId: g.client_id, resource },
       ...(await memberAccess(tx, t.tenant_id, owner, scopes)),
     } satisfies OAuthPrincipal;

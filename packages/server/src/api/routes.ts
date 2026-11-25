@@ -110,13 +110,16 @@ export function filtersFromQuery(query: Record<string, string>): Where | undefin
 // --- Workspace and identity -------------------------------------------------------------------
 
 route({
-  method: "GET", path: "/v1/me", scope: "any", tag: "workspace", summary: "Who am I: workspace, identity, role, effective permissions and scopes",
-  response: plain(object({ workspace: S.obj, actor: S.obj, role: S.str, permissions: S.strs, scopes: S.strs, surface: S.str, server_version: S.str })),
+  method: "GET", path: "/v1/me", scope: "any", tag: "workspace", summary: "Who am I: workspace, identity, role, permission sets, effective permissions and scopes",
+  response: plain(object({ workspace: S.obj, actor: S.obj, role: S.str,
+    permission_sets: { ...S.strs, description: "Keys of the permission sets held on top of the role" },
+    permissions: S.strs, scopes: S.strs, surface: S.str, server_version: S.str })),
   handler: async ({ tx, ctx }) => ({
     body: {
       workspace: await getWorkspace(tx),
       actor: { type: ctx.actor.type, id: ctx.actor.id ? encodeId(ctx.actor.type === "user" ? "usr" : "svc", ctx.actor.id) : null, role: ctx.actor.role },
       role: ctx.actor.role,
+      permission_sets: ctx.actor.permissionSets ?? [],
       permissions: [...ctx.permissions],
       scopes: [...ctx.scopes],
       surface: ctx.surface,
@@ -449,6 +452,7 @@ route({
 // --- Administration --------------------------------------------------------------------------
 
 const RoleRef = z.string().min(1).max(64).describe("A role key (admin, member, read_only, or a custom role's key) or role_… ID");
+const SetRef = z.string().min(1).max(64).describe("A permission set's key or pset_… ID");
 const Allow = z.boolean().nullable().optional();
 const RoleRules = {
   objects: z.record(z.string(), z.object({ read: Allow, write: Allow, archive: Allow }).strict().nullable()).optional()
@@ -456,10 +460,12 @@ const RoleRules = {
   fields: z.record(z.string(), z.record(z.string(), z.enum(["none", "read"]).nullable()).nullable()).optional()
     .describe("Per object, per field: \"none\" (not visible), \"read\" (not writable) or null (follow the object). null for an object clears its field rules"),
 };
-const MemberPatch = z.object({ role: RoleRef.optional(), active: z.boolean().optional() });
+const SetRefs = z.array(z.string().min(1).max(64)).max(20)
+  .describe("Permission sets by key or pset_… ID. On a change this is the whole list: sets left out are taken away");
+const MemberPatch = z.object({ role: RoleRef.optional(), permission_sets: SetRefs.optional(), active: z.boolean().optional() });
 
 route({
-  method: "GET", path: "/v1/members", scope: "admin", permission: "members:manage", tag: "admin", summary: "Members and service accounts, with their roles",
+  method: "GET", path: "/v1/members", scope: "admin", permission: "members:manage", tag: "admin", summary: "Members and service accounts, with their roles and permission sets",
   response: data(object({ users: list(ref("Member")), service_accounts: list(ref("Member")) })),
   handler: async ({ tx }) => ({ body: { data: await listMembers(tx) } }),
 });
@@ -468,7 +474,7 @@ route({
   method: "POST", path: "/v1/members", scope: "admin", permission: "members:manage", tag: "admin",
   response: { ...R.member, status: 201 },
   summary: "Add a member with any role you could grant (you must hold all of its permissions). The email must be printable ASCII. send_invite: true emails them the sign-in page's address (off by default; limited per workspace and per sender, 429 past it)",
-  body: z.object({ email: z.string(), name: z.string(), role: RoleRef, send_invite: z.boolean().optional() }),
+  body: z.object({ email: z.string(), name: z.string(), role: RoleRef, permission_sets: SetRefs.optional(), send_invite: z.boolean().optional() }),
   handler: async ({ tx, ctx, body }) => {
     if (body.send_invite) {
       const why = invitationUnavailable();
@@ -488,7 +494,7 @@ route({
 route({
   method: "PATCH", path: "/v1/members/:id", scope: "admin", permission: "members:manage", tag: "admin", idParams: { id: "member" },
   response: R.member,
-  summary: "Change a member's role, or disable (active: false) or re-enable them. Disabling revokes all their API keys and ends their sessions",
+  summary: "Change a member's role or permission sets, or disable (active: false) or re-enable them. Disabling revokes all their API keys and ends their sessions",
   body: MemberPatch,
   handler: async ({ tx, ctx, params, body }) => ({ body: { data: await updateMember(tx, ctx, params.id!, body, "user") } }),
 });
@@ -497,14 +503,14 @@ route({
   method: "POST", path: "/v1/service-accounts", scope: "admin", permission: "members:manage", tag: "admin",
   response: { ...R.member, status: 201 },
   summary: "Create a service account (for an integration or agent)",
-  body: z.object({ name: z.string(), role: RoleRef }),
+  body: z.object({ name: z.string(), role: RoleRef, permission_sets: SetRefs.optional() }),
   handler: async ({ tx, ctx, body }) => ({ status: 201, body: { data: await addServiceAccount(tx, ctx, body) } }),
 });
 
 route({
   method: "PATCH", path: "/v1/service-accounts/:id", scope: "admin", permission: "members:manage", tag: "admin", idParams: { id: "service_account" },
   response: R.member,
-  summary: "Change a service account's role, or disable or re-enable it. Disabling revokes all its API keys",
+  summary: "Change a service account's role or permission sets, or disable or re-enable it. Disabling revokes all its API keys",
   body: MemberPatch,
   handler: async ({ tx, ctx, params, body }) => ({ body: { data: await updateMember(tx, ctx, params.id!, body, "service_account") } }),
 });
@@ -512,15 +518,17 @@ route({
 route({
   method: "GET", path: "/v1/access-review", scope: "admin", permission: "audit:read", tag: "admin",
   response: R.accessReview,
-  summary: "Access review: every member and service account with role, permissions, status and keys",
+  summary: "Access review: every member and service account with role, permission sets, permissions, status and keys",
   handler: async ({ tx, ctx }) => ({ body: { data: await accessReview(tx, ctx) } }),
 });
 
 // --- Roles -----------------------------------------------------------------------------------
 
 route({
-  method: "GET", path: "/v1/permissions", scope: "any", tag: "admin", summary: "The permissions a role can be built from",
-  response: dataList(object({ key: S.str, description: S.str, requires: { ...S.strs, description: "Permissions a role must also hold to have this one" } })),
+  method: "GET", path: "/v1/permissions", scope: "any", tag: "admin", summary: "The permissions a role or permission set can be built from, in two areas: records (objects and fields) and features",
+  response: dataList(object({ key: S.str, description: S.str,
+    category: { type: "string", enum: ["records", "features"], description: "records: what may be done with records, refined per object and field; features: a feature of the CRM, such as managing automations or the schema" },
+    requires: { ...S.strs, description: "Permissions a role or set must also hold to have this one" } })),
   handler: async () => ({ body: { data: permissionCatalog() } }),
 });
 
@@ -566,6 +574,53 @@ route({
   response: data(object({ id: S.str, key: S.str, archived: { type: "boolean", const: true } })),
   summary: "Archive a custom role. Refused while any active member holds it",
   handler: async ({ tx, ctx, params }) => ({ body: { data: await archiveRole(tx, ctx, params.id!) } }),
+});
+
+// --- Permission sets (ADR 0013) --------------------------------------------------------------
+// Built like custom roles and stored with them; a member holds one role and any number of sets, and a set only adds access.
+
+route({
+  method: "GET", path: "/v1/permission-sets", scope: "any", tag: "admin", summary: "Permission sets: extra access a member can hold on top of their role",
+  response: R.permissionSets,
+  query: z.object({ include_archived: z.enum(["true", "false"]).optional() }),
+  handler: async ({ tx, ctx, query }) => ({ body: { data: await listRoles(tx, ctx, { includeArchived: query.include_archived === "true" }, "permission_set") } }),
+});
+
+route({
+  method: "POST", path: "/v1/permission-sets", scope: "admin", permission: "roles:manage", tag: "admin",
+  response: { ...R.permissionSet, status: 201 },
+  summary: "Create a permission set: feature permissions, and record access per object and field. You must hold every permission and all record access it grants",
+  body: z.object({ key: z.string(), name: z.string(), description: z.string().max(1000).optional(),
+    permissions: z.array(z.string()).max(50).optional(), copy_from: SetRef.optional(), ...RoleRules }),
+  handler: async ({ tx, ctx, body }) => ({ status: 201, body: { data: await createRole(tx, ctx, body, "permission_set") } }),
+});
+
+route({
+  method: "GET", path: "/v1/permission-sets/:id", scope: "any", tag: "admin", summary: "Get a permission set by key or pset_… ID", idParams: { id: "permission_set" },
+  response: R.permissionSet,
+  handler: async ({ tx, ctx, params }) => ({ body: { data: await getRole(tx, ctx, params.id!, "permission_set") } }),
+});
+
+route({
+  method: "GET", path: "/v1/permission-sets/:id/access", scope: "any", tag: "admin", idParams: { id: "permission_set" },
+  response: data(object({ permission_set: { type: "string", description: "The set's key" }, permissions: S.strs, objects: list(ref("ObjectAccess")) })),
+  summary: "The record access a permission set gives by itself, per object: read, write, archive, and limited or restricted fields",
+  handler: async ({ tx, ctx, params }) => ({ body: { data: await roleAccess(tx, ctx, params.id!, "permission_set") } }),
+});
+
+route({
+  method: "PATCH", path: "/v1/permission-sets/:id", scope: "admin", permission: "roles:manage", tag: "admin", idParams: { id: "permission_set" },
+  response: R.permissionSet,
+  summary: "Change a permission set's name, description, permissions or object and field rules. A set you hold can't be changed",
+  body: z.object({ name: z.string().optional(), description: z.string().max(1000).optional(), permissions: z.array(z.string()).max(50).optional(), ...RoleRules }),
+  handler: async ({ tx, ctx, params, body }) => ({ body: { data: await updateRole(tx, ctx, params.id!, body, "permission_set") } }),
+});
+
+route({
+  method: "DELETE", path: "/v1/permission-sets/:id", scope: "admin", permission: "roles:manage", tag: "admin", idParams: { id: "permission_set" },
+  response: data(object({ id: S.str, key: S.str, archived: { type: "boolean", const: true } })),
+  summary: "Archive a permission set. Refused while any active member holds it",
+  handler: async ({ tx, ctx, params }) => ({ body: { data: await archiveRole(tx, ctx, params.id!, "permission_set") } }),
 });
 
 // --- API keys and audit ----------------------------------------------------------------------

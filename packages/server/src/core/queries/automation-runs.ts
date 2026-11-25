@@ -122,11 +122,14 @@ export async function queuedRunCount(tx: Tx, automationId: string): Promise<numb
   return q?.n;
 }
 
-/** Active members whose role (not archived) can manage automations. */
+/** Active members who can manage automations, through their role (not archived) or a permission set they hold. */
 export async function automationManagers(tx: Tx): Promise<{ id: string }[]> {
   return tx<{ id: string }[]>`
     SELECT u.id FROM users u JOIN roles r ON r.tenant_id = u.tenant_id AND r.id = u.role_id
-    WHERE u.disabled_at IS NULL AND r.archived_at IS NULL AND 'automations:manage' = ANY (r.permissions)`;
+    WHERE u.disabled_at IS NULL AND r.archived_at IS NULL
+      AND ('automations:manage' = ANY (r.permissions)
+           OR EXISTS (SELECT 1 FROM member_permission_sets h JOIN roles ps ON ps.tenant_id = h.tenant_id AND ps.id = h.permission_set_id
+                      WHERE h.tenant_id = u.tenant_id AND h.user_id = u.id AND ps.archived_at IS NULL AND 'automations:manage' = ANY (ps.permissions)))`;
 }
 
 /** An active member's email address. */

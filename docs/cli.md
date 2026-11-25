@@ -362,6 +362,8 @@ crm members list
 crm members add --email ana@example.com --name "Ana" --role member
 crm members add --service-account --name "Import bot" --role member
 crm members update usr_01JD… --role read_only
+crm members add --email li@example.com --name "Li" --role member --permission-sets deal_desk
+crm members update usr_01JD… --permission-sets deal_desk,forecasting   # the whole list; "none" takes them all away
 crm members update svc_01JD… --disable
 crm sessions list usr_01JD…                  # a member's browser sessions (members:manage)
 crm sessions revoke ses_01JD…                 # end one
@@ -377,6 +379,12 @@ crm roles create --file roles/assistant.yaml     # the API's shape, in YAML or J
 crm roles update assistant --field contact.phone=inherit --field contact.notes=none
 crm roles access assistant           # what the role's holders can do, per object
 crm roles archive assistant
+
+crm permission-sets list
+crm permission-sets create --key deal_desk --name "Deal desk" --permissions views:manage --object deal:read=allow --object deal:write=allow --field deal.margin=read
+crm permission-sets get deal_desk     # its two areas (record and feature permissions) and the record access it gives by itself
+crm permission-sets update deal_desk --field deal.margin=inherit
+crm permission-sets archive deal_desk
 
 crm webhooks list
 crm webhooks get whk_01JD…
@@ -404,6 +412,7 @@ crm events list --status dead                   # events whose automations and w
 - The CLI uses API keys only; it has no browser sign-in and no OAuth sign-in. Connected apps are described in [`mcp/oauth.md`](mcp/oauth.md). People's sign-in is described in [`sign-in.md`](sign-in.md).
 - `roles get` shows the role's object and field rules and, from `GET /v1/roles/{id}/access`, what they add up to per object; `--json` returns both (`data`, `access`).
 - `roles create` and `roles update` take flags, a file (`--file`, YAML or JSON with `key`, `name`, `description`, `permissions`, `copy_from`, `objects` and `fields` as in `POST /v1/roles`), or both (flags win). `--object object:read|write|archive=allow|deny|inherit` and `--field object.field=none|read|inherit` are repeatable; `inherit` clears a rule. `update` changes only what it names, and `--permissions` replaces the list. `archive` asks first.
+- `permission-sets` takes the same flags and file as `roles` (`POST /v1/permission-sets`). A permission set adds to a member's role; see [`permissions.md`](permissions.md#permission-sets). `members update --permission-sets` sends the whole list.
 - `automations create` and `update` read the API's shape (`name`, `trigger`, `condition`, `actions`, `hourly_cap`, `run_roles`; see [`automations.md`](automations.md)) from a YAML or JSON file. They send it as a dry run first and print the summary (every URL and email recipient as written), warnings and, for a schedule, the next runs on stderr; then they ask. Under `--no-input`, `--yes` is required, as for every confirmation. A `dry_run` key in the file is refused. Secret header values in the file are sent once and never printed back; `get` shows them as `null`, and `null` in an update keeps the stored value.
 - `automations run` shows the dry run (each step: the exact HTTP request, the email recipient, records it would change) and asks before queueing the run. A member who may run an automation through its `run_roles` but can't manage it gets no dry run; the CLI says so and still asks. `resume` asks too, since it starts sends again.
 - `webhooks secret` prints the signing secret alone on stdout (the explanation goes to stderr) after a confirmation (or `--yes`), and never stores it. Secrets are not available through MCP.
