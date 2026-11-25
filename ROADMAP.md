@@ -2,7 +2,7 @@
 
 hl-crm-db is an open-source, self-hostable CRM database: a Postgres-backed schema engine and record API, a web UI, MCP servers for AI agents, a command-line tool and a TypeScript SDK, all from one Docker image. This page says what exists, what is likely next and what is deliberately left out. It is a statement of intent, not a promise of dates.
 
-Version: **0.1 (Phase 1, MVP).** The software has had automated testing (unit, integration, cross-tenant isolation and browser tests) and no independent security audit or production track record. Treat it accordingly, and read [`SECURITY.md`](SECURITY.md) and the [threat model](docs/security/threat-model.md) before storing real customer data.
+Version: **0.2 (Phase 1, MVP).** The software has had automated testing (unit, integration, cross-tenant isolation and browser tests) and no independent security audit or production track record. Treat it accordingly, and read [`SECURITY.md`](SECURITY.md) and the [threat model](docs/security/threat-model.md) before storing real customer data.
 
 ## Built
 
@@ -22,7 +22,7 @@ Version: **0.1 (Phase 1, MVP).** The software has had automated testing (unit, i
 
 Roughly in this order; the order can change with what testers ask for.
 
-1. **First releases.** Tag `v0.1.0` and publish the image (amd64 and arm64) so the quick start no longer needs a local build; publish the CLI to npm.
+1. **First releases.** Publish the image (amd64 and arm64) so the quick start no longer needs a local build; publish the CLI to npm.
 2. **Real-client verification of OAuth for MCP** with Claude, ChatGPT and Cursor, and fixes from what that shows.
 3. **A `file` field type**, and a virus-scanner hook for uploads ([ADR 0011](docs/decisions/0011-files-and-attachments.md)). Files attached to records are built.
 4. **Multi-factor authentication or passkeys** for people sign-in.

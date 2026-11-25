@@ -2,7 +2,7 @@
 
 hl-crm-db (headless CRM database) is an open-source CRM backend with no required UI: a database, schema engine, record API and MCP servers. Work with it from Claude or any MCP client, from your own code through the REST API, from the `crm` command-line tool, or in a browser with the web UI the API serves. Self-host it with Docker: Postgres is the only other dependency.
 
-Status: **v0.1, Phase 1 MVP.** Built: foundations, schema engine and custom objects, records API with saved views, merges, bulk changes and restore, MCP servers with OAuth for remote clients, people sign-in from a browser, a web UI, events and automations (schedules, HTTP requests, email, loops), signed webhooks, alerts and notifications, the `crm` CLI with schema-as-code and CSV import and export, field types from text to address, json, rating, percent and duration, and schema packs that set up a workspace for a use case (recruiting, a support desk). See [`ROADMAP.md`](ROADMAP.md) for what is built, what is next and what is deliberately left out.
+Status: **v0.2, Phase 1 MVP.** Built: foundations, schema engine and custom objects, records API with saved views, merges, bulk changes and restore, MCP servers with OAuth for remote clients, people sign-in from a browser, a web UI, events and automations (schedules, HTTP requests, email, loops), signed webhooks, alerts and notifications, the `crm` CLI with schema-as-code and CSV import and export, field types from text to address, json, rating, percent and duration, and schema packs that set up a workspace for a use case (recruiting, a support desk). New in 0.2: permission sets on top of roles, files and Markdown notes on records, quotes and orders, and a board, a calendar and grouped tables for any object, with record pages whose sections can be arranged. See [`ROADMAP.md`](ROADMAP.md) for what is built, what is next and what is deliberately left out.
 
 **What to expect.** This is a first release for testers. It has automated tests (unit, integration, cross-tenant isolation and browser tests) but no independent security audit and no production track record, and there is no published image or npm package yet. Back up your database and your `.env` (it holds the encryption master key), and report problems through the repository's issues (security problems: see [`SECURITY.md`](SECURITY.md)).
 
@@ -38,7 +38,7 @@ The two keys:
 
 Optional demo data: `docker compose run --rm api seed` creates a separate "Demo Co" workspace with accounts, contacts, deals and leads, and prints its keys.
 
-To pin a release once images are published, set `HLCRM_VERSION=0.1.0` in `.env`. Optional settings (email, webhook targets) are listed in [`.env.example`](.env.example).
+To pin a release once images are published, set `HLCRM_VERSION=0.2.0` in `.env`. Optional settings (email, webhook targets) are listed in [`.env.example`](.env.example).
 
 **If something goes wrong:** `docker compose ps` shows what is running, and `docker compose logs api` (or `migrate`, `mcp`, `worker`, `postgres`) shows why something isn't. Compose publishes ports 8787 (API and web UI), 8788 (MCP) and 5433 (Postgres) on your own machine only; if another program already uses one, either stop it or change the number before the colon in that `ports:` line of `docker-compose.yml` (and `PUBLIC_URL` in `.env` to match for 8787). `.env` is read once when Postgres first starts: to start over from nothing, run `docker compose down -v` (this deletes the database) and `sh scripts/init-env.sh` after deleting `.env`.
 
