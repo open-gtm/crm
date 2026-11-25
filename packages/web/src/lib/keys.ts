@@ -16,6 +16,7 @@ export const qk = {
   aggregate: (o: string, params: unknown) => ["records", o, "aggregate", params] as const,
   board: (params: unknown) => ["records", "deal", "board", params] as const,
   timeline: (id: string) => ["timeline", id] as const,
+  files: (id: string) => ["files", id] as const,
   views: (o: string) => ["views", o] as const,
   users: (q: string) => ["users", q] as const,
   search: (q: string, objects?: string) => ["search", q, objects ?? ""] as const,

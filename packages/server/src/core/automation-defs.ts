@@ -92,7 +92,7 @@ export type Action = Step;
 
 const EventTrigger = z.object({
   type: z.literal("event"),
-  event: z.string().describe("e.g. deal.created, contact.updated, deal.stage_changed, lead.converted, <object>.archived, <object>.restored, <object>.merged"),
+  event: z.string().describe("e.g. deal.created, contact.updated, deal.stage_changed, lead.converted, quote.sent, quote.accepted, <object>.archived, <object>.restored, <object>.merged"),
   changed_fields: z.array(z.string()).max(50).optional().describe("For *.updated: run only when one of these fields changed"),
   include_reference_moves: z.boolean().optional().describe("For *.updated (and *.archived): also run when a merge moved a reference on the record, or archived it as a second copy (off by default)"),
 }).strict();
@@ -129,7 +129,7 @@ export const triggerOf = (t: AutomationRow["trigger"]): Trigger => ("type" in t 
 // ----------------------------------------------------------------------------------------------
 // Triggers
 
-const OP_EVENTS = new Set(["deal.stage_changed", "lead.converted"]);
+const OP_EVENTS = new Set(["deal.stage_changed", "lead.converted", "quote.sent", "quote.accepted"]);
 /**
  * Record events automations may react to beyond created/updated/archived: a restore brings a record
  * back, and a merge names the survivor. Deliberately not triggers: alert.fired (an alert would run an
@@ -141,11 +141,11 @@ const AUTOMATION_ONLY = new Set(["restored", "merged"]);
 
 export function triggerObject(schema: Schema, event: string, opts: { automation?: boolean } = {}): ObjectMeta {
   const m = /^([a-z][a-z0-9_]*)\.([a-z_]+)$/.exec(event);
-  if (!m) throw unprocessable(`Trigger event "${event}" must look like <object>.<created|updated|archived>, deal.stage_changed or lead.converted`);
+  if (!m) throw unprocessable(`Trigger event "${event}" must look like <object>.<created|updated|archived>, deal.stage_changed, lead.converted, quote.sent or quote.accepted`);
   const [, object, action] = m as unknown as [string, string, string];
   const extra = opts.automation && AUTOMATION_ONLY.has(action);
   if (!["created", "updated", "archived"].includes(action) && !OP_EVENTS.has(event) && !extra) {
-    throw unprocessable(`Unknown trigger event "${event}". Use <object>.created, <object>.updated, <object>.archived${opts.automation ? ", <object>.restored, <object>.merged" : ""}, deal.stage_changed or lead.converted`);
+    throw unprocessable(`Unknown trigger event "${event}". Use <object>.created, <object>.updated, <object>.archived${opts.automation ? ", <object>.restored, <object>.merged" : ""}, deal.stage_changed, lead.converted, quote.sent or quote.accepted`);
   }
   return getObject(schema, object);
 }

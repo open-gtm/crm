@@ -66,8 +66,9 @@ export class OutputFile {
     this.fd = openSync(this.tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
   }
 
-  write(s: string): void {
-    writeSync(this.fd, s);
+  write(s: string | Uint8Array): void {
+    if (typeof s === "string") writeSync(this.fd, s);
+    else writeSync(this.fd, s);
   }
 
   commit(): void {

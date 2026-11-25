@@ -41,9 +41,14 @@ Both protocol revisions are served on the same URL: 2025-11-25 and earlier (an `
 | `merge_records` | Merge up to 10 duplicates into a survivor: blanks filled from the duplicates (or `fields` chooses), references moved, duplicates archived with a pointer. **Destructive** (`destructiveHint: true`). Defaults to `dry_run: true`, which returns a `confirm_token`; applying needs `dry_run: false`, `confirm: true` and that token (single-use; refused if a record changed since the dry run). At most 1,000 references move per merge. |
 | `bulk_update_records`, `bulk_archive_records` | Change or archive up to 500 records by `ids` or by a filter (`where`). **Destructive.** Default to `dry_run: true`, which reports each record's outcome (and, by filter, the count and a sample) and a `confirm_token`; applying needs `dry_run: false`, `confirm: true` and, by filter or for more than 25 `ids`, the token (single-use). A run never touches a record its dry run didn't show. |
 | `get_timeline` | Activities, tasks and deal stage changes for a record. |
-| `log_activity` | Log a note, call, email or meeting about one or more records. |
+| `list_files` | The files attached to a record: name, size, detected type, when added. Contents are not available through MCP, and no tool attaches or removes a file: a person does that in the web app or with `crm files`. File names are data written by people. |
+| `log_activity` | Log a note, call, email or meeting about one or more records. A note's `body` is Markdown; the web app shows it formatted. |
 | `move_deal_stage` | Move a deal to a stage by name or ID (records history). Supports `dry_run`. |
 | `convert_lead` | Turn a qualified lead into a deal. Supports `dry_run`. |
+| `create_quote` | A draft quote for a deal, with its lines, in one call. Supports `dry_run`. Lines can then be changed with the record tools on `quote_line_item` while the quote is a draft. |
+| `send_quote` | Send a draft quote: its lines, amounts and terms are fixed from then on. It records the quote as sent; it does not email it. Supports `dry_run`. |
+| `accept_quote` | Accept a sent quote and make its order; supersedes the deal's other open quotes and marks the deal won (unless the workspace turned that off). Can't be undone (`destructiveHint: true`). Supports `dry_run`. |
+| `revise_quote` | The next version of a sent quote, as a new draft with the same lines. Supports `dry_run`. |
 | `capture_interest` | Match or create the contact and account, then create a lead and a `form_submitted` activity. |
 | `assign_owner` | Assign an owned record to a member by ID or email. |
 | `my_open_tasks` | The caller's open tasks. |

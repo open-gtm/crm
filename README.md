@@ -132,11 +132,35 @@ API keys are for machines. People sign in from a browser with an emailed code or
 
 ## The web UI
 
-The API serves a web app at `PUBLIC_URL` (the Docker image includes it): lists with filters, sorting, saved views and inline editing, record pages with related records and a timeline, a deals board, your tasks and inbox, a command palette, and settings for members, roles, API keys, webhooks and the audit log, each shown only when your role allows it. Every screen is built from your workspace's metadata, so custom objects and fields work with no change. Sign in at `/sign-in`, or open a link from `docker compose run --rm api sign-in-link --email you@example.com` (outside Docker: `hl-crm-db-server sign-in-link …`). `WEB_UI=false` turns it off for an API-only deployment. To run it in development, retheme it or fork it, see [`packages/web/README.md`](packages/web/README.md).
+The API serves a web app at `PUBLIC_URL` (the Docker image includes it): lists with filters, sorting, saved views and inline editing, record pages with related records, notes, files and a timeline, a deals board, your tasks and inbox, a command palette, and settings for members, roles, API keys, webhooks and the audit log, each shown only when your role allows it. Every screen is built from your workspace's metadata, so custom objects and fields work with no change. Sign in at `/sign-in`, or open a link from `docker compose run --rm api sign-in-link --email you@example.com` (outside Docker: `hl-crm-db-server sign-in-link …`). `WEB_UI=false` turns it off for an API-only deployment. To run it in development, retheme it or fork it, see [`packages/web/README.md`](packages/web/README.md).
 
 ## Use it from the command line
 
 The `crm` CLI keeps the workspace schema in a file you review and apply (`crm schema pull`, `plan`, `apply`), imports and exports CSV, and manages keys, members and roles. It isn't on npm yet: build it from source. See [`docs/cli.md`](docs/cli.md).
+
+## Quotes and orders
+
+A quote is made for a deal, priced by its lines, sent, and accepted, which makes an order:
+
+```sh
+curl -s -X POST localhost:8787/v1/ops/create_quote -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"deal": "deal_…", "lines": [{"description": "Seats", "quantity": 12, "unit_price": 49.5}]}'
+curl -s -X POST localhost:8787/v1/ops/send_quote   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"quote": "quote_…"}'
+curl -s -X POST localhost:8787/v1/ops/accept_quote -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"quote": "quote_…"}'
+```
+
+A sent quote can't be changed (`revise_quote` makes the next version), and accepting one marks its deal won. Whether a quote needs a deal, and whether accepting marks the deal won, are workspace settings. See [`docs/data-model.md`](docs/data-model.md#quotes-and-orders-as-built).
+
+## Files and notes
+
+Any record can have files attached, and notes are written in Markdown and shown formatted:
+
+```sh
+curl -s -X POST "localhost:8787/v1/records/deal_…/files?name=contract.pdf" -H "Authorization: Bearer $KEY" --data-binary @contract.pdf
+curl -s -OJ localhost:8787/v1/files/file_…/content -H "Authorization: Bearer $KEY"
+```
+
+Files are kept in Postgres unless you set `FILE_STORE=s3`, are limited to 10 MB each by default, and are always sent as downloads (there is no virus scanner built in). See [`docs/data-model.md`](docs/data-model.md#files-and-notes).
 
 ## Custom objects
 

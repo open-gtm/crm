@@ -36,6 +36,8 @@ import "./routes-auth.js";
 import "./routes-read.js";
 import "./routes-write.js";
 import "./routes-packs.js";
+import "./routes-files.js";
+import "./routes-commerce.js";
 
 /** `credential`: what authenticated the request: its kind, its ID (for idempotency) and its rate-limit bucket. */
 export type Env = { Variables: { ctx: Ctx; requestId: string; credential: { kind: "key" | "session" | "oauth"; id: string; bucket: string } } };
@@ -382,6 +384,11 @@ function principalCtx(p: Principal & { oauth?: { grantId: string; clientId: stri
     ...(p.records ? { records: p.records } : {}), surface, requestId };
 }
 
+/** The upload route a request is for, if any: the one kind of route whose body isn't JSON (api/registry.ts `rawBody`). */
+function uploadRoute(method: string, path: string) {
+  return routes.find((r) => r.rawBody && r.method === method && new RegExp(`^${r.path.replace(/:[a-z_]+/g, "[^/]+")}/?$`).test(path));
+}
+
 export function buildApp(): Hono<Env> {
   const app = new Hono<Env>();
   // DENY rather than the default SAMEORIGIN: nothing here, the sign-in pages included, is meant to be framed.
@@ -390,7 +397,14 @@ export function buildApp(): Hono<Env> {
   // check accepts for the server-rendered form posts only (/auth pages, the OAuth consent at /oauth/authorize),
   // and only with `Sec-Fetch-Site: same-origin` (auth/tokens.ts `originRefusal`).
   app.use("*", secureHeaders({ xFrameOptions: "DENY" }));
-  app.use("*", bodyLimit({ maxSize: 1024 * 1024, onError: (c) => c.json({ code: "payload_too_large", detail: "Request body is larger than 1 MB" }, 413) }));
+  // Request bodies are JSON of at most 1 MB, except a file upload (a route with `rawBody`), which has its own limit.
+  const jsonLimit = bodyLimit({ maxSize: 1024 * 1024, onError: (c) => c.json({ code: "payload_too_large", detail: "Request body is larger than 1 MB" }, 413) });
+  app.use("*", (c, next) => {
+    const upload = uploadRoute(c.req.method, c.req.path);
+    if (!upload) return jsonLimit(c, next);
+    const max = upload.rawBody!.maxBytes();
+    return bodyLimit({ maxSize: max, onError: (cc) => cc.json({ code: "payload_too_large", detail: `The file is larger than ${Math.floor(max / (1024 * 1024))} MB` }, 413) })(c, next);
+  });
   app.use("*", async (c, next) => {
     const incoming = c.req.header("x-request-id");
     const requestId = incoming && /^[\w.-]{1,100}$/.test(incoming) ? incoming : randomUUID();
@@ -611,6 +625,8 @@ function mount(app: Hono<Env>, r: (typeof routes)[number]) {
       if (containsNul(json)) throw new ApiError(422, "validation_failed", NUL_REFUSED);
       body = r.body.parse(json);
     }
+    // A file upload: the bytes as sent (the body limit above has bounded them).
+    const raw = r.rawBody ? Buffer.from(await c.req.arrayBuffer()) : undefined;
     const rawQuery = c.req.query();
     if (containsNul(rawQuery) || containsNul(c.req.param())) throw new ApiError(422, "validation_failed", NUL_REFUSED);
     const query = r.query ? r.query.parse(rawQuery) : rawQuery;
@@ -637,7 +653,7 @@ function mount(app: Hono<Env>, r: (typeof routes)[number]) {
           throw new ApiError(429, "rate_limited", "Too many requests for this key; slow down (this request counts as several)");
         }
       }
-      return await serve(c, r, ctx, credential, body, query, idemKey);
+      return await serve(c, r, ctx, credential, body, query, idemKey, raw);
     } finally {
       leave();
     }
@@ -650,14 +666,17 @@ function mount(app: Hono<Env>, r: (typeof routes)[number]) {
  * one connected app (its grant, across token refreshes).
  * Work charged afterwards (`charge`) goes to the credential's bucket.
  */
-async function serve(c: Context<Env>, r: (typeof routes)[number], ctx: Ctx, credential: Env["Variables"]["credential"], body: unknown, query: unknown, idemKey: string | undefined) {
+async function serve(c: Context<Env>, r: (typeof routes)[number], ctx: Ctx, credential: Env["Variables"]["credential"], body: unknown, query: unknown, idemKey: string | undefined,
+  raw?: Buffer) {
   const charge = (tokens: number) => { if (tokens > 0) takeToken(credential.bucket, Math.ceil(tokens), true); };
-  const args = { ctx, params: c.req.param() as Record<string, string>, body: body as never, query: query as never, headers: c.req.raw.headers, charge };
+  const args = { ctx, params: c.req.param() as Record<string, string>, body: body as never, raw, query: query as never, headers: c.req.raw.headers, charge };
   const prepared = r.prepare ? await r.prepare(args as never) : undefined;
   const credId = credential.id;
   const result = await withTenant(ctx.tenantId, async (tx) => {
     const useIdem = isWrite(r.method) && idemKey;
-    const bodyHash = sha256(canonicalJson({ method: r.method, path: c.req.path, body: body ?? null }));
+    // An upload's fingerprint is its bytes and its query (the file's name), so a retry replays and a different file is refused.
+    const bodyHash = sha256(canonicalJson({ method: r.method, path: c.req.path, body: body ?? null,
+      ...(raw ? { raw: sha256(raw).toString("hex"), query: query ?? null } : {}) }));
     if (useIdem) {
       const claimed = await claimIdempotencyKey(tx, { tenantId: ctx.tenantId, credentialId: credId, credential: credential.kind, key: idemKey, method: r.method,
         path: c.req.path, bodyHash });
@@ -682,5 +701,7 @@ async function serve(c: Context<Env>, r: (typeof routes)[number], ctx: Ctx, cred
   for (const [k, v] of Object.entries(result.headers ?? {})) c.header(k, v);
   // A text body (a CSV export) is sent as is; the handler sets its Content-Type.
   if (typeof result.body === "string") return c.body(result.body, result.status as 200);
+  // Bytes (a file download) likewise.
+  if (result.body instanceof Uint8Array) return c.body(new Uint8Array(result.body), result.status as 200);
   return c.json(result.body as object, result.status as 200);
 }

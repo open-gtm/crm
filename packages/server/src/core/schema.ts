@@ -9,7 +9,7 @@ import { masterKey } from "../config.js";
 import { audit } from "./audit.js";
 import {
   CATALOG, ENTITIES, isEntity, OWNER_FIELD,
-  type FieldOptions, type FieldType, type JsonShape, type Sensitivity,
+  type CatalogObject, type FieldOptions, type FieldType, type JsonShape, type Sensitivity,
 } from "./catalog.js";
 import type { Ctx } from "./context.js";
 import { emit } from "./events.js";
@@ -70,14 +70,14 @@ export interface Schema {
   byId: Map<string, ObjectMeta>;
 }
 
-const MODULES = ["core", "sales"] as const;
+const MODULES = ["core", "sales", "commerce"] as const;
 /** Names that collide with Object.prototype members; lookups keyed by them misbehave in plain objects. */
 const PROTOTYPE_NAMES = ["constructor", "prototype", "__proto__", "tostring", "valueof", "hasownproperty", "isprototypeof",
   "propertyisenumerable", "tolocalestring", "__definegetter__", "__definesetter__", "__lookupgetter__", "__lookupsetter__"];
 const RESERVED_NAMES = new Set([
   ...Object.keys(ENTITIES), ...PROTOTYPE_NAMES, "record", "records", "object", "objects", "field", "fields", "schema", "workspace",
   "member", "api_key", "audit", "event", "query", "search", "me", "ops",
-  "product", "price", "price_book", "quote", "order", "contract", "entitlement", "payment_schedule", "invoice", "payment",
+  "product", "price", "price_book", "quote", "quote_line_item", "order", "order_line_item", "contract", "entitlement", "payment_schedule", "invoice", "payment",
 ]);
 const RESERVED_FIELD_NAMES = new Set(["id", "object", "created_at", "updated_at", "created_by", "updated_by", "version",
   "archived_at", "external_ids", "related_to", "display_name", "included", "merged_into", "merge_chain", ...PROTOTYPE_NAMES]);
@@ -90,7 +90,7 @@ const DISPLAY_TYPES: readonly FieldType[] = ["text", "email", "phone", "url"];
 const MAX_FIELDS_EVER = 500;
 const RESERVED_PREFIXES = new Set([...CATALOG.map((o) => o.id_prefix), ...Object.values(ENTITIES).map((e) => e.prefix),
   "prod", "price", "quote", "ord", "ctr", "ent", "psch", "inv", "pay", "qli", "oli", "cli", "sitm", "ili", "palloc", "fld", "obj",
-  "evt", "whk", "dlv", "auto", "run", "key", "usr", "svc", "alr", "ntf", "ws"]);
+  "evt", "whk", "dlv", "auto", "run", "key", "usr", "svc", "alr", "ntf", "ws", "file", "role", "pset"]);
 
 /** Per-process cache, one schema per workspace, keyed by schema_token (migration 009): a value never reused, even after a rollback. */
 const cache = new Map<string, Schema>();
@@ -156,8 +156,8 @@ export function getObject(schema: Schema, apiName: string): ObjectMeta {
 export const isModuleOn = (schema: Schema, obj: ObjectMeta) => !obj.module || schema.modules.includes(obj.module);
 
 /** Seeds the standard objects into a new workspace. */
-export async function seedStandardObjects(tx: Tx, tenantId: string): Promise<void> {
-  for (const o of CATALOG) {
+export async function seedStandardObjects(tx: Tx, tenantId: string, objects: readonly CatalogObject[] = CATALOG): Promise<void> {
+  for (const o of objects) {
     const objectId = uuidv7();
     await insertStandardObject(tx, { tenantId, id: objectId, apiName: o.api_name, label: o.label, pluralLabel: o.plural_label, description: o.description,
       idPrefix: o.id_prefix, module: o.module, table: o.table, owned: o.owned });
@@ -763,6 +763,7 @@ export async function setModules(tx: Tx, ctx: Ctx, modules: string[], dryRun: bo
   const unknown = modules.filter((m) => !(MODULES as readonly string[]).includes(m));
   if (unknown.length) throw unprocessable(`Unknown or unavailable modules: ${unknown.join(", ")}. Available: ${MODULES.join(", ")}`);
   if (!modules.includes("core")) throw unprocessable("The core module cannot be turned off");
+  if (modules.includes("commerce") && !modules.includes("sales")) throw unprocessable("The commerce module needs the sales module: a quote is made for a deal");
   const turningOff = schema.modules.filter((m) => !modules.includes(m));
   for (const m of turningOff) {
     for (const o of schema.objects.values()) {

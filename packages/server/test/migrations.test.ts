@@ -48,7 +48,7 @@ describe("migrations", () => {
     expect(applied).toEqual(["001_platform.sql", "002_schema_engine.sql", "003_core_sales.sql", "004_events_webhooks_automations.sql",
       "005_alerts_notifications.sql", "006_roles.sql", "007_chain_order_event_retries.sql", "008_object_field_permissions.sql", "009_schema_token.sql",
       "010_people_sign_in.sql", "012_views_preferences.sql", "013_merges.sql", "014_oauth_for_mcp.sql", "016_automation_engine.sql",
-      "017_field_types_packs.sql", "018_custom_object_owner.sql", "019_permission_sets.sql"]);
+      "017_field_types_packs.sql", "018_custom_object_owner.sql", "019_permission_sets.sql", "020_files.sql", "021_commerce.sql"]);
     expect(await migrate(url)).toEqual([]);
   });
 
@@ -84,7 +84,7 @@ describe("migrations", () => {
 
     const later = await migrate(url);
     expect(later).toEqual(["010_people_sign_in.sql", "012_views_preferences.sql", "013_merges.sql", "014_oauth_for_mcp.sql", "016_automation_engine.sql",
-      "017_field_types_packs.sql", "018_custom_object_owner.sql"]);
+      "017_field_types_packs.sql", "018_custom_object_owner.sql", "020_files.sql", "021_commerce.sql"]);
 
     // 017 replaced the type CHECK on fields by its own definition, which the old fields pass and the new types too.
     const checks = await sql<{ conname: string; def: string }[]>`
@@ -169,7 +169,7 @@ describe("migrations", () => {
       return tx<{ v: string }[]>`SELECT schema_version::text AS v FROM tenants`;
     });
 
-    expect(await migrate(url)).toEqual(["018_custom_object_owner.sql"]);
+    expect(await migrate(url)).toEqual(["018_custom_object_owner.sql", "020_files.sql", "021_commerce.sql"]);
 
     const fields = async (o: string) => (await call("GET", `/v1/objects/${o}`, { key: ws.keys.admin })).json.data.fields as { name: string; type: string; standard?: boolean }[];
     expect((await fields("visit")).map((f) => [f.name, f.type, f.standard])).toEqual([["title", "text", undefined], ["owner", "relation", true]]);
@@ -215,7 +215,7 @@ describe("migrations", () => {
       return { clerk: clerk!.id, user: user!.id, bot: bot!.id };
     });
 
-    expect(await migrate(url)).toEqual(["019_permission_sets.sql"]);
+    expect(await migrate(url)).toEqual(["019_permission_sets.sql", "020_files.sql", "021_commerce.sql"]);
 
     const inTenant = <T>(fn: (tx: postgres.TransactionSql) => Promise<T>) => sql.begin(async (tx) => {
       await tx`SELECT set_config('app.tenant_id', ${tenant}, true)`;
@@ -255,5 +255,21 @@ describe("migrations", () => {
     expect(grants).toEqual({ held: true, roles: false });
     const [rls] = await sql<{ on: boolean; forced: boolean }[]>`SELECT relrowsecurity AS on, relforcerowsecurity AS forced FROM pg_class WHERE relname = 'member_permission_sets'`;
     expect(rls).toEqual({ on: true, forced: true });
+
+    // A workspace made before the commerce module (this one, written in SQL, has no objects at all) gets the standard
+    // objects it lacks from the catalog after the migrations, each logged as a schema change, and the module turned on.
+    const after = await inTenant(async (tx) => ({
+      objects: (await tx<{ api_name: string }[]>`SELECT api_name FROM objects WHERE is_system ORDER BY api_name`).map((o) => o.api_name),
+      quoteFields: (await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM fields f JOIN objects o ON o.id = f.object_id WHERE o.api_name = 'quote'`)[0]!.n,
+      modules: (await tx<{ modules: string[] }[]>`SELECT modules FROM tenants`)[0]!.modules,
+      logged: (await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM schema_changes WHERE change_type = 'object_created' AND actor_type = 'system'`)[0]!.n,
+    }));
+    for (const o of ["contact", "deal", "quote", "quote_line_item", "order", "order_line_item"]) expect(after.objects).toContain(o);
+    expect(after.quoteFields).toBeGreaterThan(10);
+    expect(after.modules).toEqual(["core", "sales", "commerce"]);
+    expect(after.logged).toBe(after.objects.length);
+    // Running the migrator again adds nothing more.
+    expect(await migrate(url)).toEqual([]);
+    expect((await inTenant((tx) => tx<{ n: number }[]>`SELECT count(*)::int AS n FROM objects`))[0]!.n).toBe(after.objects.length);
   });
 });

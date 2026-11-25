@@ -24,7 +24,7 @@ Every create and update can be sent with `"dry_run": true` first: it returns a p
 | Schedule | `{"type": "schedule", "daily": {"at": "09:00"}, "timezone": "Europe/Berlin"}` | no record |
 | On request | `{"type": "manual", "object": "contact"}` (`object` optional) | the record asked for, or none |
 
-**Events** that can trigger: `<object>.created`, `<object>.updated` (optionally only when one of `changed_fields` changed), `<object>.archived`, `<object>.restored`, `<object>.merged` (runs on the survivor), `deal.stage_changed` and `lead.converted`, for every object including custom ones.
+**Events** that can trigger: `<object>.created`, `<object>.updated` (optionally only when one of `changed_fields` changed), `<object>.archived`, `<object>.restored`, `<object>.merged` (runs on the survivor), `deal.stage_changed`, `lead.converted`, `quote.sent` and `quote.accepted`, for every object including custom ones.
 
 Deliberately **not** triggers:
 

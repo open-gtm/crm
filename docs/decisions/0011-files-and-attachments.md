@@ -1,6 +1,31 @@
 # 0011: Files and attachments
 
-Status: proposed (2026-11-17). Not built. Open for discussion before any code is written.
+Status: accepted (2026-11-24), and built as far as the next section says. What follows it is the proposal as it was discussed, kept for the parts still to come.
+
+## Decided and built
+
+The four open questions were answered:
+
+1. **Where the bytes live:** Postgres by default, S3-compatible as an option (`FILE_STORE=s3`). Metadata is always in Postgres under row-level security.
+2. **Limits:** 10 MB per file (`FILE_MAX_MB`) and 1 GB per workspace (`FILE_QUOTA_MB`) unless the operator says otherwise, and 100 files per record.
+3. **No scanner:** acceptable. Files are accepted and marked `unscanned`, and are only ever sent as downloads. The scanner hook is not built.
+4. **Merges** keep every file: the duplicates' files move to the survivor.
+
+**Built first: files attached to records**, not yet a `file` field type. A file belongs to one record of any object (a note is a record too, so notes carry files), and follows that record's object access: read lists and downloads, write attaches and removes. This gives every object files at once, with no schema change, and it is the smaller step: a field type has to pass through every layer of the field type registry (filters, CSV, retyping, the OpenAPI document) and adds per-field access and restricted files. The `files` table is the one a field type would use too.
+
+- **Tables** (migration 020): `files` (name, size, detected content type, SHA-256, store, key version, scan status, who and when; removed files keep their row) and `file_blobs` (the bytes, for the Postgres store), both with forced row-level security.
+- **Routes:** `POST /v1/records/{id}/files?name=…` with the bytes as the body (its own size limit; the 1 MB limit for JSON stays), `GET /v1/records/{id}/files`, `GET /v1/files/{id}`, `GET /v1/files/{id}/content`, `DELETE /v1/files/{id}` and `GET /v1/files/limits`.
+- **Access** is decided through the record each time: knowing a file ID gives nothing. Uploads, downloads and removals are audited (`file.uploaded`, `file.downloaded`, `file.deleted`), with the file's ID and size, never its name.
+- **Downloads** are always `Content-Disposition: attachment` with `application/octet-stream`, `nosniff` and a sandboxing content security policy, whatever the file is. The content type kept with a file is detected from its first bytes, for showing; the uploader's `Content-Type` is ignored.
+- **Names** are one line of text with no path separator or control character; others are refused, not cleaned.
+- **The S3 store** needs no SDK: put, get and delete, signed with Signature Version 4. Bytes kept there are sealed with the workspace's data key first (AES-GCM, bound to the workspace and the file), because the store knows nothing about workspaces: a bucket's contents are useless without the database. A file keeps the store it was written to when `FILE_STORE` changes.
+- **Integrity:** a download is checked against the stored SHA-256 before it is sent.
+- **Removal** deletes the bytes and keeps the row, marked removed.
+- **Elsewhere:** `crm files list|attach|download|remove`, `listFiles`, `uploadFile` and `downloadFile` in the SDK, a Files section on every record page and under each note in the web UI, and `list_files` on the ops MCP server (names and sizes only: no tool reads, attaches or removes a file).
+
+**Not built yet:** the `file` field type (and with it per-field access, restricted files and file columns in CSV); the scanner hook; signed URLs (the server streams every download itself, also from S3); `crm data export-files`; events for files (automations and webhooks don't see an upload); and a sweep for objects left in a bucket when a transaction rolled back after the upload, or when a workspace is deleted. `erase_contact`, which would delete a contact's files, isn't built either.
+
+---
 
 ## Context
 

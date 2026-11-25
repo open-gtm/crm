@@ -439,7 +439,7 @@ describe("hostile packs", () => {
       ["bad name", (p) => { p.manifest.name = "../../etc"; }],
       ["bad version", (p) => { p.manifest.version = "1.0"; }],
       ["future server", (p) => { (p.manifest as Record<string, unknown>).min_server_version = "999.0.0"; }],
-      ["module off", (p) => { (p.manifest as Record<string, unknown>).modules = ["commerce"]; }],
+      ["module off", (p) => { (p.manifest as Record<string, unknown>).modules = ["billing"]; }],
       ["control characters", (p) => { (p.manifest as Record<string, unknown>).description = "ok\u001b[2Jcleared"; }],
       ["unknown manifest key", (p) => { (p.manifest as Record<string, unknown>).run = "rm -rf /"; }],
       ["IDs in the schema", (p) => { (p.schema!.objects as Record<string, unknown>[])[0]!.id = "obj_00000000000000000000000000"; }],

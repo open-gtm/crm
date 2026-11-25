@@ -269,6 +269,15 @@ export const BASE_SCHEMAS: Record<string, JsonSchema> = {
     apps_revoked: { type: "integer", description: "After disabling a member: the connected apps revoked (absent when none)" },
     invitation: { ...enumOf("queued"), description: "When added with send_invite" },
   }, ["id", "name", "role", "role_name", "active"]),
+  File: object({
+    id: { type: "string", description: "file_…" }, record: { type: "string", description: "The record it is attached to" }, name: str,
+    size: { type: "integer", description: "Bytes" },
+    content_type: { type: "string", description: "Detected from the file's first bytes, for showing; downloads are always sent as attachments" },
+    sha256: { type: "string", description: "Hex SHA-256 of the bytes" },
+    scan_status: { ...enumOf("unscanned", "clean", "infected"), description: "No scanner is built in: files are unscanned" },
+    uploaded_by: { ...nullable(str), description: "The member who attached it (usr_…); null for a service account or the system" },
+    created_at: time,
+  }),
   MemberSignIn: object({ has_password: bool, sso_linked: bool, last_sign_in_at: nullable(time), active_sessions: int }),
   Role: object({
     id: str, key: str, name: str, description: str, permissions: list(str),

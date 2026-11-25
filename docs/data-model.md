@@ -1,6 +1,6 @@
 # Data model
 
-Status: **Core and Sales are built** (migrations exist). **Commerce and Post-sale and billing are designed, not built:** sections 5.4 and 5.5, the quote, order, contract, entitlement, payment schedule, invoice and payment state machines in section 6, and the operations that use them in section 7 describe a future design. No tables, API routes or tools exist for them yet (see [`ROADMAP.md`](../ROADMAP.md)). Everything here follows the platform rules: tenant isolation, the API as the single source of truth, and the admin/ops split.
+Status: **Core and Sales are built** (migrations exist), and so are **quotes and orders**, the first part of Commerce ([ADR 0014](decisions/0014-quotes-and-orders.md); see [Quotes and orders as built](#quotes-and-orders-as-built)). **The rest of Commerce (products, prices, price books) and Post-sale and billing are designed, not built:** sections 5.4 and 5.5, the quote, order, contract, entitlement, payment schedule, invoice and payment state machines in section 6, and the operations that use them in section 7 describe a future design. No tables, API routes or tools exist for them yet (see [`ROADMAP.md`](../ROADMAP.md)). Everything here follows the platform rules: tenant isolation, the API as the single source of truth, and the admin/ops split.
 
 Contents:
 
@@ -50,10 +50,10 @@ Standard objects come in modules, so a tenant uses only what fits their business
 |---|---|---|---|
 | **Core** (always on) | Contact, Account, AccountContact, Activity, Task | none | Built |
 | **Sales** | Lead, Pipeline, Stage, Deal, DealContact, DealStageHistory | Core | Built |
-| **Commerce** | Product, Price, PriceBook, Quote, QuoteLineItem, Order, OrderLineItem | Sales | Designed, not built |
+| **Commerce** | Quote, QuoteLineItem, Order, OrderLineItem (built); Product, Price, PriceBook (designed) | Sales | Quotes and orders built |
 | **Post-sale and billing** | Contract, ContractLineItem, Entitlement, PaymentSchedule, ScheduleItem, Invoice, InvoiceLineItem, Payment, PaymentAllocation | Commerce | Designed, not built |
 
-**New workspaces start with every available module turned on.** Today that means Core and Sales. When the commerce modules are built, Commerce and Post-sale and billing are on by default for new workspaces too. Existing workspaces get a migration that turns them on, which is harmless because a module with no records changes nothing.
+**New workspaces start with every available module turned on.** Today that means Core, Sales and Commerce. When the commerce modules are built, Commerce and Post-sale and billing are on by default for new workspaces too. Existing workspaces get a migration that turns them on, which is harmless because a module with no records changes nothing.
 
 **Designing around the commerce modules without building them.** The Commerce and billing tables in §5.4 and §5.5 are designed now, so the current model doesn't make choices that building them would have to undo. In particular:
 
@@ -151,7 +151,29 @@ Every type can be `required`, take a `default` (checked when the field is saved)
 
 **duration.** Whole seconds, from 0 to 10^11. Input is a number of seconds, numeric text, or an ISO 8601 duration made of weeks, days, hours, minutes and whole seconds (`PT1H30M`, `P2W`, `P1DT2H`). Years and months are refused because they have no fixed length, and so are fractional seconds. Filters take the same forms. `validation.min` and `validation.max` are in seconds. The suggested display is compact, largest unit first, with zero units left out: `1d 2h 3m 4s`, `1h 30m`, `0s`.
 
-**Not built: files and attachments.** See the proposal in [ADR 0011](decisions/0011-files-and-attachments.md).
+**Files** are attached to records, not held in a field: see [Files and notes](#files-and-notes) below. A `file` field type is not built ([ADR 0011](decisions/0011-files-and-attachments.md)).
+
+### Files and notes
+
+**Files.** Any record of any object can have files attached (up to 100): a signed contract on a deal, a résumé on a candidate, a photo on a custom object's record. A file follows its record's object access: read on the object lists and downloads its files, write attaches and removes them. Knowing a file's ID gives nothing.
+
+```sh
+# Attach: the request body is the file's bytes, name= is its name
+curl -s -X POST "localhost:8787/v1/records/deal_…/files?name=contract.pdf" -H "Authorization: Bearer $KEY" --data-binary @contract.pdf
+curl -s localhost:8787/v1/records/deal_…/files -H "Authorization: Bearer $KEY"                 # list
+curl -s -OJ localhost:8787/v1/files/file_…/content -H "Authorization: Bearer $KEY"            # download
+curl -s -X DELETE localhost:8787/v1/files/file_… -H "Authorization: Bearer $KEY"              # remove
+```
+
+- **Limits.** 10 MB per file and 1 GB per workspace by default (`FILE_MAX_MB`, `FILE_QUOTA_MB`); `GET /v1/files/limits` shows them. The 1 MB limit on JSON bodies is unchanged.
+- **Where the bytes are.** In Postgres by default (`file_blobs`), so one backup covers everything. `FILE_STORE=s3` keeps new files in an S3-compatible bucket (`S3_ENDPOINT`, `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`), sealed with the workspace's data key: the bucket alone can't be read, so `HLCRM_MASTER_KEY` and the database are needed to restore them. Back the bucket up with the database.
+- **No virus scanner is built in.** Files are `unscanned` and are always sent as a download (`attachment`, `application/octet-stream`, `nosniff`), never opened in the page. The `content_type` a file shows is detected from its first bytes; the uploader's is ignored.
+- **Names** are one line with no `/`, `\` or control character.
+- **A file's record.** Archiving a record keeps its files (they can be read, not added to). A merge moves the duplicates' files to the survivor. Removing a file deletes its bytes; its row stays, marked removed, so the audit log still names it.
+- **Audited:** `file.uploaded`, `file.downloaded` and `file.deleted`, with the file's ID and size, not its name.
+- **Not built:** events for files (automations and webhooks don't see them), a scanner hook, and file columns in CSV exports.
+
+**Notes.** A note is the `note` activity: a `subject` (its title) and a `body`, related to one or more records, and editable afterwards (other activities are history and aren't). A note's body is **Markdown**: headings, lists, bold, italic, code and links. The web UI shows notes formatted in a Notes section on every record page, with an editor and a preview, and renders the Markdown itself: HTML in a note is shown as text, and a link is a link only when it is a plain `http(s)`, `mailto` or `tel` address. A note is a record, so it carries files like any other: attach to the note's ID (`act_…`). Through the API, the CLI and MCP, a note is written with `log_activity` and changed with a normal update, as before.
 
 ---
 
@@ -305,9 +327,42 @@ CHECK that `stage_id` belongs to `pipeline_id` (composite FK `(tenant_id, pipeli
 **deal_stage_history** (no std, append-only): `tenant_id`, `id`, `deal_id` FK, `from_stage_id`, `to_stage_id`, `changed_at`, `changed_by`, `time_in_from_stage interval`.
 IX `(tenant_id, deal_id, changed_at)`.
 
-### 5.4 Commerce module (designed, not built)
+### 5.4 Commerce module
 
-> Design only: none of these tables exist yet.
+#### Quotes and orders as built
+
+Migration 021, `core/commerce.ts`, [ADR 0014](decisions/0014-quotes-and-orders.md). Quotes, quote lines, orders and order lines are standard objects (`quote`, `quote_line_item`, `order`, `order_line_item`; IDs `quote_…`, `qli_…`, `ord_…`, `oli_…`), read and written like any other.
+
+```sh
+# A draft quote for a deal, with its lines (the deal's account, primary contact and name are taken over)
+curl -s -X POST localhost:8787/v1/ops/create_quote -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{
+  "deal": "deal_…", "valid_until": "2027-01-31", "terms": "Net 30",
+  "lines": [ {"description": "Seats", "quantity": 12, "unit_price": 49.5},
+             {"description": "Onboarding", "unit_price": 800, "discount": 100, "tax": 140} ]}'
+
+# Lines are records: add, change or archive them while the quote is a draft
+curl -s -X POST localhost:8787/v1/objects/quote_line_item/records -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"quote": "quote_…", "description": "Support hours", "quantity": 2.5, "unit_price": 120}'
+
+curl -s -X POST localhost:8787/v1/ops/send_quote   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"quote": "quote_…"}'
+curl -s -X POST localhost:8787/v1/ops/accept_quote -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"quote": "quote_…"}'   # makes the order
+curl -s -X POST localhost:8787/v1/ops/revise_quote -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"quote": "quote_…"}'   # the next version, as a draft
+```
+
+- **A quote** has a `name` (the deal's, unless given), a `number` (`Q-0001`, from creation), its `deal`, an `account` and/or a `contact`, a `status`, a `revision` (1, then 2 for its first revision), `subtotal`, `discount`, `tax` and `total` (set from its lines, never written), `currency` (the workspace's), `valid_until`, `terms`, `sent_at`, `accepted_at` and an owner. Custom fields work as on any object.
+- **A quote line** has a `description`, a `quantity` (default 1, up to 4 decimals), a `unit_price`, a `discount` and a `tax` (amounts), a `line_total` (quantity × unit price, rounded, less discount, plus tax) and a `position`. Lines change only while their quote is a draft.
+- **Statuses.** Quote: draft → sent → accepted, rejected or expired; a revision supersedes the version before it. Sent, accepted and superseded are reached only through the operations; rejected and expired are set with a normal update. Order: pending → active → fulfilled, or cancelled, by a normal update.
+- **Sent means fixed.** After `send_quote`, the quote's name, lines, amounts, terms and validity can't change (409, and the database refuses too). `revise_quote` makes the next version: a new draft with the same lines, numbered `Q-0007-2`. Sending it supersedes the earlier one. Sending records the quote as sent; it sends no email and makes no document.
+- **Accepting makes the order.** `accept_quote` copies the quote's amounts, terms, customer and lines into an order (`O-0001`), supersedes the deal's other open quotes, and moves the deal to its pipeline's first won stage. A quote past `valid_until` isn't accepted. A deal has one accepted quote at most. Orders are never created or changed directly, apart from their status.
+- **Settings** (`GET /v1/commerce-settings`; `PATCH` needs `schema:manage`; Settings → Quotes and orders in the web UI): `quote_requires_deal` (default true; false lets a quote stand alone, for an account or a contact) and `accept_quote_marks_deal_won` (default true).
+- **Access.** `send_quote` needs write on `quote.status`; `accept_quote` also needs write on orders. The deal is marked won only for a caller who may change `deal.stage`; otherwise it is left as it is and the result says so. A quote takes from its deal only what the caller can read there.
+- **Events and audit.** `quote.sent`, `quote.accepted` and `order.created` are events (automations and alerts can trigger on the first two, and on `order.created` like any creation). The audit log has `quote.sent`, `quote.accepted`, `quote.superseded`, `quote.revised` and `order.created`.
+- **Merges** of accounts or contacts move their quotes and orders to the survivor; what a sent quote said stays in its snapshot.
+- **Not built:** products, prices and price books (a line says what is sold in its description); tax calculation; a job that expires quotes; the deal's amount following its quote; orders without a quote; contracts and everything after them.
+
+#### The rest of the design
+
+> Of the tables below, quotes, quote_line_items, orders and order_line_items exist, in the shape described above (a quote line's product is not yet a foreign key, and terms on lines are left out). Products, price books and prices do not exist yet.
 
 **products**: `name`, `sku` (UQ per tenant), `description`, `type` (one_time, recurring, usage), `active bool`, `entitlement_template jsonb` (for example `[{"key":"seats","quantity_from":"line_quantity"},{"key":"feature.sso","quantity":1}]`), `usage_unit text NULL`.
 
@@ -357,7 +412,7 @@ A trigger keeps the sum of active allocations ≤ the payment amount, and update
 
 ## 6. State machines
 
-The Quote, Order, Contract, Entitlement, Payment schedule, Invoice and Payment rows below belong to the designed, not built, Commerce and Post-sale modules.
+The Contract, Entitlement, Payment schedule, Invoice and Payment rows below belong to the designed, not built, Post-sale module. Quote and Order are built, as described in [Quotes and orders as built](#quotes-and-orders-as-built): the quote's expiry job and `activate_order` are not.
 
 Statuses that tenants configure work like pipeline stages. **Tenants define the values and labels, and each value maps to a fixed system category.** Lifecycle operations and automations depend only on the categories. For example, a tenant can have lead statuses `new`, `contacted`, `demo_booked`, `nurture` and `qualified`, as long as each maps to one of `new`, `working`, `qualified`, `disqualified` or `converted`.
 
@@ -399,7 +454,7 @@ stateDiagram-v2
 
 ## 7. Lifecycle operations
 
-Every operation runs in one transaction with an idempotency key, dry-run, events and audit for every touched record, identical through REST (`POST /v1/ops/<name>`) and the ops MCP. Implementation notes (`create_quote`, `send_quote`, `revise_quote`, `accept_quote`, `activate_order`, `issue_invoice`, `record_payment` and `void_invoice` belong to the designed, not built, commerce modules; the others are built):
+Every operation runs in one transaction with an idempotency key, dry-run, events and audit for every touched record, identical through REST (`POST /v1/ops/<name>`) and the ops MCP. Implementation notes (`activate_order`, `issue_invoice`, `record_payment` and `void_invoice` belong to the designed, not built, modules; the others are built):
 
 | Operation | Notes |
 |---|---|

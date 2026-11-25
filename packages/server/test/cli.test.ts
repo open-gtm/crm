@@ -475,6 +475,27 @@ describe("crm roles, webhooks, access review and events", () => {
     expect((await crm(["permission-sets", "archive", key, "--yes"])).code).toBe(0);
   });
 
+  it("files: attach a local file to a record, list, download it back and remove it", async () => {
+    const contact = await create(ws.keys.ops, "contact", { first_name: "Filey", email: uniqueEmail("clifile") });
+    writeFileSync(file("brief.txt"), "The brief, line one.\nLine two.\n");
+    const attached = await crm(["files", "attach", contact.id, file("brief.txt"), "--json"]);
+    expect(attached.code, attached.err).toBe(0);
+    const info = JSON.parse(attached.out).data as { id: string; name: string; size: number; content_type: string };
+    expect(info).toMatchObject({ name: "brief.txt", size: 31, content_type: "text/plain" });
+    expect((await crm(["files", "list", contact.id])).out).toContain("brief.txt");
+    const out = file("copy.txt");
+    const got = await crm(["files", "download", info.id, "--output", out]);
+    expect(got.code, got.err).toBe(0);
+    expect(readFileSync(out, "utf8")).toBe("The brief, line one.\nLine two.\n");
+    // An existing file is not replaced without a yes.
+    expect((await crm(["files", "download", info.id, "--output", out, "--no-input"])).code).toBe(6);
+    expect((await crm(["files", "attach", contact.id, file("no-such-file.txt")])).code).toBe(2);
+    expect((await crm(["files", "list", "not an id"])).code).toBe(2);
+    expect((await crm(["files", "remove", info.id, "--no-input"])).code).toBe(6);
+    expect((await crm(["files", "remove", info.id, "--yes"])).code).toBe(0);
+    expect(JSON.parse((await crm(["files", "list", contact.id, "--json"])).out).data).toEqual([]);
+  });
+
   it("webhooks: list, get, test, deliveries; the secret goes to stdout alone", async () => {
     const hook = await call("POST", "/v1/webhooks", { key: ws.keys.admin, body: { url: "https://hooks.example.com/cli", events: ["contact.created"] } });
     const id = hook.json.data.id as string;
