@@ -104,6 +104,11 @@ export const REFERENCES: Reference[] = [
   { table: "record_links", column: "from_id", into: "record_registry", policy: "own" },
   { table: "records", column: "id", into: "record_registry", policy: "own" },
   { table: "merges", column: "survivor_id", into: "record_registry", policy: "own" },
+  // Quotes and orders name their customer of record. A merge re-points them; what a sent quote said stays in its snapshot.
+  { table: "quotes", column: "account_id", into: "accounts", policy: "move", object: "quote" },
+  { table: "quotes", column: "contact_id", into: "contacts", policy: "move", object: "quote" },
+  { table: "orders", column: "account_id", into: "accounts", policy: "move", object: "order" },
+  { table: "orders", column: "contact_id", into: "contacts", policy: "move", object: "order" },
   // A file belongs to its record. A merge moves the duplicates' files to the survivor with a statement of its own
   // (moveFiles, below, like alert state), so every document is kept: files are not values the survivor could already have.
   { table: "files", column: "record_id", into: "record_registry", policy: "own" },

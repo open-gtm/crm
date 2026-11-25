@@ -28,6 +28,7 @@ const NO_ID_ROUTES = new Set([
   "GET /v1/pipelines", "POST /v1/pipelines", "GET /v1/objects/:object/records", "GET /v1/search", "GET /v1/me/tasks",
   "GET /v1/members", "GET /v1/api-keys", "GET /v1/audit-log", "GET /v1/audit/verify",
   "GET /v1/access-review", "GET /v1/permissions", "GET /v1/roles", "GET /v1/permission-sets", "GET /v1/files/limits",
+  "GET /v1/commerce-settings", "PATCH /v1/commerce-settings",
   "GET /v1/webhooks", "POST /v1/webhooks", "GET /v1/automations",
   "GET /v1/me/notifications", "GET /v1/me/attention", "GET /v1/me/notification-preferences", "PATCH /v1/me/notification-preferences",
   "GET /v1/me/alerts", "GET /v1/alerts", "GET /v1/schema/export", "GET /v1/objects/:object/export",
@@ -50,7 +51,7 @@ const NO_ID_ROUTES = new Set([
 const BODY_ID_ROUTES = new Set([
   "POST /v1/objects/:object/records", "POST /v1/objects/:object/records/batch", "POST /v1/query",
   "POST /v1/ops/capture_interest", "POST /v1/ops/convert_lead", "POST /v1/ops/move_deal_stage", "POST /v1/ops/assign_owner",
-  "POST /v1/ops/log_activity", "POST /v1/api-keys", "POST /v1/members", "POST /v1/service-accounts", "POST /v1/roles", "POST /v1/permission-sets", "POST /v1/automations", "POST /v1/automations/test", "GET /v1/events",
+  "POST /v1/ops/log_activity", "POST /v1/ops/create_quote", "POST /v1/ops/send_quote", "POST /v1/ops/accept_quote", "POST /v1/ops/revise_quote", "POST /v1/api-keys", "POST /v1/members", "POST /v1/service-accounts", "POST /v1/roles", "POST /v1/permission-sets", "POST /v1/automations", "POST /v1/automations/test", "GET /v1/events",
   "POST /v1/me/alerts", "POST /v1/me/alerts/backtest", "POST /v1/alerts", "POST /v1/alerts/backtest",
   "POST /v1/schema/plan", "POST /v1/schema/apply", "POST /v1/objects/:object/import", "POST /v1/aggregate", "POST /v1/views",
   "POST /v1/ops/merge_records", "POST /v1/objects/:object/records/bulk_update", "POST /v1/objects/:object/records/bulk_archive",
@@ -65,6 +66,9 @@ beforeAll(async () => {
   const contact = await create(b.keys.ops, "contact", { first_name: "Bea", email: "bea@b-secret.example", account: acct.id });
   const deal = await create(b.keys.ops, "deal", { name: "B deal", primary_contact: contact.id });
   const lead = await create(b.keys.ops, "lead", { contact: contact.id, status: "qualified" });
+  const quote = await call("POST", "/v1/ops/create_quote", { key: b.keys.ops, body: { deal: deal.id, lines: [{ description: "B Secret line", unit_price: 5 }] } });
+  if (quote.status !== 200) throw new Error(`setup: quote ${JSON.stringify(quote.json)}`);
+  bIds.quote = quote.json.result.quote.id;
   const file = await app.request(`/v1/records/${contact.id}/files?name=b-secret.txt`, { method: "POST", headers: { Authorization: `Bearer ${b.keys.ops}` },
     body: new TextEncoder().encode("B Secret file") });
   if (file.status !== 201) throw new Error(`setup: file ${file.status}`);
@@ -168,6 +172,11 @@ describe("cross-tenant isolation", () => {
       ["POST", "/v1/api-keys", { name: "x", scopes: ["ops:read"], owner: bIds.service_account }],
       ["POST", "/v1/members", { email: "x@a.example", name: "x", role: bIds.role }],
       ["POST", "/v1/service-accounts", { name: "x", role: bIds.role }],
+      ["POST", "/v1/ops/create_quote", { deal: bIds.deal, lines: [{ description: "x", unit_price: 1 }] }],
+      ["POST", "/v1/ops/send_quote", { quote: bIds.quote }],
+      ["POST", "/v1/ops/accept_quote", { quote: bIds.quote }],
+      ["POST", "/v1/ops/revise_quote", { quote: bIds.quote }],
+      ["POST", "/v1/objects/quote_line_item/records", { quote: bIds.quote, description: "x", unit_price: 1 }],
       ["POST", "/v1/roles", { key: "copied", name: "x", copy_from: bIds.role }],
       ["POST", "/v1/permission-sets", { key: "copied_set", name: "x", copy_from: bIds.permission_set }],
       ["POST", "/v1/members", { email: "y@a.example", name: "y", role: "member", permission_sets: [bIds.permission_set] }],

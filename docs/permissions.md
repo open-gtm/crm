@@ -214,6 +214,10 @@ Route checks admit a key that has the needed access on at least one object; the 
   - `convert_lead`: write on the lead's `status`; read on contact and on `lead.contact`; write on deal and the fields it sets. The lead's account is copied to the deal only when the key can read `lead.account` (and then needs read on account). The default deal name is built from what the key can read of the contact and lead.
   - `move_deal_stage`: write on `deal.stage` (and `lost_reason` when sent). Leaving a lost stage clears `lost_reason` only for a key that can write it; otherwise it is left as it was.
   - `assign_owner`: write on the record's `owner` field.
+  - `create_quote`: write on quote (and on quote_line_item when lines are given); the quote and each line then go through the normal create. A quote takes its deal's account, primary contact and name only where the key can read them on the deal.
+  - `send_quote`: write on `quote.status`.
+  - `accept_quote`: write on `quote.status` and on order. The deal is moved to its won stage only for a key that can write `deal.stage`; otherwise it is left as it is and the result says so.
+  - `revise_quote`: write on quote and on quote_line_item.
   - `log_activity`: write on activity, read on every record in `related_to`.
   Bookkeeping the platform does after a change is not checked as the caller's write: a contact's lifecycle stage moving forward, history activities (`lead_converted`, `task_completed`), deal stage history, `last_activity_at`, account-contact links and a deal's probability from its stage.
 - **Copies.** When the platform copies a value from one record into another on a caller's behalf (a contact's account into a new lead, a lead's account into a deal, names into a default deal name), it copies only what the caller can read on the source; otherwise the copy is left empty. Platform-written activity subjects carry no record values (see History activities).

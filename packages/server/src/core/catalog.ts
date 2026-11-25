@@ -1,5 +1,5 @@
 /**
- * The standard object catalog: the single definition of the Core and Sales modules.
+ * The standard object catalog: the single definition of the Core, Sales and Commerce modules.
  * It is seeded into each workspace's metadata (objects, fields) when the workspace is
  * created, so standard and custom objects are discovered the same way.
  * Every `column` here must exist in the migrations; a test checks this.
@@ -60,7 +60,7 @@ export interface CatalogObject {
   plural_label: string;
   description: string;
   id_prefix: string;
-  module: "core" | "sales";
+  module: "core" | "sales" | "commerce";
   table: string;
   owned: boolean;
   fields: CatalogField[];
@@ -251,6 +251,107 @@ export const CATALOG: CatalogObject[] = [
       ] } },
     ],
   },
+  {
+    api_name: "quote", label: "Quote", plural_label: "Quotes", id_prefix: "quote", module: "commerce",
+    table: "quotes", owned: true,
+    description: "A priced offer, made for a deal (unless the workspace allows quotes without one). Add line items while it is a draft, "
+      + "then send_quote and accept_quote; accepting makes an order. A sent quote can't be changed: revise_quote makes the next version.",
+    fields: [
+      { api_name: "name", label: "Name", type: "text", column: "name", description: "Defaults to the deal's name." },
+      { api_name: "number", label: "Number", type: "text", column: "number", read_only: true },
+      { api_name: "deal", label: "Deal", type: "relation", column: "deal_id", create_only: true,
+        description: "The deal this quote prices. Its account and primary contact become the quote's.", options: { to: "deal", cardinality: "many_to_one" } },
+      { api_name: "account", label: "Account", type: "relation", column: "account_id", options: { to: "account", cardinality: "many_to_one" } },
+      { api_name: "contact", label: "Contact", type: "relation", column: "contact_id", options: { to: "contact", cardinality: "many_to_one" } },
+      { api_name: "status", label: "Status", type: "status", column: "status", options: {
+        initial: "draft", operation_only_categories: ["sent", "accepted", "superseded"], values: [
+          { key: "draft", label: "Draft", category: "draft" },
+          { key: "sent", label: "Sent", category: "sent" },
+          { key: "accepted", label: "Accepted", category: "accepted" },
+          { key: "rejected", label: "Rejected", category: "rejected" },
+          { key: "expired", label: "Expired", category: "expired" },
+          { key: "superseded", label: "Superseded", category: "superseded" },
+        ] } },
+      { api_name: "revision", label: "Version", type: "number", column: "quote_version", read_only: true,
+        description: "1 for a new quote; revise_quote makes the next." },
+      { api_name: "subtotal", label: "Subtotal", type: "currency", column: "subtotal_minor", read_only: true, description: "The lines' quantity times unit price." },
+      { api_name: "discount", label: "Discount", type: "currency", column: "discount_minor", read_only: true, description: "The lines' discounts." },
+      { api_name: "tax", label: "Tax", type: "currency", column: "tax_minor", read_only: true, description: "The lines' tax." },
+      { api_name: "total", label: "Total", type: "currency", column: "total_minor", read_only: true, description: "Subtotal less discount plus tax." },
+      { api_name: "currency", label: "Currency", type: "text", column: "currency", read_only: true },
+      { api_name: "valid_until", label: "Valid until", type: "date", column: "valid_until" },
+      { api_name: "terms", label: "Terms", type: "long_text", column: "terms" },
+      { api_name: "sent_at", label: "Sent at", type: "datetime", column: "sent_at", read_only: true },
+      { api_name: "accepted_at", label: "Accepted at", type: "datetime", column: "accepted_at", read_only: true },
+      owner,
+    ],
+  },
+  {
+    api_name: "quote_line_item", label: "Quote line", plural_label: "Quote lines", id_prefix: "qli", module: "commerce",
+    table: "quote_line_items", owned: false,
+    description: "One line of a quote: what is sold, how many and at what price. Lines can be added, changed and removed only while the quote is a draft.",
+    fields: [
+      { api_name: "quote", label: "Quote", type: "relation", column: "quote_id", required: true, create_only: true,
+        options: { to: "quote", cardinality: "many_to_one" } },
+      { api_name: "description", label: "Description", type: "text", column: "description", required: true },
+      { api_name: "quantity", label: "Quantity", type: "number", column: "quantity", description: "Defaults to 1. Up to 4 decimal places." },
+      { api_name: "unit_price", label: "Unit price", type: "currency", column: "unit_amount_minor", required: true },
+      { api_name: "discount", label: "Discount", type: "currency", column: "discount_minor", description: "An amount off this line." },
+      { api_name: "tax", label: "Tax", type: "currency", column: "tax_minor", description: "The tax on this line, as an amount (tax isn't calculated)." },
+      { api_name: "line_total", label: "Line total", type: "currency", column: "line_total_minor", read_only: true,
+        description: "Quantity times unit price, less discount, plus tax." },
+      { api_name: "position", label: "Position", type: "number", column: "position", description: "The line's place on the quote; new lines go last." },
+    ],
+  },
+  {
+    api_name: "order", label: "Order", plural_label: "Orders", id_prefix: "ord", module: "commerce",
+    table: "orders", owned: true,
+    description: "What a customer agreed to buy. Made by accept_quote from the quote and its lines; only its status changes afterwards.",
+    fields: [
+      { api_name: "name", label: "Name", type: "text", column: "name", read_only: true },
+      { api_name: "number", label: "Number", type: "text", column: "number", read_only: true },
+      { api_name: "quote", label: "Quote", type: "relation", column: "quote_id", read_only: true, options: { to: "quote", cardinality: "many_to_one" } },
+      { api_name: "deal", label: "Deal", type: "relation", column: "deal_id", read_only: true, options: { to: "deal", cardinality: "many_to_one" } },
+      { api_name: "account", label: "Account", type: "relation", column: "account_id", read_only: true, options: { to: "account", cardinality: "many_to_one" } },
+      { api_name: "contact", label: "Contact", type: "relation", column: "contact_id", read_only: true, options: { to: "contact", cardinality: "many_to_one" } },
+      { api_name: "status", label: "Status", type: "status", column: "status", options: {
+        initial: "pending", values: [
+          { key: "pending", label: "Pending", category: "pending" },
+          { key: "active", label: "Active", category: "active" },
+          { key: "fulfilled", label: "Fulfilled", category: "fulfilled" },
+          { key: "cancelled", label: "Cancelled", category: "cancelled" },
+        ] } },
+      { api_name: "order_type", label: "Type", type: "single_select", column: "order_type", read_only: true, options: { values: [
+        { key: "new", label: "New" }, { key: "renewal", label: "Renewal" }, { key: "upsell", label: "Upsell" },
+        { key: "downgrade", label: "Downgrade" }, { key: "cancellation", label: "Cancellation" },
+      ] } },
+      { api_name: "effective_date", label: "Effective date", type: "date", column: "effective_date", read_only: true },
+      { api_name: "subtotal", label: "Subtotal", type: "currency", column: "subtotal_minor", read_only: true },
+      { api_name: "discount", label: "Discount", type: "currency", column: "discount_minor", read_only: true },
+      { api_name: "tax", label: "Tax", type: "currency", column: "tax_minor", read_only: true },
+      { api_name: "total", label: "Total", type: "currency", column: "total_minor", read_only: true },
+      { api_name: "currency", label: "Currency", type: "text", column: "currency", read_only: true },
+      { api_name: "terms", label: "Terms", type: "long_text", column: "terms", read_only: true },
+      owner,
+    ],
+  },
+  {
+    api_name: "order_line_item", label: "Order line", plural_label: "Order lines", id_prefix: "oli", module: "commerce",
+    table: "order_line_items", owned: false,
+    description: "One line of an order, copied from the quote line it was accepted as. Never changed.",
+    fields: [
+      { api_name: "order", label: "Order", type: "relation", column: "order_id", read_only: true, options: { to: "order", cardinality: "many_to_one" } },
+      { api_name: "description", label: "Description", type: "text", column: "description", read_only: true },
+      { api_name: "quantity", label: "Quantity", type: "number", column: "quantity", read_only: true },
+      { api_name: "unit_price", label: "Unit price", type: "currency", column: "unit_amount_minor", read_only: true },
+      { api_name: "discount", label: "Discount", type: "currency", column: "discount_minor", read_only: true },
+      { api_name: "tax", label: "Tax", type: "currency", column: "tax_minor", read_only: true },
+      { api_name: "line_total", label: "Line total", type: "currency", column: "line_total_minor", read_only: true },
+      { api_name: "position", label: "Position", type: "number", column: "position", read_only: true },
+      { api_name: "quote_line", label: "Quote line", type: "relation", column: "quote_line_item_id", read_only: true,
+        options: { to: "quote_line_item", cardinality: "many_to_one" } },
+    ],
+  },
 ];
 
 export const ACTIVITY_TYPES = [
@@ -307,6 +408,21 @@ export const STATUS_MACHINES: Record<string, Record<string, string[]>> = {
     done: ["open"],
     cancelled: ["open"],
   },
+  // A draft is sent; a sent quote is accepted, rejected or expires, or is superseded by its revision.
+  "quote.status": {
+    draft: ["sent", "superseded"],
+    sent: ["accepted", "rejected", "expired", "superseded"],
+    accepted: [],
+    rejected: ["superseded"],
+    expired: ["superseded"],
+    superseded: [],
+  },
+  "order.status": {
+    pending: ["active", "cancelled"],
+    active: ["fulfilled", "cancelled"],
+    fulfilled: [],
+    cancelled: [],
+  },
   "contact.lifecycle_stage": {
     subscriber: ["lead", "opportunity", "customer", "former_customer"],
     lead: ["subscriber", "opportunity", "customer", "former_customer"],
@@ -320,5 +436,7 @@ export const STATUS_MACHINES: Record<string, Record<string, string[]>> = {
 export const STATUS_CATEGORY_COLUMNS: Record<string, string> = {
   "lead.status": "status_category",
   "task.status": "status_category",
+  "quote.status": "status_category",
+  "order.status": "status_category",
   "contact.lifecycle_stage": "lifecycle_category",
 };

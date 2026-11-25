@@ -138,6 +138,19 @@ The API serves a web app at `PUBLIC_URL` (the Docker image includes it): lists w
 
 The `crm` CLI keeps the workspace schema in a file you review and apply (`crm schema pull`, `plan`, `apply`), imports and exports CSV, and manages keys, members and roles. It isn't on npm yet: build it from source. See [`docs/cli.md`](docs/cli.md).
 
+## Quotes and orders
+
+A quote is made for a deal, priced by its lines, sent, and accepted, which makes an order:
+
+```sh
+curl -s -X POST localhost:8787/v1/ops/create_quote -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"deal": "deal_…", "lines": [{"description": "Seats", "quantity": 12, "unit_price": 49.5}]}'
+curl -s -X POST localhost:8787/v1/ops/send_quote   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"quote": "quote_…"}'
+curl -s -X POST localhost:8787/v1/ops/accept_quote -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"quote": "quote_…"}'
+```
+
+A sent quote can't be changed (`revise_quote` makes the next version), and accepting one marks its deal won. Whether a quote needs a deal, and whether accepting marks the deal won, are workspace settings. See [`docs/data-model.md`](docs/data-model.md#quotes-and-orders-as-built).
+
 ## Files and notes
 
 Any record can have files attached, and notes are written in Markdown and shown formatted:

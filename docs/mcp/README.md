@@ -45,6 +45,10 @@ Both protocol revisions are served on the same URL: 2025-11-25 and earlier (an `
 | `log_activity` | Log a note, call, email or meeting about one or more records. A note's `body` is Markdown; the web app shows it formatted. |
 | `move_deal_stage` | Move a deal to a stage by name or ID (records history). Supports `dry_run`. |
 | `convert_lead` | Turn a qualified lead into a deal. Supports `dry_run`. |
+| `create_quote` | A draft quote for a deal, with its lines, in one call. Supports `dry_run`. Lines can then be changed with the record tools on `quote_line_item` while the quote is a draft. |
+| `send_quote` | Send a draft quote: its lines, amounts and terms are fixed from then on. It records the quote as sent; it does not email it. Supports `dry_run`. |
+| `accept_quote` | Accept a sent quote and make its order; supersedes the deal's other open quotes and marks the deal won (unless the workspace turned that off). Can't be undone (`destructiveHint: true`). Supports `dry_run`. |
+| `revise_quote` | The next version of a sent quote, as a new draft with the same lines. Supports `dry_run`. |
 | `capture_interest` | Match or create the contact and account, then create a lead and a `form_submitted` activity. |
 | `assign_owner` | Assign an owned record to a member by ID or email. |
 | `my_open_tasks` | The caller's open tasks. |

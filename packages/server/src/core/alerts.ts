@@ -85,7 +85,7 @@ interface Validated {
 
 /** The fields of the trigger's object that firing on an event reveals: the event's own field, and changed_fields. */
 export function eventTriggerFields(event: string, changedFields?: string[]): string[] {
-  const own = event === "deal.stage_changed" ? ["stage"] : event === "lead.converted" ? ["status"] : [];
+  const own = event === "deal.stage_changed" ? ["stage"] : ["lead.converted", "quote.sent", "quote.accepted"].includes(event) ? ["status"] : [];
   return [...own, ...(changedFields ?? [])];
 }
 

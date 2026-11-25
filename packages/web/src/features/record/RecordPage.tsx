@@ -142,6 +142,7 @@ function RecordBody({ meta, id }: { meta: ObjectMeta; id: string }) {
           </div>
           <div className="flex flex-wrap gap-2">
             {meta.name === "lead" && !archived ? <ConvertLead meta={meta} record={r} /> : null}
+            {meta.name === "quote" && !archived ? <QuoteActions meta={meta} record={r} /> : null}
             {meta.access.write && !archived ? <Button onClick={() => setEditingAll(true)}><Pencil /> Edit</Button> : null}
             {meta.access.archive && !archived ? <Button variant="danger-ghost" onClick={() => setArchiving(true)}><Archive /> Archive</Button> : null}
             {meta.access.archive && archived && !mergedInto ? <Button onClick={() => restore.mutate()} busy={restore.isPending}><RotateCcw /> Restore</Button> : null}
@@ -387,6 +388,56 @@ function DealStage({ meta, record }: { meta: ObjectMeta; record: RecordData }) {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+/**
+ * What a quote can do next, through its operations (never a raw status write): a draft is sent, a sent
+ * quote is accepted (which makes its order) or revised, and a rejected or expired one is revised.
+ * Sending and accepting can't be undone, so each asks first and says what it will do.
+ */
+function QuoteActions({ meta, record }: { meta: ObjectMeta; record: RecordData }) {
+  const api = useApi();
+  const applyWrite = useApplyWrite();
+  const toast = useToast();
+  const navigate = useNavigate();
+  const [asking, setAsking] = useState<"send" | "accept" | null>(null);
+  const status = meta.fields.find((f) => f.name === "status");
+  const category = status?.values?.find((v) => v.key === record.status)?.category;
+  const run = useMutation({
+    mutationFn: (op: "send" | "accept" | "revise") => api.post<OpResult<RecordData & { order?: RecordData; quote?: RecordData }>>(`/v1/ops/${op}_quote`, { quote: record.id })
+      .then((r) => ({ op, result: r.result })),
+    onSuccess: ({ op, result }) => {
+      setAsking(null);
+      applyWrite({ object: "quote", id: record.id, alsoObjects: ["order", "deal", "quote_line_item"] });
+      if (op === "accept" && result.order) {
+        toast.toast({ tone: "success", title: "Quote accepted", description: `Order ${String(result.order.number ?? "")} was made from it.` });
+        void navigate({ to: "/o/$object/$id", params: { object: "order", id: result.order.id } });
+      } else if (op === "revise") {
+        toast.toast({ tone: "success", title: "New version made", description: `${String(result.number ?? "")} is a draft with the same lines.` });
+        void navigate({ to: "/o/$object/$id", params: { object: "quote", id: result.id } });
+      } else toast.toast({ tone: "success", title: "Quote sent" });
+    },
+    onError: (e) => {
+      setAsking(null);
+      toast.error(e, "Couldn't change the quote");
+    },
+  });
+  if (!meta.access.write || status?.access !== "write" || !category) return null;
+  return (
+    <>
+      {category === "draft" ? <Button variant="primary" onClick={() => setAsking("send")}><Check /> Send quote</Button> : null}
+      {category === "sent" ? <Button variant="primary" onClick={() => setAsking("accept")}><Check /> Accept</Button> : null}
+      {["sent", "rejected", "expired"].includes(category) ? <Button onClick={() => run.mutate("revise")} busy={run.isPending && run.variables === "revise"}><Pencil /> Revise</Button> : null}
+      <ConfirmDialog open={asking === "send"} onOpenChange={(o) => !o && setAsking(null)} busy={run.isPending} confirmLabel="Send quote"
+        title={`Send ${String(record.number ?? "this quote")}?`}
+        description="Once sent, its lines, amounts and terms can't be changed. To change them later, revise it: that makes a new version. Sending records the quote as sent; it doesn't email it."
+        onConfirm={() => run.mutate("send")} />
+      <ConfirmDialog open={asking === "accept"} onOpenChange={(o) => !o && setAsking(null)} busy={run.isPending} confirmLabel="Accept and make the order"
+        title={`Accept ${String(record.number ?? "this quote")}?`}
+        description="This makes an order with the quote's lines, closes the deal's other open quotes and, unless your workspace turned that off, marks the deal won. It can't be undone."
+        onConfirm={() => run.mutate("accept")} />
+    </>
   );
 }
 
