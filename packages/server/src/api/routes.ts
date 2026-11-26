@@ -22,7 +22,7 @@ import { badRequest, unprocessable } from "../lib/errors.js";
 import { memberName } from "../auth/queries.js";
 import { requireRecentSignIn } from "../auth/sessions.js";
 import { invitationUnavailable, reserveInvitation, sendInvitation } from "../auth/signin.js";
-import { encodeId } from "../lib/ids.js";
+import { decodeId, encodeId } from "../lib/ids.js";
 import { TEXT_MAX } from "../lib/limits.js";
 import { SERVER_VERSION } from "../lib/version.js";
 import { route } from "./registry.js";
@@ -678,7 +678,10 @@ route({
   query: z.object({ limit: z.coerce.number().int().optional(), before: z.coerce.number().int().optional(), record: z.string().optional(), action: z.string().optional() }),
   handler: async ({ tx, query }) => {
     const limit = Math.min(Math.max(query.limit ?? 50, 1), 500);
-    const rows = await auditLogPage(tx, { before: query.before ?? null, action: query.action ?? null, limit });
+    // `record` is any ID the log holds in record_id: a record, member, key, role, webhook and so on.
+    const record = query.record === undefined ? null : decodeId(query.record)?.uuid ?? null;
+    if (query.record !== undefined && !record) throw unprocessable("record must be an ID such as con_… or usr_…");
+    const rows = await auditLogPage(tx, { before: query.before ?? null, action: query.action ?? null, record, limit });
     return {
       body: {
         data: rows.map((r) => ({

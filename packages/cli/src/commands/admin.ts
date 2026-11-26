@@ -207,10 +207,11 @@ export function registerAdmin(program: Command, act: Act): void {
     .description("Show audit entries, newest first")
     .option("--limit <n>", "entries (max 500)", "50")
     .option("--action <prefix>", "only actions starting with this, e.g. schema. or contact.exported")
+    .option("--record <id>", "only entries about this record, member or key, e.g. con_… or usr_…")
     .option("--before <seq>", "entries before this sequence number (for paging)")
-    .action(act(async (ctx, opts: { limit: string; action?: string; before?: string }) => {
+    .action(act(async (ctx, opts: { limit: string; action?: string; record?: string; before?: string }) => {
       const page = await ctx.client().get<{ data: Record<string, unknown>[]; next_before: number | null }>("/v1/audit-log", {
-        limit: opts.limit, action: opts.action, before: opts.before,
+        limit: opts.limit, action: opts.action, record: opts.record, before: opts.before,
       });
       if (ctx.g.json) return ctx.out.data(page);
       ctx.out.table(page.data, ["seq", "at", "action", "actor", "surface", "object", "record_id"]);

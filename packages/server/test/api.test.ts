@@ -323,6 +323,13 @@ describe("audit log", () => {
     const entry = log.json.data.find((e: { record_id: string }) => e.record_id === decodeId(acct.id)!.uuid);
     expect(entry).toMatchObject({ action: "account.created", surface: "api" });
     expect(entry.key).toMatch(/^key_/);
+    // ?record= keeps only the entries about one record; an ID that isn't one is refused, not ignored.
+    const other = await create(ws.keys.ops, "account", { name: "Also audited" });
+    const about = await call("GET", `/v1/audit-log?record=${acct.id}`, { key: ws.keys.admin });
+    expect(about.json.data.length).toBeGreaterThan(0);
+    expect(about.json.data.every((e: { record_id: string }) => e.record_id === decodeId(acct.id)!.uuid)).toBe(true);
+    expect((await call("GET", `/v1/audit-log?record=${other.id}&action=account.created`, { key: ws.keys.admin })).json.data).toHaveLength(1);
+    expect((await call("GET", "/v1/audit-log?record=nonsense", { key: ws.keys.admin })).status).toBe(422);
     const me = await call("GET", "/v1/me", { key: ws.keys.admin });
     const tenantId = decodeId(me.json.workspace.id)!.uuid;
     while ((await sealTenant(tenantId)) > 0) { /* seal everything */ }

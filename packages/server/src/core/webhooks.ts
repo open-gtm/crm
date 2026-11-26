@@ -1,4 +1,4 @@
-import { createHmac, randomBytes } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { config } from "../config.js";
 import type { Tx } from "../db/pool.js";
 import { badRequest, conflict, forbidden, notFound, unprocessable } from "../lib/errors.js";
@@ -43,8 +43,12 @@ export function sign(secret: string, msgId: string, timestamp: number, body: str
 export function verify(secret: string, headers: { id: string; timestamp: string; signature: string }, body: string, toleranceS = 300): boolean {
   const ts = Number(headers.timestamp);
   if (!Number.isFinite(ts) || Math.abs(Date.now() / 1000 - ts) > toleranceS) return false;
-  const expected = sign(secret, headers.id, ts, body);
-  return headers.signature.split(" ").some((s) => s === expected);
+  const expected = Buffer.from(sign(secret, headers.id, ts, body));
+  // Constant-time, so how much of a guessed signature matched can't be measured.
+  return headers.signature.split(" ").some((s) => {
+    const given = Buffer.from(s);
+    return given.length === expected.length && timingSafeEqual(given, expected);
+  });
 }
 
 function publicWebhook(w: WebhookRow) {

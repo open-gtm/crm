@@ -616,8 +616,8 @@ export function buildAdminServer(client: HlCrmClient): McpServer {
   }, ({ limit }) => run(async () => unwrap(await client.get<{ data: unknown }>("/v1/schema/changes", { limit }))));
 
   server.registerTool("get_audit_log", {
-    description: "Audit log entries, newest first. Filter by action prefix (e.g. 'contact.', 'schema.').",
-    inputSchema: { limit: z.number().int().min(1).max(500).optional(), action: z.string().optional(), before: z.number().int().optional() },
+    description: "Audit log entries, newest first. Filter by action prefix (e.g. 'contact.', 'schema.') and/or by the ID of one record, member or key (record).",
+    inputSchema: { limit: z.number().int().min(1).max(500).optional(), action: z.string().optional(), record: z.string().max(100).optional(), before: z.number().int().optional() },
     annotations: read,
   }, (a) => run(() => client.get("/v1/audit-log", a)));
 

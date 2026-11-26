@@ -407,6 +407,7 @@ crm automations run auto_01JD… --record con_01JD… --record con_01JE…   # d
 crm automations runs auto_01JD… --status failed --steps    # "skipped (cap)" and "failed (data)" mark cap skips and record-data failures
 
 crm audit log --action schema. --limit 20
+crm audit log --record con_01JD…               # everything logged about one record, member or key
 crm audit verify
 crm audit review --json > access-review.json   # every member, role, rule and key
 crm events list --status dead                   # events whose automations and webhooks never ran
