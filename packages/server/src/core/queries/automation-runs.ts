@@ -203,3 +203,21 @@ export async function finishRun(tx: Tx, id: string, lease: string, r: { status: 
         WHERE id = ${id} AND lease_token = ${lease}::uuid RETURNING 1`;
   return done.length > 0;
 }
+
+export interface RunsSummaryRow { automation_id: string; name: string; succeeded: number; failed: number; skipped: number; queued: number; running: number;
+  last_failed_at: Date | null; last_failure: string | null }
+
+/** Runs started since `since`, counted per automation and status, with each automation's newest failure. Busiest first. */
+export async function runsSummary(tx: Tx, since: Date): Promise<RunsSummaryRow[]> {
+  return tx<RunsSummaryRow[]>`
+    SELECT r.automation_id, a.name,
+           count(*) FILTER (WHERE r.status = 'succeeded')::int AS succeeded, count(*) FILTER (WHERE r.status = 'failed')::int AS failed,
+           count(*) FILTER (WHERE r.status = 'skipped')::int AS skipped, count(*) FILTER (WHERE r.status = 'queued')::int AS queued,
+           count(*) FILTER (WHERE r.status = 'running')::int AS running,
+           max(r.started_at) FILTER (WHERE r.status = 'failed') AS last_failed_at,
+           (array_agg(r.reason ORDER BY r.started_at DESC) FILTER (WHERE r.status = 'failed'))[1] AS last_failure
+    FROM automation_runs r JOIN automations a ON a.tenant_id = r.tenant_id AND a.id = r.automation_id
+    WHERE r.started_at >= ${since}
+    GROUP BY r.automation_id, a.name
+    ORDER BY count(*) FILTER (WHERE r.status = 'failed') DESC, count(*) DESC LIMIT 200`;
+}
