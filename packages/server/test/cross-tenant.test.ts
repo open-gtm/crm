@@ -143,6 +143,9 @@ describe("cross-tenant isolation", () => {
   it("path IDs from another tenant are not found, on every route that takes one", async () => {
     let checked = 0;
     for (const r of routes.filter((x) => x.idParams)) {
+      // A full bucket for every route: together the routes now ask for more than one burst, and on a fast
+      // machine the bucket does not refill in time.
+      resetRateLimiter();
       for (const [object, id] of Object.entries({ contact: bIds.contact, account: bIds.account, deal: bIds.deal })) {
         const kind = Object.values(r.idParams!)[0];
         const byKind: Record<string, string | undefined> = { key: bIds.key, webhook: bIds.webhook, automation: bIds.automation, delivery: bIds.delivery,
