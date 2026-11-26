@@ -1,6 +1,5 @@
-import { isIP } from "node:net";
 import { sha256 } from "../lib/crypto.js";
-import { hextets } from "../lib/outbound.js";
+import { addressKey } from "../lib/outbound.js";
 import { canonicalEmail } from "./identity.js";
 
 /**
@@ -79,18 +78,8 @@ export const LIMITS = {
   automationEmail: { name: "automail", max: 600, windowMs: MIN, store: "automail" },
 } satisfies Record<string, Limit>;
 
-/**
- * The key a caller's address is counted under: an IPv6 address by its /64 (one subscriber's
- * allocation, so a host can't rotate through it), an IPv4-mapped one as IPv4, anything else as is.
- * `bits` 48 gives the IPv6 /48 a site gets; IPv4 stays per address.
- */
-export function addressKey(addr: string, bits: 64 | 48 = 64): string {
-  if (isIP(addr) !== 6) return addr;
-  const h = hextets(addr);
-  if (!h) return addr;
-  if (h.slice(0, 5).every((n) => n === 0) && h[5] === 0xffff) return `${h[6]! >> 8}.${h[6]! & 255}.${h[7]! >> 8}.${h[7]! & 255}`;
-  return `${h.slice(0, bits / 16).map((n) => n.toString(16)).join(":")}::/${bits}`;
-}
+/** The key a caller's address is counted under (lib/outbound.ts): every limiter that counts per address uses it. */
+export { addressKey };
 
 /** A stable, non-reversible key for an email (in its canonical form), so the limiter never holds addresses. */
 export const emailKey = (email: string) => sha256(`limit:${canonicalEmail(email)}`).toString("base64url").slice(0, 22);

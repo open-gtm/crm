@@ -6,7 +6,7 @@ import { SYSTEM_ROLES, systemCtx } from "../src/core/context.js";
 import { updateMember } from "../src/core/workspace.js";
 import { withTenant } from "../src/db/tx.js";
 import { decodeId } from "../src/lib/ids.js";
-import { call, create, memberWithKey, newWorkspace, uniqueEmail, validate, type Schema, type Workspace } from "./helpers.js";
+import { app, call, create, memberWithKey, newWorkspace, uniqueEmail, validate, type Schema, type Workspace } from "./helpers.js";
 
 let ws: Workspace;
 const sql = postgres(process.env.TEST_DATABASE_URL!, { max: 1, onnotice: () => {} });
@@ -479,6 +479,21 @@ describe("failed authentication is rate limited before the database", () => {
     expect((await call("POST", `/v1/api-keys/${k.keyId}/revoke`, { key: ws.keys.admin })).status).toBe(200);
     expect((await call("GET", "/v1/me", { key: k.key, headers: from })).status).toBe(401);
     expect((await call("GET", "/v1/me", { key: k.key, headers: from })).status).toBe(429);
+  });
+
+  it("an IPv6 address counts by its /64, so a host can't get a new allowance from each address it holds", async () => {
+    process.env.TRUST_PROXY = "true";
+    resetAuthLimiter({ blockedPerSecond: 0 });
+    for (let i = 0; i < 30; i++) {
+      expect((await call("GET", "/v1/me", { key: `bogus-${i}`, headers: { "X-Forwarded-For": `2001:db8:1:2::${(i + 1).toString(16)}` } })).status).toBe(401);
+    }
+    expect((await call("GET", "/v1/me", { key: "bogus-again", headers: { "X-Forwarded-For": "2001:db8:1:2:ffff::1" } })).status).toBe(429);
+    // The next /64 is someone else.
+    expect((await call("GET", "/v1/me", { key: "bogus-other", headers: { "X-Forwarded-For": "2001:db8:1:3::1" } })).status).toBe(401);
+    // Invalid session cookies are counted the same way.
+    const cookie = (ip: string) => app.request("/v1/me", { headers: { Cookie: `__Host-hlcrm_session=${"A".repeat(43)}`, "X-Forwarded-For": ip } });
+    for (let i = 0; i < 30; i++) expect((await cookie(`2001:db8:9:9::${(i + 1).toString(16)}`)).status).toBe(401);
+    expect((await cookie("2001:db8:9:9:1::1")).status).toBe(429);
   });
 
   it("ignores X-Forwarded-For unless TRUST_PROXY is set", async () => {

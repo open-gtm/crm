@@ -18,6 +18,7 @@ import { mountOAuthPages } from "../web/oauth.js";
 import { resolveAccessToken } from "../oauth/grants.js";
 import { SERVICE_HEADER, isAccessToken, surfaceOf } from "../oauth/scopes.js";
 import { safeEqual } from "../lib/crypto.js";
+import { addressKey } from "../lib/outbound.js";
 import { mountWebUi, webUi } from "../web/static.js";
 import { db, POOL_MAX, type Tx } from "../db/pool.js";
 import { withTenant } from "../db/tx.js";
@@ -460,18 +461,19 @@ export function buildApp(): Hono<Env> {
     const auth = c.req.header("authorization") ?? "";
     const m = /^Bearer\s+(\S+)$/i.exec(auth);
     if (m && isAccessToken(m[1])) return oauthAuth(c, next, m[1]);
-    const addr = clientAddress(c);
+    const ip = clientAddress(c);
+    const addr = addressKey(ip);
     const lookup = m ? keyLookup(m[1]!) : null;
     const blocked = authBlockedFor(addr, lookup);
     if (blocked !== null) {
-      logger.warn({ requestId: c.get("requestId"), event: "auth_rate_limited", ip: addr }, "authentication rate limited");
+      logger.warn({ requestId: c.get("requestId"), event: "auth_rate_limited", ip }, "authentication rate limited");
       c.header("Retry-After", String(blocked));
       return problem(c, new ApiError(429, "rate_limited", "Too many failed authentication attempts; wait and retry"));
     }
     const principal = lookup ? await authenticate(m![1]!) : null;
     if (!principal) {
       recordAuthFailure(addr, lookup);
-      logger.warn({ requestId: c.get("requestId"), event: "auth_failed", ip: addr }, "authentication failed");
+      logger.warn({ requestId: c.get("requestId"), event: "auth_failed", ip }, "authentication failed");
       c.header("WWW-Authenticate", 'Bearer realm="hl-crm-db"');
       return problem(c, new ApiError(401, "unauthenticated", "A valid API key is required (Authorization: Bearer hlcrm_…)"));
     }
@@ -498,7 +500,8 @@ export function buildApp(): Hono<Env> {
    * per member (all their sessions together), with the same bucket sizes as a key.
    */
   async function sessionAuth(c: Context<Env>, next: () => Promise<void>, token: string) {
-    const addr = clientAddress(c);
+    const ip = clientAddress(c);
+    const addr = addressKey(ip);
     const blocked = sessionBlockedFor(addr);
     if (blocked !== null) {
       c.header("Retry-After", String(blocked));
@@ -507,14 +510,14 @@ export function buildApp(): Hono<Env> {
     const principal = await resolveSession(token);
     if (!principal?.session) {
       recordSessionFailure(addr);
-      logger.warn({ requestId: c.get("requestId"), event: "session_invalid", ip: addr }, "session not valid");
+      logger.warn({ requestId: c.get("requestId"), event: "session_invalid", ip }, "session not valid");
       c.header("Set-Cookie", clearCookie(cookieNames().session));
       return problem(c, new ApiError(401, "unauthenticated", "Your session has ended or is not valid; sign in again"));
     }
     if (!SAFE_METHODS.has(c.req.method)) {
       const why = csrfRefusal({ origin: c.req.header("origin"), fetchSite: c.req.header("sec-fetch-site"), token: c.req.header("x-csrf-token") }, principal.session.id);
       if (why) {
-        logger.warn({ requestId: c.get("requestId"), event: "csrf_refused", ip: addr }, "cross-site request refused");
+        logger.warn({ requestId: c.get("requestId"), event: "csrf_refused", ip }, "cross-site request refused");
         return problem(c, new ApiError(403, "csrf_failed", why));
       }
     }
@@ -542,10 +545,11 @@ export function buildApp(): Hono<Env> {
    * (X-Hlcrm-Surface): an ops token on the admin endpoint, or the reverse, is invalid there.
    */
   async function oauthAuth(c: Context<Env>, next: () => Promise<void>, token: string) {
-    const addr = clientAddress(c);
+    const ip = clientAddress(c);
+    const addr = addressKey(ip);
     const blocked = serviceBlockedFor(addr);
     if (blocked !== null) {
-      logger.warn({ requestId: c.get("requestId"), event: "auth_rate_limited", ip: addr }, "OAuth token rate limited: too many wrong service secrets");
+      logger.warn({ requestId: c.get("requestId"), event: "auth_rate_limited", ip }, "OAuth token rate limited: too many wrong service secrets");
       c.header("Retry-After", String(blocked));
       return problem(c, new ApiError(429, "rate_limited", "Too many failed authentication attempts; wait and retry"));
     }
@@ -553,7 +557,7 @@ export function buildApp(): Hono<Env> {
     const presented = c.req.header(SERVICE_HEADER) ?? "";
     if (!s || !safeEqual(Buffer.from(presented), Buffer.from(s.serviceSecret))) {
       recordServiceFailure(addr);
-      logger.warn({ requestId: c.get("requestId"), event: "oauth_token_refused", ip: addr }, "OAuth token presented outside the MCP servers");
+      logger.warn({ requestId: c.get("requestId"), event: "oauth_token_refused", ip }, "OAuth token presented outside the MCP servers");
       c.header("WWW-Authenticate", 'Bearer realm="hl-crm-db"');
       return problem(c, new ApiError(401, "unauthenticated", "OAuth access tokens work only through the MCP servers; the REST API takes an API key (Authorization: Bearer hlcrm_…)"));
     }

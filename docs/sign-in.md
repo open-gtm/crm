@@ -162,7 +162,7 @@ The answer to "email me a code" is the same whether the email belongs to an acti
 
 ## Limits
 
-All in memory, per process.
+All in memory, per process. A client address is counted as itself for IPv4 and by its /64 for IPv6 (one subscriber's allocation), here and at the API's own limits on failed keys and invalid session cookies, so a host can't get a fresh allowance from each address it holds.
 
 | Limit | Value |
 |---|---|

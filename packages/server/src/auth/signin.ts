@@ -10,7 +10,7 @@ import { logger } from "../lib/logger.js";
 import { getMailer } from "../providers/mailer.js";
 import { webUi } from "../web/static.js";
 import { activeMemberships, lookupIdentity, type Candidate, type Membership } from "./identity.js";
-import { LIMITS, emailKey, hit } from "./limits.js";
+import { LIMITS, addressKey, emailKey, hit } from "./limits.js";
 import { dummyVerify, hashPassword, verifyPassword } from "./passwords.js";
 import {
   allowFlowPrune, clearPasswordFailures, consumeChoiceFlow, consumeEmailFlows, consumeEmailFlowsOfBrowser, consumeServerLinkFlow, countPasswordAttempt,
@@ -55,7 +55,9 @@ function limit(l: Parameters<typeof hit>[0], key: string): void {
   const wait = hit(l, key);
   if (wait !== null) throw rateLimited(wait);
 }
-export const limitAddress = (meta: ClientMeta) => limit(LIMITS.address, meta.address ?? "unknown");
+/** The key every per-address sign-in limit counts under: the client address, an IPv6 one by its /64, so a host can't rotate through its own allocation. */
+export const addressOf = (meta: ClientMeta) => addressKey(meta.address ?? "unknown");
+export const limitAddress = (meta: ClientMeta) => limit(LIMITS.address, addressOf(meta));
 
 // --- Background work -------------------------------------------------------------------------------
 
@@ -196,7 +198,7 @@ export async function startEmailSignIn(rawEmail: unknown, returnTo: unknown, met
   const email = typedEmail(rawEmail);
   const tenant = namedWorkspace(rawWorkspace);
   limitAddress(meta);
-  limit(LIMITS.emailBurst, `${emailKey(email)}:${meta.address ?? "unknown"}`);
+  limit(LIMITS.emailBurst, `${emailKey(email)}:${addressOf(meta)}`);
   limit(LIMITS.emailDay, emailKey(email));
   const browserToken = newToken();
   const first = { id: uuidv7(), code: newCode(), link: newToken() };
@@ -396,7 +398,7 @@ export async function passwordSignIn(rawEmail: unknown, password: unknown, retur
   const email = typedEmail(rawEmail);
   const tenant = namedWorkspace(rawWorkspace);
   limitAddress(meta);
-  limit(LIMITS.password, `${emailKey(email)}:${meta.address ?? "unknown"}`);
+  limit(LIMITS.password, `${emailKey(email)}:${addressOf(meta)}`);
   if (typeof password !== "string" || password.length === 0 || password.length > 1024) throw failed();
   const found = await lookupIdentity("email", email, tenant);
   const eligible = (await activeMemberships(found.candidates)).filter((m) => m.passwordAllowed && m.passwordHash);
