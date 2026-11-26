@@ -1,4 +1,5 @@
 import type { Tx } from "../db/pool.js";
+import { claimRecords } from "./limits.js";
 import { forbidden, unprocessable } from "../lib/errors.js";
 import { decodeId, uuidv7 } from "../lib/ids.js";
 import { canObject, canReadField } from "./access.js";
@@ -238,6 +239,7 @@ export async function afterUpdate(tx: Tx, ctx: Ctx, d: Draft): Promise<void> {
     const related = await taskRecords(tx, d.id);
     const activityId = uuidv7();
     const actorUser = actorUserId(ctx);
+    await claimRecords(tx, ctx.tenantId);
     await insertTaskCompletedActivity(tx, { tenantId: ctx.tenantId, id: activityId, actorType: actorUser ? "user" : "system", actorUserId: actorUser,
       createdBy: ctx.actor.id });
     for (const r of [{ record_id: d.id }, ...related]) {
@@ -264,6 +266,7 @@ export async function afterArchive(tx: Tx, ctx: Ctx, obj: ObjectMeta, row: Recor
 async function ensureAccountContact(tx: Tx, ctx: Ctx, accountId: string, contactId: string): Promise<void> {
   if (await hasCurrentAccountLink(tx, accountId, contactId)) return;
   await clearPrimaryAccountLink(tx, contactId);
+  await claimRecords(tx, ctx.tenantId);
   await insertPrimaryAccountLink(tx, { tenantId: ctx.tenantId, id: uuidv7(), accountId, contactId, actorId: ctx.actor.id });
 }
 

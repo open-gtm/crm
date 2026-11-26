@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
 import { serve } from "@hono/node-server";
-import { bootstrapReport, expectedFailure } from "./cli-output.js";
+import { bootstrapReport, expectedFailure, limitsReport, limitsUsage } from "./cli-output.js";
 import { assertStartupConfig, config, publicOrigin } from "./config.js";
 import { assertSafeDbRole, closeDb } from "./db/pool.js";
 import { migrate } from "./db/migrate.js";
@@ -10,7 +10,7 @@ import { logger } from "./lib/logger.js";
 
 /**
  * Server entry point. One image runs every role:
- *   api | mcp | worker | migrate | bootstrap | sign-in-link | seed | audit-verify | mcp-stdio | healthcheck
+ *   api | mcp | worker | migrate | bootstrap | sign-in-link | limits | seed | audit-verify | mcp-stdio | healthcheck
  */
 const [command, ...rest] = process.argv.slice(2);
 
@@ -108,6 +108,17 @@ async function main(): Promise<void> {
       await closeDb();
       return;
     }
+    case "limits": {
+      // One workspace's limits, and setting them (ADR 0019). The operator's command: it connects as the migrator,
+      // the only role that may write a limit, so nothing the API accepts can raise one.
+      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { workspace: { type: "string" } } });
+      if (!values.workspace) throw new ConfigError(limitsUsage());
+      assertStartupConfig("migrate");
+      const { parseLimitChanges, workspaceLimits } = await import("./core/limits.js");
+      const out = await workspaceLimits(config().MIGRATOR_DATABASE_URL!, values.workspace, parseLimitChanges(positionals));
+      process.stdout.write(limitsReport(out, positionals.length > 0));
+      return;
+    }
     case "seed": {
       assertStartupConfig("cli");
       await assertSafeDbRole();
@@ -135,7 +146,7 @@ async function main(): Promise<void> {
       return;
     }
     default:
-      process.stderr.write("Usage: hl-crm-db-server <api|mcp|worker|migrate|bootstrap|sign-in-link|seed|audit-verify|mcp-stdio|healthcheck>\n");
+      process.stderr.write("Usage: hl-crm-db-server <api|mcp|worker|migrate|bootstrap|sign-in-link|limits|seed|audit-verify|mcp-stdio|healthcheck>\n");
       process.exitCode = 2;
   }
 }

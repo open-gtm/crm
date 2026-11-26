@@ -1,4 +1,5 @@
 import type { Tx } from "../db/pool.js";
+import { claimRecords } from "./limits.js";
 import { conflict, forbidden, notFound, unprocessable } from "../lib/errors.js";
 import { decodeId, encodeId, uuidv7 } from "../lib/ids.js";
 import { assertObject, assertWritable, canObject, canReadField, fieldAccess, hasHiddenFields } from "./access.js";
@@ -150,6 +151,7 @@ export async function convertLead(tx: Tx, ctx: Ctx, input: ConvertLeadInput, dry
   await markLeadConverted(tx, leadId, convertedKey, dealId, ctx.actor.id);
   await bumpLifecycle(tx, ctx, lead.contact_id, "opportunity");
   const activityId = uuidv7();
+  await claimRecords(tx, ctx.tenantId);
   await insertLeadConvertedActivity(tx, { tenantId: ctx.tenantId, id: activityId, actorType: ctx.actor.type === "user" ? "user" : "system",
     actorUserId: ctx.actor.type === "user" ? ctx.actor.id : null, actorId: ctx.actor.id });
   for (const rid of [leadId, dealId, lead.contact_id]) {

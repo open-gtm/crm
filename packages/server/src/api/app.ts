@@ -6,6 +6,7 @@ import { z } from "zod";
 import { canAnyObject } from "../core/access.js";
 import { ALL_SCOPES, can, credential, RECORD_ACTIONS, SCOPE_PERMISSIONS, type Ctx, type Permission, type Surface } from "../core/context.js";
 import { decryptValue, encryptValue } from "../core/encryption.js";
+import { requestRateOf } from "../core/limits.js";
 import { authenticate, keyLookup, type Principal } from "../core/keys.js";
 import { cookieNames, clearCookie, readCookie } from "../auth/cookies.js";
 import { resolveSession } from "../auth/sessions.js";
@@ -79,9 +80,43 @@ function takeToken(key: string, n = 1, force = false): number | null {
   return null;
 }
 
+/**
+ * Per-workspace token bucket (ADR 0019): the workspace's requests_per_minute limit, for all its keys,
+ * people and connected apps together, so one workspace minting many keys can't take more of a shared
+ * server than its share. A minute's worth of burst, refilled evenly. Checked after the credential's own
+ * bucket, and charged the same tokens (a route's `cost` too). In memory, like every limiter here: each
+ * API process counts for itself.
+ */
+const workspaceBuckets = new Map<string, { tokens: number; at: number }>();
+function takeWorkspaceToken(tenantId: string, perMinute: number, n = 1, taken = 0): number | null {
+  const now = Date.now();
+  const b = workspaceBuckets.get(tenantId) ?? { tokens: perMinute, at: now };
+  b.tokens = Math.min(perMinute, b.tokens + ((now - b.at) / 60_000) * perMinute);
+  b.at = now;
+  // A request that costs more than a full bucket holds (with the token it took when it arrived, `taken`)
+  // takes all of a full one, so a small limit never refuses it for good.
+  const need = Math.min(n, perMinute - taken);
+  const wait = b.tokens < need ? Math.ceil(((need - b.tokens) / perMinute) * 60) : null;
+  if (wait === null) b.tokens -= need;
+  setBounded(workspaceBuckets, tenantId, b, 50_000);
+  return wait;
+}
+
+/** The 429 for a workspace over its request rate, or null when the request may go on. */
+async function workspaceRefusal(c: Context<Env>, tenantId: string, n = 1, taken = 0): Promise<Response | null> {
+  const perMinute = await requestRateOf(tenantId);
+  if (perMinute === null) return null;
+  const wait = takeWorkspaceToken(tenantId, perMinute, n, taken);
+  if (wait === null) return null;
+  c.header("Retry-After", String(wait));
+  return problem(c, new ApiError(429, "rate_limited", `This workspace is sending more than its limit of ${perMinute} API requests a minute; slow down`,
+    { limit: "requests_per_minute", max: perMinute }));
+}
+
 /** For tests: refill every bucket. */
 export function resetRateLimiter(): void {
   buckets.clear();
+  workspaceBuckets.clear();
 }
 
 /**
@@ -487,6 +522,8 @@ export function buildApp(): Hono<Env> {
       c.header("Retry-After", String(wait));
       return problem(c, new ApiError(429, "rate_limited", "Too many requests for this key; slow down"));
     }
+    const busy = await workspaceRefusal(c, ctx.tenantId);
+    if (busy) return busy;
     c.set("credential", { kind: "key", id: principal.keyId!, bucket });
     c.set("ctx", ctx);
     await next();
@@ -527,6 +564,8 @@ export function buildApp(): Hono<Env> {
       c.header("Retry-After", String(wait));
       return problem(c, new ApiError(429, "rate_limited", "Too many requests; slow down"));
     }
+    const busy = await workspaceRefusal(c, ctx.tenantId);
+    if (busy) return busy;
     c.set("credential", { kind: "session", id: principal.session.id, bucket });
     c.set("ctx", ctx);
     await next();
@@ -573,6 +612,8 @@ export function buildApp(): Hono<Env> {
       c.header("Retry-After", String(wait));
       return problem(c, new ApiError(429, "rate_limited", "Too many requests for this connection; slow down"));
     }
+    const busy = await workspaceRefusal(c, ctx.tenantId);
+    if (busy) return busy;
     c.set("credential", { kind: "oauth", id: principal.oauth.grantId, bucket });
     c.set("ctx", ctx);
     await next();
@@ -653,6 +694,8 @@ function mount(app: Hono<Env>, r: (typeof routes)[number]) {
           c.header("Retry-After", String(wait));
           throw new ApiError(429, "rate_limited", "Too many requests for this key; slow down (this request counts as several)");
         }
+        const busy = await workspaceRefusal(c, ctx.tenantId, cost, 1);
+        if (busy) return busy;
       }
       return await serve(c, r, ctx, credential, body, query, idemKey, raw);
     } finally {

@@ -1,4 +1,5 @@
 import type { Tx } from "../db/pool.js";
+import { claimRecords } from "./limits.js";
 import { conflict, forbidden, notFound, unprocessable } from "../lib/errors.js";
 import { encodeId, uuidv7 } from "../lib/ids.js";
 import { assertObject, assertWritable, canObject, fieldAccess } from "./access.js";
@@ -151,9 +152,11 @@ export async function acceptQuote(tx: Tx, ctx: Ctx, input: { quote: string }, dr
   for (const o of others) await supersede(tx, ctx, quoteObj, o.id, id);
 
   const orderId = uuidv7();
+  const lines = await quoteLines(tx, id);
+  // The order and each of its lines is a record (ADR 0019).
+  await claimRecords(tx, ctx.tenantId, 1 + lines.length);
   const number = documentNumber("O", await nextDocumentNumber(tx, ctx.tenantId, "order"));
   await insertOrderFromQuote(tx, { tenantId: ctx.tenantId, id: orderId, quoteId: id, number, pendingKey: statusKey(orderObj, "pending"), actorId: ctx.actor.id });
-  const lines = await quoteLines(tx, id);
   for (const line of lines) await insertOrderLine(tx, { tenantId: ctx.tenantId, id: uuidv7(), orderId, line, actorId: ctx.actor.id });
   const orderPublicId = encodeId("ord", orderId);
 
@@ -194,8 +197,10 @@ export async function reviseQuote(tx: Tx, ctx: Ctx, input: { quote: string }, dr
   const number = `${group.base_number}-${version}`;
   if (dryRun) return { dry_run: true, result: null, would: [`make draft ${number}, version ${version} of quote ${group.base_number}, with the same lines`] };
   const newId = uuidv7();
+  const copied = await quoteLines(tx, id);
+  await claimRecords(tx, ctx.tenantId, 1 + copied.length);
   await insertQuoteRevision(tx, { tenantId: ctx.tenantId, id: newId, from: id, number, version, actorId: ctx.actor.id });
-  for (const line of await quoteLines(tx, id)) await insertQuoteLine(tx, { tenantId: ctx.tenantId, id: uuidv7(), quoteId: newId, line, actorId: ctx.actor.id });
+  for (const line of copied) await insertQuoteLine(tx, { tenantId: ctx.tenantId, id: uuidv7(), quoteId: newId, line, actorId: ctx.actor.id });
   await recomputeQuoteAmounts(tx, newId, ctx.actor.id);
   const publicId = encodeId("quote", newId);
   await audit(tx, ctx, { action: "quote.revised", objectType: "quote", recordId: newId, details: { number, from: encodeId("quote", id), version } });

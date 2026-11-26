@@ -1,4 +1,5 @@
 import type { Tx } from "../db/pool.js";
+import { claimRecords } from "./limits.js";
 import { txState } from "../db/tx.js";
 import { ApiError, conflict, forbidden, notFound, unprocessable } from "../lib/errors.js";
 import { decodeId, encodeId, uuidv7 } from "../lib/ids.js";
@@ -385,6 +386,7 @@ export async function createRecord(tx: Tx, ctx: Ctx, objectName: string, input: 
   cols.set("created_by", ctx.actor.id);
   cols.set("updated_by", ctx.actor.id);
 
+  await claimRecords(tx, ctx.tenantId);
   try {
     if (!obj.is_system) {
       await registerRecord(tx, ctx.tenantId, id, obj.id);

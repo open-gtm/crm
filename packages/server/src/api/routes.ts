@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { getUsage } from "../core/limits.js";
 import { describeAccess } from "../core/access.js";
 import { auditLogPage } from "../core/queries/audit.js";
 import { verifyInTx } from "../core/auditchain.js";
@@ -139,6 +140,15 @@ route({
   method: "GET", path: "/v1/workspace", scope: "ops:read", tag: "workspace", summary: "Workspace settings",
   response: data(object({ id: S.str, name: S.str, currency: S.str, modules: S.strs, sign_in: ref("SignInSettings") })),
   handler: async ({ tx }) => ({ body: { data: await getWorkspace(tx) } }),
+});
+
+route({
+  method: "GET", path: "/v1/workspace/usage", scope: "admin", tag: "workspace",
+  // Anyone who configures the workspace can run into a limit, so any configuration permission reads them.
+  permission: ["members:manage", "schema:manage", "keys:manage", "webhooks:manage", "automations:manage", "audit:read"],
+  summary: "What the workspace uses against each of its limits. The limits are set by whoever runs the server; nothing in the API changes them",
+  response: data(object({ limits: list(ref("UsageLine")) })),
+  handler: async ({ tx }) => ({ body: { data: await getUsage(tx, await loadSchema(tx)) } }),
 });
 
 route({

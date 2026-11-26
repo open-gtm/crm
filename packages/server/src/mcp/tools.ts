@@ -888,6 +888,11 @@ export function buildAdminServer(client: HlCrmClient): McpServer {
   server.registerTool("list_members", { description: "Members and service accounts with their roles.", annotations: read },
     () => run(async () => unwrap(await client.get<{ data: unknown }>("/v1/members"))));
 
+  server.registerTool("get_usage", { description: "What the workspace uses against each of its limits: records, members, service accounts, API keys, custom objects and "
+    + "fields, webhooks, automations, file storage, and the request and automation rates. A limit of null is unlimited. Whoever runs the server sets the limits; "
+    + "no tool changes them. A write refused with limit_reached names the limit that is full: tell the user which one, and what is in use.", annotations: read },
+    () => run(async () => unwrap(await client.get<{ data: unknown }>("/v1/workspace/usage"))));
+
   server.registerTool("list_api_keys", { description: "API key metadata (never secrets).", annotations: read },
     () => run(async () => unwrap(await client.get<{ data: unknown }>("/v1/api-keys"))));
 
