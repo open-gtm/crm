@@ -188,6 +188,37 @@ describe("deleting a workspace", () => {
     await expect(deleteWorkspaceNow(a.tenantId, { type: "operator" })).rejects.toMatchObject({ status: 404 });
   });
 
+  it("takes what sign-up and the operator's limits recorded about the workspace too", async () => {
+    // Neither table is visible from inside the workspace: sign-ups are counted across workspaces (ADR 0018) and
+    // limits are written by the operator (ADR 0019). Both go with the workspace, by their foreign key if not by the purge's own delete.
+    const a = await busyWorkspace("Signed up");
+    const b = await busyWorkspace("Signed up and kept");
+    const signUps = (tenantId: string) => db().begin(async (tx) => {
+      await tx`SELECT set_config('app.sign_up_count', 'on', true)`;
+      return (await tx`SELECT 1 FROM workspace_sign_ups WHERE tenant_id = ${tenantId}`).length;
+    });
+    const limits = (tenantId: string) => migrator.begin(async (tx) => {
+      await tx`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+      return (await tx`SELECT 1 FROM tenant_limits WHERE tenant_id = ${tenantId}`).length;
+    });
+    for (const ws of [a, b]) {
+      await db().begin(async (tx) => {
+        await tx`SELECT set_config('app.sign_up_count', 'on', true)`;
+        await tx`INSERT INTO workspace_sign_ups (tenant_id, email_key, address_key) VALUES (${ws.tenantId}, ${Buffer.alloc(32, 1)}, NULL)`;
+      });
+      await migrator.begin(async (tx) => {
+        await tx`SELECT set_config('app.tenant_id', ${ws.tenantId}, true)`;
+        await tx`INSERT INTO tenant_limits (tenant_id, key, value) VALUES (${ws.tenantId}, 'records', 1000000)`;
+      });
+    }
+    expect([await signUps(a.tenantId), await limits(a.tenantId)]).toEqual([1, 1]);
+    await sealAll();
+    await deleteWorkspaceNow(a.tenantId, { type: "operator" });
+    expect([await signUps(a.tenantId), await limits(a.tenantId)]).toEqual([0, 0]);
+    expect((await rowCounts(a.tenantId)).record_counts).toBe(0);
+    expect([await signUps(b.tenantId), await limits(b.tenantId)]).toEqual([1, 1]);
+  });
+
   it("deletes the bytes of files kept in an outside store, and rolls everything back if that store fails", async () => {
     const deleted: string[] = [];
     let fail = true;
