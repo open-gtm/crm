@@ -28,14 +28,14 @@
   },
   "dependencies": {
     "@hl-crm-db/sdk": "workspace:*",
-    "@hono/node-server": "2.1.8",
+    "@hono/node-server": "2.1.11",
     "@modelcontextprotocol/sdk": "1.32.2",
     "@zxcvbn-ts/core": "4.3.0",
     "@zxcvbn-ts/language-common": "4.2.0",
     "@zxcvbn-ts/language-en": "4.1.2",
-    "hono": "4.13.18",
-    "jose": "6.2.17",
-    "nodemailer": "10.5.0",
+    "hono": "4.13.19",
+    "jose": "6.2.18",
+    "nodemailer": "10.6.1",
     "pino": "10.4.0",
     "postgres": "4.1.1",
     "re2js": "2.10.0",
@@ -44,6 +44,6 @@
   "devDependencies": {
     "@types/node": "26.6.6",
     "tsx": "4.23.15",
-    "vitest": "5.1.0"
+    "vitest": "5.1.1"
   }
 }
