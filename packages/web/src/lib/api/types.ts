@@ -62,6 +62,8 @@ export interface Capabilities {
   enabled: boolean;
   methods: { email_code: boolean; password: boolean; sso: { name: string; start: string } | null };
   code_length: number;
+  /** A person may create a workspace of their own on this server (the built-in page at /auth/sign-up). Absent on older servers. */
+  sign_up?: boolean;
 }
 
 export type SignInAnswer =

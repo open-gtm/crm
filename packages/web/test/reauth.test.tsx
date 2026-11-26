@@ -73,6 +73,28 @@ describe("signing in again (reauth)", () => {
   });
 });
 
+describe("creating a workspace from the sign-in screen", () => {
+  const signedOut: Handler = (c) => (c.path === "/v1/auth/session" ? { status: 401, body: { code: "unauthorized", detail: "no" } } : undefined);
+
+  it("is offered only when the server allows sign-up, and keeps where the person was going", async () => {
+    mount("/sign-in?return_to=%2Fsettings%2Fapi-keys", (c) => (c.path === "/auth/capabilities" ? { body: { ...CAPS, sign_up: true } } : signedOut(c)));
+    const link = await screen.findByRole("link", { name: "Create a workspace" });
+    expect(link).toHaveAttribute("href", "/auth/sign-up?return_to=%2Fsettings%2Fapi-keys");
+  });
+
+  it("is not offered otherwise", async () => {
+    mount("/sign-in", (c) => (c.path === "/auth/capabilities" ? { body: CAPS } : signedOut(c)));
+    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Create a workspace" })).toBeNull();
+  });
+
+  it("is not offered while confirming who you are", async () => {
+    mount("/sign-in?reauth=1", (c) => (c.path === "/auth/capabilities" ? { body: { ...CAPS, sign_up: true } } : c.path === "/v1/auth/session" ? { body: SESSION } : undefined));
+    expect(await screen.findByRole("heading", { name: "Confirm it's you" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Create a workspace" })).toBeNull();
+  });
+});
+
 describe("the confirm-it's-you dialog", () => {
   it("confirms with the password, sets the new session's token and lets the action carry on", async () => {
     const { fetch, calls } = fakeFetch((c) => (c.path === "/auth/capabilities" ? { body: CAPS }

@@ -65,6 +65,23 @@ const Env = z.object({
   PASSWORD_MIN_STRENGTH: z.string().regex(/^[0-4]$/, "must be a whole number from 0 to 4").default("3").transform(Number),
   /** Check new passwords against Have I Been Pwned (only the first 5 hex characters of the SHA-1 leave the server). */
   PASSWORD_BREACH_CHECK: z.enum(["true", "false"]).default("false").transform((v) => v === "true"),
+  /**
+   * Lets anyone who can prove an email address create a workspace of their own from the sign-in page
+   * (ADR 0018). Off by default: members are added by an admin and workspaces by the operator. Needs
+   * PUBLIC_URL and SMTP_URL (the address is proven with an emailed code).
+   */
+  SIGN_UP: z.enum(["true", "false"]).default("false").transform((v) => v === "true"),
+  /** Comma-separated email domains that may sign up (e.g. example.com). Empty allows any address. */
+  SIGN_UP_ALLOWED_DOMAINS: z.string().default(""),
+  /** Workspaces one email address may create by signing up, in all. */
+  SIGN_UP_MAX_WORKSPACES_PER_EMAIL: z.coerce.number().int().min(1).max(1000).default(3),
+  /** Workspaces one client address (an IPv6 address by its /64) may create by signing up in a day. */
+  SIGN_UP_WORKSPACES_PER_ADDRESS_DAY: z.coerce.number().int().min(1).default(5),
+  /** Workspaces the whole server lets sign-up create in an hour and in a day. Past either, sign-up waits and an error is logged. */
+  SIGN_UP_WORKSPACES_PER_HOUR: z.coerce.number().int().min(1).default(50),
+  SIGN_UP_WORKSPACES_PER_DAY: z.coerce.number().int().min(1).default(300),
+  /** Sign-up codes the whole server emails in an hour (they go to addresses nobody has vouched for). Past it, sends are skipped and logged as errors. */
+  SIGN_UP_EMAILS_PER_HOUR: z.coerce.number().int().min(1).default(300),
   /** Single sign-on through one OpenID Connect provider. Off unless issuer, client ID and secret are all set. */
   OIDC_ISSUER: z.string().optional(),
   OIDC_CLIENT_ID: z.string().optional(),
@@ -141,6 +158,26 @@ export function publicOrigin(): { origin: string; local: boolean } | null {
   if (u.protocol === "https:") return { origin: u.origin, local: false };
   if (u.protocol === "http:" && LOCAL_HOSTS.has(u.hostname)) return { origin: u.origin, local: true };
   throw new ConfigError(`PUBLIC_URL must use https:// (plain http is allowed only for localhost); ${UNSET_HINT}`);
+}
+
+const EMAIL_DOMAIN = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+
+/**
+ * Self sign-up (ADR 0018), or null when it is off (the default). Throws when SIGN_UP is on without
+ * PUBLIC_URL, or SIGN_UP_ALLOWED_DOMAINS holds something that isn't an email domain, so a server
+ * that can't run sign-up safely refuses to start rather than offering a form that leads nowhere.
+ * (That email is configured is checked at startup, in assertStartupConfig.)
+ */
+export function signUpSettings(): { domains: string[]; perEmail: number; perAddressDay: number; perHour: number; perDay: number; emailsPerHour: number } | null {
+  const c = config();
+  if (!c.SIGN_UP) return null;
+  const hint = "fix it, or set SIGN_UP=false";
+  if (!publicOrigin()) throw new ConfigError(`SIGN_UP needs PUBLIC_URL (people create a workspace on the sign-in page, which lives there); ${hint}`);
+  const domains = [...new Set(c.SIGN_UP_ALLOWED_DOMAINS.split(",").map((d) => d.trim().toLowerCase()).filter(Boolean))];
+  const bad = domains.filter((d) => !EMAIL_DOMAIN.test(d));
+  if (bad.length) throw new ConfigError(`SIGN_UP_ALLOWED_DOMAINS must be email domains separated by commas (e.g. example.com); not one: ${bad.slice(0, 5).join(", ")}; ${hint}`);
+  return { domains, perEmail: c.SIGN_UP_MAX_WORKSPACES_PER_EMAIL, perAddressDay: c.SIGN_UP_WORKSPACES_PER_ADDRESS_DAY, perHour: c.SIGN_UP_WORKSPACES_PER_HOUR,
+    perDay: c.SIGN_UP_WORKSPACES_PER_DAY, emailsPerHour: c.SIGN_UP_EMAILS_PER_HOUR };
 }
 
 /**
@@ -243,4 +280,7 @@ export function assertStartupConfig(role: "api" | "worker" | "cli" | "migrate" |
   }
   if (c.OIDC_ISSUER && !publicOrigin()) throw new ConfigError("Single sign-on needs PUBLIC_URL (its redirect URI is built from it)");
   oauthSettings();
+  if (signUpSettings() && !c.SMTP_URL) {
+    throw new ConfigError("SIGN_UP needs email: set SMTP_URL (a new address is proven with an emailed code before a workspace is created), or set SIGN_UP=false");
+  }
 }

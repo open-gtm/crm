@@ -5,6 +5,7 @@ import { passwordPageFacts, signedInPageFacts } from "../auth/queries.js";
 import { authorizationOrigin, ssoSettings } from "../auth/oidc.js";
 import { resolveSession, revokeOne, sessionPublicId } from "../auth/sessions.js";
 import { pendingChoice, safeReturnTo } from "../auth/signin.js";
+import { pendingSignUp, signUpOpen } from "../auth/signup.js";
 import { csrfToken, csrfTokenMatches, originRefusal } from "../auth/tokens.js";
 import type { Ctx } from "../core/context.js";
 import { config, oauthSettings, publicOrigin } from "../config.js";
@@ -13,7 +14,7 @@ import { ApiError } from "../lib/errors.js";
 import { decodeId } from "../lib/ids.js";
 import { capabilities } from "../api/auth-public.js";
 import type { Env } from "../api/app.js";
-import { STYLE, choosePage, codePage, errorPage, linkPage, passwordPage, signInPage, signedInPage, signedOutPage } from "./pages.js";
+import { STYLE, choosePage, codePage, errorPage, linkPage, passwordPage, signInPage, signUpCodePage, signUpPage, signUpWorkspacePage, signedInPage, signedOutPage } from "./pages.js";
 
 /**
  * Handlers for the built-in pages under /auth (templates in web/pages.ts). GET pages change nothing.
@@ -77,7 +78,20 @@ export function mountPages(app: Hono<Env>): void {
     const named = c.req.query("workspace") ?? "";
     const workspace = decodeId(named)?.prefix === "ws" ? named : null;
     return html(c, signInPage({ email: cap.methods.email_code, password: cap.methods.password, sso: cap.methods.sso?.name ?? null,
-      returnTo: returnTo ? safeReturnTo(returnTo) : null, workspace, error: c.req.query("error") }), 200, targets);
+      returnTo: returnTo ? safeReturnTo(returnTo) : null, workspace, error: c.req.query("error"), signUp: cap.sign_up }), 200, targets);
+  });
+
+  // Self sign-up (ADR 0018). The pages don't exist unless the operator turned it on and email works.
+  app.use("/auth/sign-up/*", async (c, next) => (c.req.method === "GET" && !signUpOpen() ? html(c, errorPage("unavailable"), 404) : next()));
+  app.get("/auth/sign-up", (c) => {
+    if (!signUpOpen()) return html(c, errorPage("unavailable"), 404);
+    const returnTo = c.req.query("return_to");
+    return html(c, signUpPage({ returnTo: returnTo ? safeReturnTo(returnTo) : null, error: c.req.query("error") }));
+  });
+  app.get("/auth/sign-up/code", (c) => html(c, signUpCodePage(c.req.query("error"))));
+  app.get("/auth/sign-up/workspace", async (c) => {
+    const pending = await pendingSignUp(readCookie(c.req.header("cookie"), cookieNames().signin));
+    return html(c, signUpWorkspacePage(pending, c.req.query("error")), pending ? 200 : 400);
   });
   app.get("/auth/code", (c) => html(c, codePage(c.req.query("error"))));
   app.get("/auth/email-link", (c) => html(c, linkPage("/auth/email/link", str(c.req.query("token")) ?? null)));

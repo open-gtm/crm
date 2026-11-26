@@ -27,6 +27,9 @@ const ERRORS: Record<string, string> = {
   csrf_failed: "The form expired or came from another site. Reload the page and try again.",
   busy: "The server is busy. Try again in a moment.",
   conflict: "Something changed meanwhile. Try again.",
+  sign_up_domain: "This server only lets addresses at its own domains create a workspace. Use your address there, or ask to be added to a workspace.",
+  sign_up_cap: "This address has already created as many workspaces as one address may here. Sign in to one of them instead.",
+  sign_up_limited: "A workspace can't be created right now. Try again later.",
 };
 export const errorText = (code: string | undefined | null): string | null => (code ? ERRORS[code] ?? "Something went wrong. Start again." : null);
 
@@ -55,7 +58,12 @@ const alert = (code: string | undefined | null) => {
 };
 const hidden = (name: string, value: string | null | undefined) => (value ? `<input type="hidden" name="${esc(name)}" value="${esc(value)}">` : "");
 
-export interface SignInPageOptions { email: boolean; password: boolean; sso: string | null; returnTo: string | null; workspace?: string | null; error?: string | null }
+export interface SignInPageOptions { email: boolean; password: boolean; sso: string | null; returnTo: string | null; workspace?: string | null; error?: string | null;
+  /** Self sign-up is on (ADR 0018): offer to create a workspace. */
+  signUp?: boolean }
+
+/** A link to another /auth page that keeps where the person was going (an app's connection request, say). */
+const withReturnTo = (path: string, returnTo: string | null | undefined) => (returnTo ? `${path}?return_to=${encodeURIComponent(returnTo)}` : path);
 
 export function signInPage(o: SignInPageOptions): string {
   const parts: string[] = [alert(o.error)];
@@ -89,6 +97,7 @@ ${hidden("return_to", o.returnTo)}${hidden("workspace", o.workspace)}
     parts.push(`<p>Sign-in isn't set up on this server yet. An operator can print a one-time sign-in link with
 <code>hl-crm-db-server sign-in-link --email you@example.com</code>.</p>`);
   }
+  if (o.signUp) parts.push(`<p>New here? <a href="${esc(withReturnTo("/auth/sign-up", o.returnTo))}">Create a workspace</a></p>`);
   return layout("Sign in", parts.join("\n"));
 }
 
@@ -101,6 +110,54 @@ export function codePage(error?: string | null): string {
 <button type="submit">Sign in</button>
 </form>
 <p><a href="/auth/sign-in">Start again</a></p>`);
+}
+
+// --- Self sign-up (ADR 0018) -------------------------------------------------------------------------
+
+export function signUpPage(o: { returnTo: string | null; error?: string | null }): string {
+  return layout("Create a workspace", `${alert(o.error)}
+<p>A workspace is your own CRM: you'll be its owner, and can add other people later. First, prove the email address is yours.</p>
+<form method="post" action="/auth/sign-up">
+<label for="email">Your email</label>
+<input id="email" name="email" type="email" autocomplete="email" required maxlength="254" autofocus>
+${hidden("return_to", o.returnTo)}
+<button type="submit">Email me a code</button>
+</form>
+<p>Already have an account? <a href="${esc(withReturnTo("/auth/sign-in", o.returnTo))}">Sign in</a></p>`);
+}
+
+export function signUpCodePage(error?: string | null): string {
+  return layout("Check your email", `${alert(error)}
+<p>We sent an 8-digit code to that address. It works once, for 10 minutes, in this browser. Nothing is created until you enter it.</p>
+<form method="post" action="/auth/sign-up/verify">
+<label for="code">Code</label>
+<input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 \\-]{8,10}" required maxlength="10" autofocus>
+<button type="submit">Continue</button>
+</form>
+<p><a href="/auth/sign-up">Start again</a></p>`);
+}
+
+/**
+ * The last step: the proven address names its workspace. `workspaces` are the ones the address already
+ * belongs to, shown because the person may have meant to sign in.
+ */
+export function signUpWorkspacePage(v: { email: string; returnTo: string | null; workspaces: string[] } | null, error?: string | null): string {
+  if (!v) return layout("Create a workspace", `${alert(error ?? "expired")}
+<p><a href="/auth/sign-up">Start again</a></p>`);
+  const already = v.workspaces.length ? `<p class="hint">This address already belongs to ${v.workspaces.map((w) => `<strong>${esc(w)}</strong>`).join(", ")}.
+To open ${v.workspaces.length === 1 ? "it" : "one of them"}, <a href="${esc(withReturnTo("/auth/sign-in", v.returnTo))}">sign in instead</a>. Continue here only for a new, separate workspace.</p>` : "";
+  return layout("Name your workspace", `${alert(error)}
+<p>Signing up as <strong>${esc(v.email)}</strong>.</p>
+${already}
+<form method="post" action="/auth/sign-up/workspace">
+<label for="workspace_name">Workspace name <span class="hint">(usually your company's)</span></label>
+<input id="workspace_name" name="workspace_name" type="text" autocomplete="organization" required maxlength="200" autofocus>
+<label for="name">Your name</label>
+<input id="name" name="name" type="text" autocomplete="name" maxlength="200">
+<label for="currency">Currency <span class="hint">(a three-letter code; amounts are shown in it)</span></label>
+<input id="currency" name="currency" type="text" value="USD" pattern="[A-Za-z]{3}" required minlength="3" maxlength="3" autocapitalize="characters">
+<button type="submit">Create workspace</button>
+</form>`);
 }
 
 /** The page a sign-in link opens. Using the link takes a button press, so a mail scanner that fetches links can't use it up. */
@@ -308,7 +365,7 @@ main { max-width: 26rem; margin: 3rem auto; padding: 0 1rem; }
 h1 { font-size: 1.5rem; } h2 { font-size: 1.05rem; margin-top: 2rem; }
 form { margin: 1.25rem 0; }
 label { display: block; margin: .75rem 0 .25rem; font-weight: 600; }
-input[type=email], input[type=password], input[inputmode=numeric] { box-sizing: border-box; width: 100%; padding: .55rem .6rem; font: inherit;
+input[type=email], input[type=password], input[type=text], input[inputmode=numeric] { box-sizing: border-box; width: 100%; padding: .55rem .6rem; font: inherit;
   border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; }
 button { margin-top: 1rem; padding: .55rem 1rem; font: inherit; border: 0; border-radius: 6px; background: var(--accent); color: var(--on-accent); cursor: pointer; }
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }

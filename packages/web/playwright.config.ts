@@ -25,10 +25,10 @@ export default defineConfig({
     viewport: { width: 1360, height: 860 },
     trace: "retain-on-failure",
   },
-  // Everything in Chromium; the sign-in link and OAuth consent flows (form posts under Referrer-Policy: no-referrer) in Firefox and WebKit too.
+  // Everything in Chromium; the sign-in link, OAuth consent and sign-up flows (form posts under Referrer-Policy: no-referrer) in Firefox and WebKit too.
   projects: [
     { name: "chromium", use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 860 } } },
-    { name: "firefox", testMatch: /(signin-link|oauth-consent)\.spec\.ts/, use: { ...devices["Desktop Firefox"], viewport: { width: 1360, height: 860 } } },
-    { name: "webkit", testMatch: /(signin-link|oauth-consent)\.spec\.ts/, use: { ...devices["Desktop Safari"], viewport: { width: 1360, height: 860 } } },
+    { name: "firefox", testMatch: /(signin-link|oauth-consent|sign-up)\.spec\.ts/, use: { ...devices["Desktop Firefox"], viewport: { width: 1360, height: 860 } } },
+    { name: "webkit", testMatch: /(signin-link|oauth-consent|sign-up)\.spec\.ts/, use: { ...devices["Desktop Safari"], viewport: { width: 1360, height: 860 } } },
   ],
 });

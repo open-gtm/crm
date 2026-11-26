@@ -22,7 +22,7 @@ const derived = new Map<string, Buffer>();
  * Keys derived from the master key, one per purpose. They never leave the process, so an HMAC made
  * with one can't be recomputed (or a code brute-forced) from a copy of the database alone.
  */
-export function serverKey(purpose: "csrf" | "code" | "oidc"): Buffer {
+export function serverKey(purpose: "csrf" | "code" | "oidc" | "sign_up"): Buffer {
   let k = derived.get(purpose);
   if (!k) {
     k = Buffer.from(hkdfSync("sha256", masterKey(), Buffer.alloc(0), `hl-crm-db/sign-in/${purpose}/v1`, 32));

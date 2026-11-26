@@ -88,11 +88,12 @@ export async function memberRole(tx: Tx, userId: string): Promise<MemberRoleRow 
 
 export interface FlowRow { id: string; purpose: string; browser_hash: Buffer | null; link_hash: Buffer | null; code_hash: Buffer | null; attempts: number;
   candidates: Candidate[]; method: SignInMethod | null; return_to: string | null; workspace_id: string | null; more_workspaces: boolean;
-  expires_at: Date; consumed_at: Date | null }
+  /** The address a sign-up flow is for; null for every other purpose. */
+  email: string | null; expires_at: Date; consumed_at: Date | null }
 
 /** The columns of a FlowRow, as a fragment of the query that selects or returns them. */
 const flowColumns = (tx: Tx) =>
-  tx`id, purpose, browser_hash, link_hash, code_hash, attempts, candidates, method, return_to, workspace_id, more_workspaces, expires_at, consumed_at`;
+  tx`id, purpose, browser_hash, link_hash, code_hash, attempts, candidates, method, return_to, workspace_id, more_workspaces, email, expires_at, consumed_at`;
 
 export async function insertSignInFlow(tx: Tx, f: { id: string; browserHash: Buffer | null; linkHash: Buffer | null; purpose: string; codeHash: Buffer | null;
   candidates: Candidate[]; method: SignInMethod | null; returnTo: string | null; more: boolean; minutes: number }): Promise<void> {
@@ -165,6 +166,58 @@ export async function consumeSsoFlow(tx: Tx): Promise<{ return_to: string | null
 /** Deletes the expired flows the transaction can see (after allowFlowPrune). Returns how many. */
 export async function deleteExpiredFlows(tx: Tx): Promise<number> {
   return (await tx`DELETE FROM sign_in_flows WHERE expires_at < now() RETURNING 1`).length;
+}
+
+// --- Sign-up (ADR 0018) -----------------------------------------------------------------------------
+
+/** A sign-up step for this browser: the emailed code ('sign_up'), or the proven address about to name its workspace ('sign_up_verified'). */
+export async function insertSignUpFlow(tx: Tx, f: { id: string; browserHash: Buffer; purpose: "sign_up" | "sign_up_verified"; codeHash: Buffer | null; email: string;
+  returnTo: string | null; minutes: number }): Promise<void> {
+  await tx`INSERT INTO sign_in_flows (id, browser_hash, purpose, code_hash, email, return_to, expires_at)
+           VALUES (${f.id}, ${f.browserHash}, ${f.purpose}, ${f.codeHash}, ${f.email}, ${f.returnTo}, now() + make_interval(mins => ${f.minutes}))`;
+}
+
+/** This browser's sign-up codes, oldest first, locked. */
+export async function signUpFlowsForUpdate(tx: Tx): Promise<FlowRow[]> {
+  return tx<FlowRow[]>`SELECT ${flowColumns(tx)} FROM sign_in_flows WHERE purpose = 'sign_up' ORDER BY created_at, id FOR UPDATE`;
+}
+
+/** Records a wrong code against every unused sign-up code of this browser; `consumedAt` voids them. */
+export async function recordWrongSignUpCode(tx: Tx, attempts: number, consumedAt: Date | null): Promise<void> {
+  await tx`UPDATE sign_in_flows SET attempts = ${attempts}, consumed_at = ${consumedAt} WHERE purpose = 'sign_up' AND consumed_at IS NULL`;
+}
+
+/** Uses up every unused sign-up step of one kind that this transaction can see. */
+export async function consumeSignUpFlows(tx: Tx, purpose: "sign_up" | "sign_up_verified"): Promise<void> {
+  await tx`UPDATE sign_in_flows SET consumed_at = now() WHERE purpose = ${purpose} AND consumed_at IS NULL`;
+}
+
+/** The newest proven sign-up step this browser can see, used or not; `lock` holds it until the transaction ends. */
+export async function verifiedSignUpFlow(tx: Tx, lock = false): Promise<FlowRow | undefined> {
+  return (await tx<FlowRow[]>`SELECT ${flowColumns(tx)} FROM sign_in_flows WHERE purpose = 'sign_up_verified' ORDER BY created_at DESC, id DESC LIMIT 1 ${lock ? tx`FOR UPDATE` : tx``}`)[0];
+}
+
+/**
+ * Lets the transaction read and add to the record of workspaces created by sign-up (the sign_up_count
+ * policy), and makes it the only one doing so until it ends, so two sign-ups can't both fit under a cap.
+ */
+export async function countSignUpsAlone(tx: Tx): Promise<void> {
+  await tx`SELECT set_config('app.sign_up_count', 'on', true), pg_advisory_xact_lock(hashtext('hl-crm-db/sign-up'))`;
+}
+
+/** Workspaces created by sign-up: by this email in all, from this address in the last day, and by anyone in the last hour and day. */
+export async function signUpCounts(tx: Tx, emailKey: Buffer, addressKey: Buffer | null) {
+  const [r] = await tx<{ by_email: number; by_address: number; hour: number; day: number }[]>`
+    SELECT count(*) FILTER (WHERE email_key = ${emailKey})::int AS by_email,
+           count(*) FILTER (WHERE address_key = ${addressKey} AND created_at > now() - interval '1 day')::int AS by_address,
+           count(*) FILTER (WHERE created_at > now() - interval '1 hour')::int AS hour,
+           count(*) FILTER (WHERE created_at > now() - interval '1 day')::int AS day
+    FROM workspace_sign_ups WHERE email_key = ${emailKey} OR created_at > now() - interval '1 day'`;
+  return r!;
+}
+
+export async function insertWorkspaceSignUp(tx: Tx, w: { tenantId: string; emailKey: Buffer; addressKey: Buffer | null }): Promise<void> {
+  await tx`INSERT INTO workspace_sign_ups (tenant_id, email_key, address_key) VALUES (${w.tenantId}, ${w.emailKey}, ${w.addressKey})`;
 }
 
 // --- Member credentials -----------------------------------------------------------------------------
