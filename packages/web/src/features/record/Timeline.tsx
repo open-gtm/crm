@@ -113,7 +113,7 @@ function Time({ at }: { at: string }) {
 }
 
 /** A task on the timeline, ticked off in place. */
-function TaskLine({ task, recordId }: { task: RecordData; recordId: string }) {
+export function TaskLine({ task, recordId }: { task: RecordData; recordId: string }) {
   const api = useApi();
   const applyWrite = useApplyWrite();
   const toast = useToast();

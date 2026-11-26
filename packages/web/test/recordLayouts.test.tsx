@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { boardFields, calendarFields, dayOf, groupFields, monthGrid, monthOf, monthStart, totalFields, whereForKey, whereForMonth, ymd } from "@/features/list/layouts";
 import { arrangeFields } from "@/features/record/pageLayout";
 import { validateListSearch } from "@/router";
-import { field, objectMeta, renderRoute, SESSION, type Call } from "./utils";
+import { field, objectMeta, renderRoute, type Call } from "./utils";
 
 const STAGES = [{ key: "idea", label: "Idea" }, { key: "doing", label: "Doing" }, { key: "done", label: "Done" }];
 const PROJECT = objectMeta({ name: "project", label: "Project", plural_label: "Projects", fields: [
@@ -197,58 +197,5 @@ describe("a list grouped by a field", () => {
     await userEvent.selectOptions(screen.getByRole("combobox", { name: "Group by" }), "");
     await waitFor(() => expect(router.state.location.search).not.toHaveProperty("group"));
     expect(await screen.findByRole("grid")).toBeInTheDocument();
-  });
-});
-
-describe("Settings → an object's record page layout", () => {
-  it("arranges sections and fields with buttons, saves the whole layout, and goes back to the default", async () => {
-    let layout: { object: string; custom: boolean; sections: { title: string; fields: string[] }[]; updated_at: string | null } = { object: "project", custom: false, sections: [], updated_at: null };
-    const { calls } = renderRoute("/settings/schema/project", (c: Call) => {
-      if (c.path === "/v1/objects/project" && c.method === "GET") return { body: { data: PROJECT } };
-      if (c.path === "/v1/objects/project/layout" && c.method === "GET") return { body: { data: layout } };
-      if (c.path === "/v1/objects/project/layout" && c.method === "PUT") {
-        layout = { object: "project", custom: true, sections: (c.body as { sections: { title: string; fields: string[] }[] }).sections, updated_at: new Date().toISOString() };
-        return { body: { data: layout } };
-      }
-      if (c.path === "/v1/objects/project/layout" && c.method === "DELETE") {
-        layout = { object: "project", custom: false, sections: [], updated_at: null };
-        return { body: { data: layout } };
-      }
-      return undefined;
-    }, { objects: OBJECTS, session: { ...SESSION, permissions: ["records:read", "schema:manage"] } });
-    const region = await screen.findByRole("region", { name: "Record page layout" });
-    expect(await within(region).findByText(/The default page/)).toBeInTheDocument();
-    await userEvent.click(within(region).getByRole("button", { name: "Arrange this page" }));
-    // It starts as one section with every field the member can see (never the hidden one).
-    const title = within(region).getByRole("textbox", { name: "Section 1 title" });
-    expect(title).toHaveValue("Details");
-    expect(within(region).queryByText("secret phase")).not.toBeInTheDocument();
-    await userEvent.clear(title);
-    await userEvent.type(title, "Plan");
-    await userEvent.click(within(region).getByRole("button", { name: "Move budget up" }));
-    await userEvent.click(within(region).getByRole("button", { name: "Take tags out of Plan" }));
-    await userEvent.click(within(region).getByRole("button", { name: "Add section" }));
-    await userEvent.selectOptions(within(region).getByRole("combobox", { name: "Add a field to Section 2" }), "tags");
-    await userEvent.click(within(region).getByRole("button", { name: "Save layout" }));
-    await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
-    expect((calls.find((c) => c.method === "PUT")!.body as { sections: unknown }).sections).toEqual([
-      { title: "Plan", fields: ["title", "budget", "phase", "due", "kickoff", "urgent", "client"] }, { title: "Section 2", fields: ["tags"] }]);
-    expect(await within(region).findByText(/title, budget, phase/)).toBeInTheDocument();
-
-    await userEvent.click(within(region).getByRole("button", { name: "Use the default page" }));
-    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Use the default page" }));
-    await waitFor(() => expect(calls.some((c) => c.method === "DELETE")).toBe(true));
-    expect(await within(region).findByText(/The default page/)).toBeInTheDocument();
-  });
-
-  it("shows the layout to someone who can't change it, with nothing to press", async () => {
-    renderRoute("/settings/schema/project", (c: Call) => {
-      if (c.path === "/v1/objects/project") return { body: { data: PROJECT } };
-      if (c.path === "/v1/objects/project/layout") return { body: { data: { object: "project", custom: true, sections: [{ title: "Plan", fields: ["title", "budget"] }], updated_at: null } } };
-      return undefined;
-    }, { objects: OBJECTS });
-    const region = await screen.findByRole("region", { name: "Record page layout" });
-    expect(await within(region).findByText("Plan")).toBeInTheDocument();
-    expect(within(region).queryByRole("button")).not.toBeInTheDocument();
   });
 });

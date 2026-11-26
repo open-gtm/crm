@@ -726,7 +726,9 @@ export interface PackApplyOptions {
  * confirm_data_changes, and anything that widens access needs confirm_access_changes. A plan returns a
  * plan_token, bound to the caller's credential and to everything the plan depended on; apply needs it.
  */
-export async function applyPack(tx: Tx, ctx: Ctx, pack: Pack, opts: PackApplyOptions) {
+export async function applyPack(tx: Tx, caller: Ctx, pack: Pack, opts: PackApplyOptions) {
+  // Schema changes a pack makes are recorded as the pack's (schema_changes.pack), beside who applied it.
+  const ctx: Ctx = { ...caller, pack: pack.manifest.name };
   requireAnyPart(ctx, "Installing");
   validatePack(pack);
   const m = pack.manifest;
@@ -933,7 +935,8 @@ export interface UninstallOptions { dryRun: boolean; confirmToken?: string; conf
  * run needs the dry run's confirm_token, and confirm_records when records or values would be hidden.
  * Refused while a field the pack didn't create relates to one of its objects, or a member holds one of its roles.
  */
-export async function uninstallPack(tx: Tx, ctx: Ctx, name: string, opts: UninstallOptions) {
+export async function uninstallPack(tx: Tx, caller: Ctx, name: string, opts: UninstallOptions) {
+  const ctx: Ctx = { ...caller, pack: name };
   requireAnyPart(ctx, "Uninstalling");
   if (typeof name !== "string" || !NAME.test(name)) throw notFound(`Pack ${String(name).slice(0, 63)}`);
   await lockSchema(tx);

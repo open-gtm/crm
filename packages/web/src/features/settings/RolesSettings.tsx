@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
-import { ArrowLeft, Check, ChevronRight, Lock, Minus, Pencil, Plus, Shield } from "lucide-react";
+import { ArrowLeft, Check, Copy, Lock, Minus, Pencil, Plus } from "lucide-react";
 import { useMemo, useState } from "react";
 import { EmptyState, ProblemView } from "@/components/feedback";
 import { Button } from "@/components/ui/button";
@@ -11,10 +11,14 @@ import { useToast } from "@/components/ui/toast";
 import { useApi } from "@/lib/api/context";
 import { asProblem, PERMISSION_LABELS } from "@/lib/api/problem";
 import type { ObjectMeta, PermissionInfo, Role, RoleAccess, RoleObjectRule } from "@/lib/api/types";
+import { cn } from "@/lib/cn";
+import { pluralize } from "@/lib/format";
 import { useSession } from "@/lib/session";
 import { plainLabel } from "@/lib/text";
 import { useDescribes, useObjects } from "@/meta/hooks";
 import { useRoles } from "./MembersSettings";
+import { DuplicateDialog } from "./people/DuplicateDialog";
+import { PeopleTabs } from "./people/PeopleTabs";
 import { Section, SimpleTable, useAdmin } from "./SettingsLayout";
 
 /**
@@ -41,45 +45,83 @@ export function usePermissionSets() {
   return useAdmin<{ data: Role[] }>(["permission-sets"], "/v1/permission-sets");
 }
 
-export const RolesSettings = () => <DefinitionList kind="role" />;
-export const PermissionSetsSettings = () => <DefinitionList kind="permission_set" />;
-export const RoleDetail = () => <DefinitionDetail kind="role" />;
-export const PermissionSetDetail = () => <DefinitionDetail kind="permission_set" />;
+/** What the right pane shows: a role or a permission set by key, or nothing yet. */
+type Selected = { kind: Kind; key: string } | null;
 
-function DefinitionList({ kind }: { kind: Kind }) {
+export const RolesSettings = () => <RolesPage selected={null} />;
+export const PermissionSetsSettings = () => <RolesPage selected={null} />;
+export const RoleDetail = () => <RolesPage selected={{ kind: "role", key: useParamsSafe().roleId }} />;
+export const PermissionSetDetail = () => <RolesPage selected={{ kind: "permission_set", key: useParamsSafe().roleId }} />;
+
+/**
+ * Two panes: the roles and permission sets on the left, the chosen one on the right. On a phone one
+ * pane shows at a time: the list until something is chosen, then its detail with a way back.
+ */
+function RolesPage({ selected }: { selected: Selected }) {
+  return (
+    <>
+      <PeopleTabs current="roles" />
+      <div className="grid gap-4 lg:grid-cols-[19rem_minmax(0,1fr)] lg:items-start lg:gap-6">
+        <div className={cn("grid gap-4", selected && "hidden lg:grid")}>
+          <DefinitionList kind="role" selected={selected} />
+          <DefinitionList kind="permission_set" selected={selected} />
+        </div>
+        <div className={cn("min-w-0", !selected && "hidden lg:block")}>
+          {selected ? <DefinitionDetail key={`${selected.kind}:${selected.key}`} kind={selected.kind} /> : (
+            <EmptyState icon={<Lock />} title="Choose a role or permission set" className="rounded-lg border border-line bg-surface py-12">
+              Its permissions and the access it gives to each object appear here.
+            </EmptyState>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function DefinitionList({ kind, selected }: { kind: Kind; selected: Selected }) {
   const k = KINDS[kind];
   const s = useSession();
   const asRoles = useRoles();
   const asSets = usePermissionSets();
   const roles = kind === "role" ? asRoles : asSets;
+  const qc = useQueryClient();
   const [creating, setCreating] = useState(false);
   const navigate = useNavigate();
   const rows = roles.data?.data.filter((r) => !r.archived_at) ?? [];
   return (
-    <Section title={k.title} description={k.blurb}
-      actions={s.can("roles:manage") ? <Button size="sm" variant="primary" onClick={() => setCreating(true)}><Plus /> New {k.one}</Button> : null}>
-      {roles.isPending ? <Skeleton className="h-24" /> : roles.error ? <ProblemView error={roles.error} compact /> : rows.length === 0 ? <EmptyState title={k.empty} /> : (
-        <ul className="-m-4 divide-y divide-line">
-          {rows.map((r) => (
-            <li key={r.id}>
-              <Link to={k.detail} params={{ roleId: r.key }} className="flex items-center gap-3 px-4 py-3 hover:bg-surface-2">
-                <Shield className="size-4 text-muted" aria-hidden />
-                <div className="min-w-0 flex-1">
-                  <p className="font-medium">{r.name} {kind === "permission_set" ? null : r.is_system ? <Badge>System</Badge> : <Badge tone="accent">Custom</Badge>}</p>
-                  <p className="truncate text-sm text-muted">{r.description || `${r.permissions.length} permission${r.permissions.length === 1 ? "" : "s"}`}</p>
-                </div>
-                <span className="text-sm text-subtle">{r.active_members} member{r.active_members === 1 ? "" : "s"}</span>
-                <ChevronRight className="size-4 text-subtle" aria-hidden />
-              </Link>
-            </li>
-          ))}
+    <section aria-labelledby={`${kind}-list-h`} className="rounded-lg border border-line bg-surface">
+      <header className="flex items-center gap-2 border-b border-line px-3 py-2">
+        <h2 id={`${kind}-list-h`} className="flex-1 text-md font-semibold">{k.title}</h2>
+        {s.can("roles:manage") ? <Button size="sm" variant="primary" onClick={() => setCreating(true)}><Plus /> New {k.one}</Button> : null}
+      </header>
+      {roles.isPending ? <div className="p-3"><Skeleton className="h-16" /></div> : roles.error ? <div className="p-3"><ProblemView error={roles.error} compact /></div> : rows.length === 0 ? <EmptyState title={k.empty} className="py-6" /> : (
+        <ul className="divide-y divide-line">
+          {rows.map((r) => {
+            const on = selected?.kind === kind && selected.key === r.key;
+            return (
+              <li key={r.id}>
+                <Link to={k.detail} params={{ roleId: r.key }} aria-current={on ? "page" : undefined}
+                  className={cn("flex items-center gap-2 px-3 py-2.5 hover:bg-surface-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-focus", on && "bg-accent-soft hover:bg-accent-soft")}>
+                  <div className="min-w-0 flex-1">
+                    <p className={cn("flex items-center gap-1.5 font-medium", on && "text-accent-soft-fg")}>
+                      <span className="truncate">{r.name}</span>
+                      {r.is_system ? <Lock className="size-3 shrink-0 text-subtle" aria-label="Built in" /> : null}
+                    </p>
+                    <p className="truncate text-sm text-muted">{r.description || pluralize(r.permissions.length, "permission", "permissions")}</p>
+                  </div>
+                  <span className="shrink-0 text-sm text-subtle">{pluralize(r.active_members, "member", "members")}</span>
+                </Link>
+              </li>
+            );
+          })}
         </ul>
       )}
       {creating ? <RoleEditor kind={kind} onClose={() => setCreating(false)} onSaved={(r) => {
         setCreating(false);
+        void qc.invalidateQueries({ queryKey: ["admin", k.listKey] });
         void navigate({ to: k.detail, params: { roleId: r.key } });
       }} /> : null}
-    </Section>
+    </section>
   );
 }
 
@@ -98,6 +140,7 @@ function DefinitionDetail({ kind }: { kind: Kind }) {
   const perms = useAdmin<{ data: PermissionInfo[] }>(["permissions"], "/v1/permissions");
   const [editing, setEditing] = useState(false);
   const [archiving, setArchiving] = useState(false);
+  const [duplicating, setDuplicating] = useState(false);
   const labels = useSchemaLabels(access.data?.data.objects.map((o) => o.object) ?? []);
   const archive = useMutation({
     mutationFn: () => api.delete(`${k.api}/${encodeURIComponent(roleId)}`),
@@ -118,23 +161,37 @@ function DefinitionDetail({ kind }: { kind: Kind }) {
   const editable = s.can("roles:manage") && !r.is_system && !held;
   const catalog = perms.data?.data ?? [];
   const records = r.permissions.filter((p) => isRecordPermission(catalog, p));
-  const features = r.permissions.filter((p) => !isRecordPermission(catalog, p));
+  // Feature permissions grouped by the category the API gives each one, in the catalog's order.
+  const featureGroups = new Map<string, string[]>();
+  for (const p of r.permissions) {
+    if (isRecordPermission(catalog, p)) continue;
+    const cat = categoryOf(catalog, p);
+    featureGroups.set(cat, [...(featureGroups.get(cat) ?? []), p]);
+  }
+  if (featureGroups.size === 0) featureGroups.set("features", []);
   const chips = (list: string[]) => (
     <ul className="flex flex-wrap gap-1.5">{list.length ? list.map((p) => <li key={p}><Badge title={p}>{capFirst(PERMISSION_LABELS[p] ?? p)}</Badge></li>) : <li className="text-base text-muted">None</li>}</ul>
   );
   return (
     <>
-      <Link to={k.list} className="mb-3 inline-flex items-center gap-1 text-sm text-muted hover:text-fg"><ArrowLeft className="size-3.5" /> {k.title}</Link>
+      <Link to={k.list} className="mb-3 inline-flex items-center gap-1 text-sm text-muted hover:text-fg lg:hidden"><ArrowLeft className="size-3.5" /> {k.title}</Link>
       <Section title={r.name} description={r.description ?? undefined}
-        actions={editable ? <><Button size="sm" onClick={() => setEditing(true)}><Pencil /> Edit</Button><Button size="sm" variant="danger-ghost" onClick={() => setArchiving(true)}>Archive…</Button></> : null}>
+        actions={<>
+          {s.can("roles:manage") ? <Button size="sm" onClick={() => setDuplicating(true)}><Copy /> Duplicate</Button> : null}
+          {editable ? <><Button size="sm" onClick={() => setEditing(true)}><Pencil /> Edit</Button><Button size="sm" variant="danger-ghost" onClick={() => setArchiving(true)}>Archive…</Button></> : null}
+        </>}>
         <p className="mb-3 text-sm text-muted">
           Key <code className="font-mono">{r.key}</code> · {r.active_members} active member{r.active_members === 1 ? "" : "s"}
           {r.is_system ? " · System roles can't be changed; make a custom role from one instead." : held ? ` · You hold this ${k.one}, so you can't change it.` : ""}
         </p>
         <h3 className="mb-2 text-sm font-medium text-muted">Objects and fields: for every object, unless a rule below says otherwise</h3>
         {chips(records)}
-        <h3 className="mb-2 mt-4 text-sm font-medium text-muted">Features</h3>
-        {chips(features)}
+        {[...featureGroups].map(([cat, list]) => (
+          <div key={cat}>
+            <h3 className="mb-2 mt-4 text-sm font-medium text-muted">{capFirst(cat)}</h3>
+            {chips(list)}
+          </div>
+        ))}
       </Section>
       <Section title={kind === "role" ? "Effective record access" : "Record access this set gives"}
         description={kind === "role" ? "What holders of this role can do with each object, after its permissions and rules. Fields with a rule are listed. Permission sets a member holds add to this."
@@ -156,6 +213,12 @@ function DefinitionDetail({ kind }: { kind: Kind }) {
         setEditing(false);
         void qc.invalidateQueries({ queryKey: ["admin"] });
       }} /> : null}
+      {duplicating ? <DuplicateDialog api={k.api} source={r} noun={k.one} onClose={() => setDuplicating(false)} onCreated={(created) => {
+        setDuplicating(false);
+        void qc.invalidateQueries({ queryKey: ["admin", k.listKey] });
+        toast.toast({ tone: "success", title: `${k.One} duplicated` });
+        void navigate({ to: k.detail, params: { roleId: created.key } });
+      }} /> : null}
       <ConfirmDialog open={archiving} onOpenChange={setArchiving} danger busy={archive.isPending} confirmLabel={`Archive ${k.one}`} title={`Archive ${r.name}?`}
         description={`A ${k.one} can be archived only when no active member holds it.`} onConfirm={() => archive.mutate()} />
     </>
@@ -164,9 +227,12 @@ function DefinitionDetail({ kind }: { kind: Kind }) {
 
 const capFirst = (x: string) => x.charAt(0).toUpperCase() + x.slice(1);
 
+/** The API's category for a permission; when the catalog hasn't loaded, a guess from its name. */
+const categoryOf = (catalog: PermissionInfo[], key: string): string =>
+  catalog.find((c) => c.key === key)?.category ?? (/^(records|restricted):/.test(key) ? "records" : "features");
+
 /** True for the permissions about records (objects and fields refine them); everything else is a feature. */
-const isRecordPermission = (catalog: PermissionInfo[], key: string) =>
-  (catalog.find((c) => c.key === key)?.category ?? (/^(records|restricted):/.test(key) ? "records" : "features")) === "records";
+const isRecordPermission = (catalog: PermissionInfo[], key: string) => categoryOf(catalog, key) === "records";
 
 /** Labels for objects and fields by API name, from describe (the API name when it can't be read). */
 function useSchemaLabels(objects: string[]) {
