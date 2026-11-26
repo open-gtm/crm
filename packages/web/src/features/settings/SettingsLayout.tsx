@@ -19,7 +19,7 @@ export const SECTIONS: { to: string; label: string; icon: ReactNode; show: (s: S
   { to: "/settings/connections", label: "Connections", icon: <Plug />, show: (s) => s.can("connections:manage"), needs: "manage connections" },
   { to: "/settings/audit", label: "Audit log", icon: <FileClock />, show: (s) => s.can("audit:read"), needs: "read the audit log" },
   { to: "/settings/automations", label: "Automations", icon: <Zap />, show: (s) => s.can("automations:manage"), needs: "manage automations" },
-  { to: "/settings/schema", label: "Schema", icon: <Database />, show: () => true },
+  { to: "/settings/schema", label: "Objects & fields", icon: <Database />, show: () => true },
   { to: "/settings/commerce", label: "Quotes and orders", icon: <FileText />, show: () => true },
   { to: "/settings/packs", label: "Installed packs", icon: <Package />, show: (s) => ["schema:manage", "roles:manage", "views:manage"].some((p) => s.can(p)), needs: "manage the schema, roles or views" },
 ];

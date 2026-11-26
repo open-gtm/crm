@@ -65,6 +65,7 @@ test.describe("record page layouts", () => {
 
     // Settings → Schema → Deal points at the editor and says what is published.
     await page.goto("/settings/schema/deal");
+    await page.getByRole("tab", { name: "Page layout" }).click();
     await expect(page.getByText(/Published v1|version 1/i).first()).toBeVisible();
     await expect(page.getByRole("link", { name: "Customize page" })).toBeVisible();
   });

@@ -118,6 +118,24 @@ export interface FieldMeta {
   min?: number;
   /** percent: "percent"; duration: "seconds". */
   unit?: string;
+  /** Where the field comes from: built in, made in this workspace, or made by an installed schema pack. */
+  origin?: SchemaOrigin;
+  pack?: string;
+  /** The field's latest schema change. Only for callers with audit:read, and only once the field has been changed. */
+  last_change?: SchemaLastChange;
+}
+
+export type SchemaOrigin = "standard" | "custom" | "pack";
+
+/** Describe's `last_change`: what last changed a field or object, through which surface, app or key, and by whom. */
+export interface SchemaLastChange {
+  change: string;
+  changed_at: string;
+  surface: string;
+  via: string | null;
+  pack: string | null;
+  actor: string;
+  version: number;
 }
 
 export interface ObjectAccess { read: boolean; write: boolean; archive: boolean }
@@ -125,6 +143,7 @@ export interface ObjectAccess { read: boolean; write: boolean; archive: boolean 
 export interface ObjectSummary {
   name: string; label: string; plural_label: string; description?: string; id_prefix: string; standard: boolean;
   module?: string; owned: boolean; display_field?: string; hidden?: boolean; field_count: number; access: ObjectAccess;
+  origin?: SchemaOrigin; pack?: string;
 }
 
 export interface Stage { id: string; name: string; category: "open" | "won" | "lost"; default_probability: number | null }
@@ -140,6 +159,22 @@ export interface ObjectMeta extends Omit<ObjectSummary, "field_count" | "hidden"
   pipelines?: Pipeline[];
   activity_types?: ActivityType[];
   virtual_fields?: { name: string; type: string; description: string }[];
+  last_change?: SchemaLastChange;
+}
+
+/** One row of GET /v1/schema/changes (audit:read): a change to the schema, newest first. before/after are open JSON. */
+export interface SchemaChangeRow {
+  version: number; changed_at: string; change: string; object: string | null; field: string | null; surface: string;
+  via: string | null; pack: string | null; actor: string; before?: unknown; after?: unknown;
+}
+
+/** One object of GET /v1/schema: its record count (capped at 10,000; null when the caller can't read the object). */
+export interface SchemaSummaryObject { name: string; records: number | null; records_capped?: boolean }
+
+/** The answer to a schema write: with dry_run true nothing was written. A change's `warning` says what to know first. */
+export interface SchemaChangeResult {
+  dry_run: boolean; schema_version: number;
+  changes: { change: string; object: string; field?: string; before?: unknown; after?: unknown; warning?: string }[];
 }
 
 export interface RelatedRef { id: string; object: string | null; display_name: string | null }

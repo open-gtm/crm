@@ -525,6 +525,7 @@ describe("Settings → an object: the Record page section", () => {
 
   it("shows the published version and a waiting draft, with the way into the editor", async () => {
     settings({ custom: true });
+    await userEvent.click(await screen.findByRole("tab", { name: "Page layout" }));
     const region = await screen.findByRole("region", { name: "Record page" });
     expect(await within(region).findByText("Published v3")).toBeInTheDocument();
     expect(within(region).getByRole("link", { name: "Customize page" })).toHaveAttribute("href", "/o/deal/customize");
@@ -533,6 +534,7 @@ describe("Settings → an object: the Record page section", () => {
 
   it("says when a draft is waiting, and calls an unpublished layout the default page", async () => {
     settings({ custom: false, draft: draftOf() });
+    await userEvent.click(await screen.findByRole("tab", { name: "Page layout" }));
     const region = await screen.findByRole("region", { name: "Record page" });
     expect(await within(region).findByText("Default page")).toBeInTheDocument();
     expect(await within(region).findByText("Draft waiting · 2 changes")).toBeInTheDocument();
@@ -540,6 +542,7 @@ describe("Settings → an object: the Record page section", () => {
 
   it("offers no way into the editor, and asks for no draft, without permission to manage the schema", async () => {
     const { calls } = settings({ custom: true, session: { ...SESSION, permissions: ["records:read"] } });
+    await userEvent.click(await screen.findByRole("tab", { name: "Page layout" }));
     const region = await screen.findByRole("region", { name: "Record page" });
     expect(await within(region).findByText("Published v3")).toBeInTheDocument();
     expect(within(region).queryByRole("link", { name: "Customize page" })).not.toBeInTheDocument();
