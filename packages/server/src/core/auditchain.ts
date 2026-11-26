@@ -4,7 +4,7 @@ import { canonicalJson, sha256 } from "../lib/crypto.js";
 import { ApiError } from "../lib/errors.js";
 import { blobStore } from "../providers/blobs.js";
 import {
-  anchorExists, anchorRows, chainCounts, chainEnd, chainHead, chainRowsAfter, insertAnchor, lockAnchors, sealRow, tenantDirectory, trySealLock,
+  anchorExists, anchorRows, chainCounts, chainEnd, chainHead, chainRowsAfter, insertAnchor, lockAnchors, sealLock, sealRow, tenantDirectory, trySealLock,
   tryLockAnchors, unsealedRows, type AuditRow,
 } from "./queries/audit.js";
 
@@ -37,19 +37,35 @@ export async function sealTenant(tenantId: string, batch = 500): Promise<number>
   return withTenant(tenantId, async (tx) => {
     // One sealer per tenant at a time.
     if (!(await trySealLock(tx, tenantId))) return 0;
-    const last = await chainEnd(tx);
-    const rows = await unsealedRows(tx, batch);
-    let prev: Buffer = last?.hash ?? GENESIS;
-    let pos = BigInt(last?.chain_pos ?? 0);
-    for (const r of rows) {
-      const h = rowHash(prev, r);
-      // The guard trigger assigns chain_pos; check it is the position this hash was chained at.
-      const chainPos = await sealRow(tx, r.seq, prev, h);
-      if (BigInt(chainPos) !== ++pos) throw new Error(`audit chain position mismatch at seq ${r.seq}`);
-      prev = h;
-    }
-    return rows.length;
+    return sealBatch(tx, batch);
   });
+}
+
+/** Seals up to `batch` unsealed rows in `tx`, whose caller holds the tenant's sealing lock. */
+async function sealBatch(tx: Tx, batch: number): Promise<number> {
+  const last = await chainEnd(tx);
+  const rows = await unsealedRows(tx, batch);
+  let prev: Buffer = last?.hash ?? GENESIS;
+  let pos = BigInt(last?.chain_pos ?? 0);
+  for (const r of rows) {
+    const h = rowHash(prev, r);
+    // The guard trigger assigns chain_pos; check it is the position this hash was chained at.
+    const chainPos = await sealRow(tx, r.seq, prev, h);
+    if (BigInt(chainPos) !== ++pos) throw new Error(`audit chain position mismatch at seq ${r.seq}`);
+    prev = h;
+  }
+  return rows.length;
+}
+
+/**
+ * Seals every unsealed row the transaction can see, its own included, waiting for a running sealer
+ * first. For deleting a workspace (core/disposal.ts): the chain must be complete, with the deletion
+ * itself as its last entry, before its end is written to the tombstone.
+ */
+export async function sealAllInTx(tx: Tx, tenantId: string): Promise<{ chain_pos: string; hash: Buffer } | undefined> {
+  await sealLock(tx, tenantId);
+  while ((await sealBatch(tx, 500)) > 0);
+  return chainEnd(tx);
 }
 
 export interface VerifyResult {

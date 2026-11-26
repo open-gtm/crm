@@ -38,6 +38,11 @@ const Env = z.object({
   S3_REGION: unsetWhenEmpty(z.string().default("us-east-1")),
   S3_ACCESS_KEY_ID: unsetWhenEmpty(z.string().optional()),
   S3_SECRET_ACCESS_KEY: unsetWhenEmpty(z.string().optional()),
+  /**
+   * Days between an owner asking for their workspace to be deleted and the worker deleting it (ADR 0020). An owner
+   * can withdraw the request meanwhile. 0: it is deleted on the worker's next pass.
+   */
+  WORKSPACE_DELETION_GRACE_DAYS: z.coerce.number().int().min(0).max(365).default(7),
   AUDIT_SEAL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
   AUDIT_ANCHOR_INTERVAL_MS: z.coerce.number().int().positive().default(3_600_000),
   /** Lets webhooks target http:// URLs and private addresses (for internal self-hosted targets). Metadata IPs stay blocked. */

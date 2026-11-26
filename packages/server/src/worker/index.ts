@@ -5,6 +5,7 @@ import { db } from "../db/pool.js";
 import { logger } from "../lib/logger.js";
 import { runScheduler } from "../core/alerts.js";
 import { runAutomationPass } from "../core/automation-runner.js";
+import { purgeDueWorkspaces } from "../core/disposal.js";
 import { sendDueEmails } from "../core/notifications.js";
 import { getMailer } from "../providers/mailer.js";
 import { deliverDue, processEventsRound, pruneHistory } from "./events.js";
@@ -17,7 +18,7 @@ import { deleteOldIdempotencyKeys, enterWorkspace } from "./queries.js";
 /**
  * Background worker: processes outbox events (automations and webhook subscriptions), runs queued
  * and scheduled automations, sends webhook deliveries with retries, seals and anchors the audit log,
- * and expires old data.
+ * deletes workspaces whose deletion is due, and expires old data.
  */
 export async function sealAll(): Promise<number> {
   let total = 0;
@@ -84,6 +85,11 @@ export function startWorker(): () => void {
     }
   });
   loop("audit-anchor", cfg.AUDIT_ANCHOR_INTERVAL_MS, anchorAll);
+  // Workspaces an owner asked to delete, once their grace period has run out (ADR 0020).
+  loop("workspace-deletion", 60_000, async () => {
+    const n = await purgeDueWorkspaces();
+    if (n) logger.info({ deleted: n }, "deleted workspaces whose grace period ended");
+  });
   loop("idempotency-expiry", 3_600_000, async () => {
     for (const t of await tenantIds(db())) {
       await db().begin(async (tx) => {
