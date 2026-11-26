@@ -15,7 +15,7 @@ import type { Ctx } from "./context.js";
 import { emit } from "./events.js";
 import { ADDRESS_PART_NAMES, FIELD_TYPES, fieldRulesProblem, isFieldType, PERCENT, ratingMax, TYPE_INFO } from "./fieldtypes.js";
 import {
-  archivedObjectNames, archiveFieldRow, bumpSchemaVersion, countFieldsEver, countLinkingRecords, insertCustomField, insertCustomObject, insertSchemaChange,
+  apiKeyName, archivedObjectNames, archiveFieldRow, bumpSchemaVersion, countFieldsEver, countLinkingRecords, insertCustomField, insertCustomObject, insertSchemaChange, oauthClientName,
   insertStandardField, insertStandardObject, liveFields, liveObjects, lockWorkspaceSchema, retypeFieldRow, schemaHead, setWorkspaceModules, updateFieldRow,
   updateObjectRow, viewsOfObject,
 } from "./queries/schema.js";
@@ -300,8 +300,10 @@ export async function recordChange(tx: Tx, ctx: Ctx, change: Change & { object_i
   const row = await bumpSchemaVersion(tx);
   const version = Number(row.schema_version);
   txState()?.ownSchemas.set(row.schema_token, undefined);
+  // The connected app or key by name, as layout changes record it (ADR 0017): a label for people; the audit log has the IDs.
+  const via = ctx.oauth ? await oauthClientName(tx, ctx.oauth.grantId) : ctx.keyId ? await apiKeyName(tx, ctx.keyId) : undefined;
   await insertSchemaChange(tx, { tenantId: ctx.tenantId, version, actorType: ctx.actor.type, actorId: ctx.actor.id, surface: ctx.surface, change: change.change,
-    objectId: change.object_id ?? null, fieldId: change.field_id ?? null, before: change.before, after: change.after });
+    objectId: change.object_id ?? null, fieldId: change.field_id ?? null, before: change.before, after: change.after, via: via ?? null, pack: ctx.pack ?? null });
   await audit(tx, ctx, { action: `schema.${change.change}`, objectType: change.object, details: { field: change.field, version } });
   await emit(tx, ctx, { type: `schema.${change.change}`, objectType: change.object, data: { field: change.field, version } });
   return version;

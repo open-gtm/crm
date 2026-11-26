@@ -28,12 +28,15 @@ afterAll(() => sql.end());
  * members that existed before it, has its own test, set up in SQL.
  */
 async function applyPermissionSetsEarly(upTo: string) {
-  const file = "019_permission_sets.sql";
-  const text = readFileSync(new URL(`../migrations/${file}`, import.meta.url), "utf8");
-  await sql.begin(async (tx) => {
-    await tx.unsafe(text);
-    await tx`INSERT INTO schema_migrations (name, checksum) VALUES (${file}, ${createHash("sha256").update(text).digest("hex")})`;
-  });
+  // 025 too: today's server records the app, key and pack behind every schema change, in two columns it adds
+  // to schema_changes (a table of 002), independent of everything in between.
+  for (const file of ["019_permission_sets.sql", "025_schema_change_source.sql"]) {
+    const text = readFileSync(new URL(`../migrations/${file}`, import.meta.url), "utf8");
+    await sql.begin(async (tx) => {
+      await tx.unsafe(text);
+      await tx`INSERT INTO schema_migrations (name, checksum) VALUES (${file}, ${createHash("sha256").update(text).digest("hex")})`;
+    });
+  }
   expect(await migrate(url, undefined, { upTo })).toEqual([]); // nothing new: this refreshes the app role's grants
 }
 
@@ -48,7 +51,7 @@ describe("migrations", () => {
     expect(applied).toEqual(["001_platform.sql", "002_schema_engine.sql", "003_core_sales.sql", "004_events_webhooks_automations.sql",
       "005_alerts_notifications.sql", "006_roles.sql", "007_chain_order_event_retries.sql", "008_object_field_permissions.sql", "009_schema_token.sql",
       "010_people_sign_in.sql", "012_views_preferences.sql", "013_merges.sql", "014_oauth_for_mcp.sql", "016_automation_engine.sql",
-      "017_field_types_packs.sql", "018_custom_object_owner.sql", "019_permission_sets.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql", "023_connections.sql", "024_page_layout_drafts.sql"]);
+      "017_field_types_packs.sql", "018_custom_object_owner.sql", "019_permission_sets.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql", "023_connections.sql", "024_page_layout_drafts.sql", "025_schema_change_source.sql"]);
     expect(await migrate(url)).toEqual([]);
   });
 
@@ -215,7 +218,7 @@ describe("migrations", () => {
       return { clerk: clerk!.id, user: user!.id, bot: bot!.id };
     });
 
-    expect(await migrate(url)).toEqual(["019_permission_sets.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql", "023_connections.sql", "024_page_layout_drafts.sql"]);
+    expect(await migrate(url)).toEqual(["019_permission_sets.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql", "023_connections.sql", "024_page_layout_drafts.sql", "025_schema_change_source.sql"]);
 
     const inTenant = <T>(fn: (tx: postgres.TransactionSql) => Promise<T>) => sql.begin(async (tx) => {
       await tx`SELECT set_config('app.tenant_id', ${tenant}, true)`;

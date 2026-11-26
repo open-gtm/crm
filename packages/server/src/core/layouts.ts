@@ -6,9 +6,10 @@ import { audit } from "./audit.js";
 import { can, type Ctx } from "./context.js";
 import { DISGUISING } from "./fieldtypes.js";
 import {
-  apiKeyName, changeById, changesOf, deleteDraft, draftOf, insertChange, insertVersion, markChangeReviewed, oauthClientName, pageLayout, publishPageLayout,
+  changeById, changesOf, deleteDraft, draftOf, insertChange, insertVersion, markChangeReviewed, pageLayout, publishPageLayout,
   saveDraft, trimChanges, trimVersions, versionOf, versionsOf, type ChangeRow, type Contributor, type Source, type StoredLayout, type VersionRow,
 } from "./queries/layouts.js";
+import { apiKeyName, oauthClientName } from "./queries/schema.js";
 import { getObject, isModuleOn, loadSchema, lockSchema, type FieldMeta, type ObjectMeta, type Schema } from "./schema.js";
 import { actorRef } from "./webhooks.js";
 

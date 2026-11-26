@@ -118,14 +118,3 @@ export async function trimChanges(tx: Tx, objectId: string, keep: number): Promi
            AND revision <= (SELECT max(revision) FROM page_layout_changes WHERE object_id = ${objectId}) - ${keep}`;
 }
 
-// --- Where a change came from --------------------------------------------------------------------------
-
-export async function apiKeyName(tx: Tx, id: string): Promise<string | undefined> {
-  const [row] = await tx<{ name: string }[]>`SELECT name FROM api_keys WHERE id = ${id}`;
-  return row?.name;
-}
-
-export async function oauthClientName(tx: Tx, grantId: string): Promise<string | undefined> {
-  const [row] = await tx<{ client_name: string }[]>`SELECT client_name FROM oauth_grants WHERE id = ${grantId}`;
-  return row?.client_name;
-}
