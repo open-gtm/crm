@@ -7,6 +7,15 @@ export const webUiOn = (raw: string | undefined): boolean => !["false", "0"].inc
 /** An empty value (Docker Compose passes `${VAR:-}` as "") is the same as leaving the variable out. */
 const unsetWhenEmpty = <T extends z.ZodTypeAny>(schema: T) => z.preprocess((v) => (v === "" ? undefined : v), schema);
 
+/**
+ * A per-workspace ceiling (ADR 0019): a whole number, or "unlimited" (any case), read as null. An empty
+ * value is the default. Not coerced: coercion would read a typo as NaN or an empty value as 0.
+ */
+const limit = (fallback: number | null, min = 0) => unsetWhenEmpty(z.string().trim().toLowerCase()
+  .regex(/^(unlimited|\d{1,15})$/, 'must be a whole number or "unlimited"').optional())
+  .transform((v) => (v === undefined ? fallback : v === "unlimited" ? null : Number(v)))
+  .refine((v) => v === null || v >= min, `must be at least ${min}, or "unlimited"`);
+
 const Env = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("production"),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal", "silent"]).default("info"),
@@ -29,6 +38,11 @@ const Env = z.object({
   S3_REGION: unsetWhenEmpty(z.string().default("us-east-1")),
   S3_ACCESS_KEY_ID: unsetWhenEmpty(z.string().optional()),
   S3_SECRET_ACCESS_KEY: unsetWhenEmpty(z.string().optional()),
+  /**
+   * Days between an owner asking for their workspace to be deleted and the worker deleting it (ADR 0020). An owner
+   * can withdraw the request meanwhile. 0: it is deleted on the worker's next pass.
+   */
+  WORKSPACE_DELETION_GRACE_DAYS: z.coerce.number().int().min(0).max(365).default(7),
   AUDIT_SEAL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
   AUDIT_ANCHOR_INTERVAL_MS: z.coerce.number().int().positive().default(3_600_000),
   /** Lets webhooks target http:// URLs and private addresses (for internal self-hosted targets). Metadata IPs stay blocked. */
@@ -44,6 +58,22 @@ const Env = z.object({
   /** Emails one automation may send in an hour, and one address may get from a workspace's automations in a day. */
   AUTOMATION_EMAILS_PER_AUTOMATION_HOUR: z.coerce.number().int().min(0).default(50),
   AUTOMATION_EMAILS_PER_RECIPIENT_DAY: z.coerce.number().int().min(0).default(5),
+  /**
+   * Ceilings for each workspace (ADR 0019, docs/limits.md): a whole number, or "unlimited". The operator can set
+   * another value for one workspace with the `limits` command. Records count archived ones too. The
+   * defaults change nothing for a server that was running before these existed: what had no ceiling
+   * still has none, and custom objects, webhooks and automations keep the ceilings they always had.
+   */
+  LIMIT_RECORDS: limit(null),
+  LIMIT_MEMBERS: limit(null, 1),
+  LIMIT_SERVICE_ACCOUNTS: limit(null),
+  LIMIT_API_KEYS: limit(null),
+  LIMIT_CUSTOM_OBJECTS: limit(100),
+  LIMIT_CUSTOM_FIELDS: limit(null),
+  LIMIT_WEBHOOKS: limit(50),
+  LIMIT_AUTOMATIONS: limit(200),
+  /** API requests a workspace may make in a minute, all its keys, people and connected apps together, counted per API process. */
+  LIMIT_REQUESTS_PER_MINUTE: limit(null, 1),
   /** When true, the API trusts X-Forwarded-For for client addresses. Only enable behind a reverse proxy you control. "true"/"1" = on. */
   TRUST_PROXY: z.string().default("false").transform((v) => ["true", "1"].includes(v.trim().toLowerCase())),
   EVENT_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(1000),

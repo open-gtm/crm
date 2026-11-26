@@ -79,7 +79,9 @@ export async function syncStandardObjects(sql: postgres.Sql): Promise<void> {
  * Least-privilege grants for the app role. Append-only tables get INSERT and SELECT only; spent confirm tokens are
  * inserted, read and expired, never changed. An installed pack's row is kept after an uninstall (it keeps versions
  * going forward and its names reserved), so the app never deletes one. The record of a workspace created by sign-up is
- * written once: it goes only with its workspace (the foreign key cascades).
+ * written once: it goes only with its workspace (the foreign key cascades). A workspace's limits (ADR 0019) are the
+ * operator's to set, so the app only reads them: the `limits` command writes them as the migrator. A deleted workspace's tombstone is written
+ * only by app.purge_tenant (migration 027), so the app reads it and nothing more.
  */
 function grantsSql(role: string): string {
   return `
@@ -96,6 +98,8 @@ function grantsSql(role: string): string {
     ${ifTable("confirm_tokens", `REVOKE UPDATE, TRUNCATE ON confirm_tokens FROM ${role}`)}
     ${ifTable("installed_packs", `REVOKE DELETE, TRUNCATE ON installed_packs FROM ${role}`)}
     ${ifTable("workspace_sign_ups", `REVOKE UPDATE, DELETE, TRUNCATE ON workspace_sign_ups FROM ${role}`)}
+    ${ifTable("tenant_limits", `REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON tenant_limits FROM ${role}`)}
+    ${ifTable("deleted_workspaces", `REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON deleted_workspaces FROM ${role}`)}
   `;
 }
 

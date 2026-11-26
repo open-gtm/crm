@@ -186,7 +186,7 @@ describe("limits on custom objects", () => {
       expect(r.status, `object ${i}`).toBe(201);
     }
     const over = await call("POST", "/v1/objects", { key: w.keys.admin, body: { api_name: "one_too_many" } });
-    expect(over.status).toBe(422);
+    expect(over.json).toMatchObject({ status: 409, code: "limit_reached", errors: { limit: "custom_objects", used: 100, max: 100, adding: 1 } });
     await create(w.keys.ops, "thing_7", { title: "Needle seven" });
     await create(w.keys.ops, "thing_42", { title: "Needle forty-two" });
     const found = await call("GET", "/v1/search?q=needle", { key: w.keys.ops });

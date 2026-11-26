@@ -49,7 +49,7 @@ People will want to attach files to records: a résumé on a candidate, a signed
 - **Encryption.** Restricted files are encrypted per file with the workspace data key (AES-GCM, the same envelope as restricted values), whatever the store. On S3, server-side encryption is added on top, not relied on.
 - **Export and import.** A CSV export writes file names and IDs, never bytes. A separate `crm data export-files` bundles the files a caller can read into a zip with a manifest. Import takes file IDs already uploaded to the same workspace, never URLs, so the server never fetches from outside (no SSRF).
 - **Merge.** The survivor keeps its files, and the duplicates' files are added to the list (a merge already treats list fields as values; file lists would be the documented exception, to avoid losing documents). Duplicates' references stay in the merge record, for unmerge.
-- **Erasure and retention.** `erase_contact` deletes files on the contact's confidential and restricted fields. Archiving a record keeps its files. Deleting a workspace deletes its bytes in the store too, which S3 needs a sweep for.
+- **Erasure and retention.** `erase_contact` deletes files on the contact's confidential and restricted fields. Archiving a record keeps its files. Deleting a workspace deletes its bytes in the store too, which S3 needs a sweep for. *As built ([ADR 0020](0020-data-disposal.md)):* erasing a record deletes every file attached to it and to the activities and tasks about it (bytes, name and hash), since files are attached to records, not held in fields; deleting a workspace deletes its S3 objects one by one before its rows.
 - **Schema packs** can declare file fields, but never carry files.
 
 ## Open questions

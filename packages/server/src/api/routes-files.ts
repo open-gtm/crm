@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { deleteFile, downloadFile, fileLimits, getFile, listFiles, uploadFile } from "../core/files.js";
+import { deleteFile, downloadFile, fileLimits, getFile, listFiles, uploadFile, workspaceFileLimits } from "../core/files.js";
 import { route } from "./registry.js";
-import { data, dataList, object, ref, S } from "./responses.js";
+import { data, dataList, nullable, object, ref, S } from "./responses.js";
 
 // --- Files attached to records (core/files.ts, ADR 0011) --------------------------------------
 
@@ -34,8 +34,8 @@ route({
 route({
   method: "GET", path: "/v1/files/limits", scope: "ops:read", tag: "files",
   summary: "The largest file an upload may hold and what one workspace's files may hold in all, in bytes",
-  response: data(object({ max_bytes: S.int, quota_bytes: S.int, max_files_per_record: S.int })),
-  handler: async () => ({ body: { data: { ...fileLimits(), max_files_per_record: 100 } } }),
+  response: data(object({ max_bytes: S.int, quota_bytes: { ...nullable(S.int), description: "What the workspace's files may hold in all; null when unlimited" }, max_files_per_record: S.int })),
+  handler: async ({ tx }) => ({ body: { data: { ...(await workspaceFileLimits(tx)), max_files_per_record: 100 } } }),
 });
 
 route({

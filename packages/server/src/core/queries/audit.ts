@@ -65,6 +65,11 @@ export async function trySealLock(tx: Tx, tenantId: string): Promise<boolean> {
   return Boolean(lock?.ok);
 }
 
+/** Waits for, and takes, the tenant's sealing lock: for the one caller that must seal everything before it goes on (deleting the workspace). */
+export async function sealLock(tx: Tx, tenantId: string): Promise<void> {
+  await tx`SELECT pg_advisory_xact_lock(hashtext(${`audit-seal:${tenantId}`}))`;
+}
+
 /** The lock that keeps verification and anchoring apart, per tenant: storage and the anchors table are then seen in step. */
 const anchorLock = (tenantId: string) => `audit-anchor:${tenantId}`;
 

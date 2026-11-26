@@ -34,6 +34,22 @@ export function bootstrapReport(r: {
   ].join("\n");
 }
 
+/** How `limits` is called. */
+export function limitsUsage(): string {
+  return ["Usage: limits --workspace ws_… [key=value …]",
+    "  Shows one workspace's limits. With key=value pairs, sets them first: a whole number, \"unlimited\",",
+    "  or \"default\" (back to the server's setting). Example: limits --workspace ws_… records=50000 members=10 webhooks=default",
+    "  Needs MIGRATOR_DATABASE_URL (run it where `migrate` runs: docker compose run --rm migrate limits …)."].join("\n");
+}
+
+/** What `limits` prints: every limit of the workspace and where its value comes from. */
+export function limitsReport(r: { workspace: string; limits: { key: string; limit: number | null; source: "server" | "workspace" }[] }, changed: boolean): string {
+  const width = Math.max(...r.limits.map((l) => l.key.length));
+  return ["", `${changed ? "Limits set. " : ""}Limits of workspace ${r.workspace}:`,
+    ...r.limits.map((l) => `  ${l.key.padEnd(width)}  ${String(l.limit ?? "unlimited").padStart(12)}  ${l.source === "workspace" ? "set for this workspace" : "server default"}`),
+    "", "A changed limit applies at once, except requests_per_minute, which each API process picks up within 30 seconds.", ""].join("\n");
+}
+
 /** Errors from a mistyped or unknown command-line option (node:util parseArgs). */
 const PARSE_ARGS = /^ERR_PARSE_ARGS_/;
 /** Database connection failures an operator fixes in their setup: refused, unknown host, wrong password, missing database or role. */
