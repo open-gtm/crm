@@ -102,6 +102,10 @@ curl -s -X POST localhost:8787/v1/objects/account/records -H "Authorization: Bea
   -H "Content-Type: application/json" -H "Idempotency-Key: acme-1" \
   -d '{"name": "Acme", "domain": "acme.com"}'
 
+# Create, or update the record that already has this value in a unique field (here a contact's email)
+curl -s -X POST localhost:8787/v1/objects/contact/records/upsert -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"key": "email", "values": {"email": "jane@acme.com", "job_title": "CTO"}}'
+
 curl -s -X POST localhost:8787/v1/objects/contact/records/batch -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
   -d '{"records": [{"first_name": "Jane", "email": "jane@acme.com", "account": "acct_…"}]}'
@@ -137,6 +141,10 @@ The API serves a web app at `PUBLIC_URL` (the Docker image includes it): lists w
 ## Use it from the command line
 
 The `crm` CLI keeps the workspace schema in a file you review and apply (`crm schema pull`, `plan`, `apply`), imports and exports CSV, and manages keys, members and roles. It isn't on npm yet: build it from source. See [`docs/cli.md`](docs/cli.md).
+
+## Use it beside the CRM you already have
+
+A connection stores a credential for another system (a token, or an OAuth client that fetches its own access tokens) once per workspace, encrypted, and an automation's HTTP step names it: `{"type": "http_request", "connection": "salesforce", "method": "PATCH", "url": "/services/data/…"}`. Connections are managed in Settings → Connections or under `/v1/connections`, never through MCP. For the other direction, a scheduled automation can fetch a list from the other system and go through it, or the other system can call `POST /v1/objects/{object}/records/upsert`. There is no built-in integration with any vendor: the guides show how to set one up yourself for [HubSpot](docs/integrations/hubspot.md) and [Salesforce](docs/integrations/salesforce.md). See [`docs/connections.md`](docs/connections.md).
 
 ## Quotes and orders
 

@@ -216,6 +216,18 @@ export interface Webhook {
   id: string; url: string; description: string | null; events: string[]; enabled: boolean; include_restricted?: boolean;
   created_at: string; consecutive_failures?: number; paused_until?: string | null; secret?: string; [k: string]: unknown;
 }
+export type ConnectionType = "static_token" | "oauth_client_credentials" | "oauth_refresh_token";
+/** A stored credential for one outside host. Its secrets are write-only: only whether each is set. */
+export interface Connection {
+  id: string; key: string; name: string; description: string | null; type: ConnectionType; base_url: string; header_name: string; header_prefix: string;
+  token_url: string | null; client_id: string | null; scope: string | null; token_lifetime_minutes: number; test_path: string | null; enabled: boolean;
+  status: "active" | "failing" | "disabled" | "archived"; has_secret: boolean; secret_set_at: string | null; has_refresh_token: boolean;
+  refresh_token_set_at: string | null; token_expires_at: string | null; last_used_at: string | null; last_error: string | null; last_error_at: string | null;
+  used_by?: { id: string; name: string }[];
+}
+export interface ConnectionTest {
+  ok: boolean; token: { ok: boolean; error: string | null } | null; request: { ok: boolean; status: number | null; error: string | null } | null; note?: string;
+}
 export interface Delivery {
   id: string; status: "pending" | "succeeded" | "dead" | string; attempts: number; event_type?: string; event?: string;
   last_status?: number | null; last_error?: string | null; created_at?: string; next_attempt_at?: string | null; [k: string]: unknown;

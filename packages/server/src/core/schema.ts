@@ -90,7 +90,7 @@ const DISPLAY_TYPES: readonly FieldType[] = ["text", "email", "phone", "url"];
 const MAX_FIELDS_EVER = 500;
 const RESERVED_PREFIXES = new Set([...CATALOG.map((o) => o.id_prefix), ...Object.values(ENTITIES).map((e) => e.prefix),
   "prod", "price", "quote", "ord", "ctr", "ent", "psch", "inv", "pay", "qli", "oli", "cli", "sitm", "ili", "palloc", "fld", "obj",
-  "evt", "whk", "dlv", "auto", "run", "key", "usr", "svc", "alr", "ntf", "ws", "file", "role", "pset"]);
+  "evt", "whk", "dlv", "auto", "run", "key", "usr", "svc", "alr", "ntf", "ws", "file", "role", "pset", "conn"]);
 
 /** Per-process cache, one schema per workspace, keyed by schema_token (migration 009): a value never reused, even after a rollback. */
 const cache = new Map<string, Schema>();

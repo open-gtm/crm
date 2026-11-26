@@ -193,6 +193,13 @@ export function buildOpsServer(client: HlCrmClient): McpServer {
     annotations: write,
   }, ({ object, values }) => run(async () => unwrap(await client.post<{ data: unknown }>(`/v1/objects/${enc(object)}/records`, values))));
 
+  server.registerTool("upsert_record", {
+    description: "Create one record, or update the one that already has this value in a unique field (`key`: a contact's email, an account's domain, a unique custom field such as an ID from another system). "
+      + "`values` must include the key. Returns the record and action: created, updated or unchanged. Use it to copy records in from another system without making duplicates.",
+    inputSchema: { object: z.string(), key: z.string().describe("A unique field of the object, e.g. email"), values: z.record(z.string(), z.unknown()) },
+    annotations: write,
+  }, ({ object, key, values }) => run(async () => client.post<{ action: string; data: unknown }>(`/v1/objects/${enc(object)}/records/upsert`, { key, values })));
+
   server.registerTool("create_records", {
     description: "Create up to 100 records of one object in a single all-or-nothing call. Use for lists (e.g. a list of contacts). If one record is invalid, none are created and the error says which. "
       + "dry_run: true creates nothing and returns, per record, what would be created or its errors; check a long list that way first.",
@@ -632,9 +639,11 @@ export function buildAdminServer(client: HlCrmClient): McpServer {
     "or {\"output\": \"{{steps.<id>.status}}\", \"op\": \"eq\", \"value\": 200}). Types: " +
     "send_webhook {webhook: whk_…}; update_record {values, record?}; create_record {object, values}; notify {title, body?, severity?, recipients: {record_owner?, users?}}; " +
     "find_records {object, where?, sort?, limit? (max 200)} -> {count, ids, records, first}; upsert_record {object, key: id|unique field, values} -> {id, action}; " +
-    "http_request {method, url (fixed host), headers?, secret_headers? (write-only), body? (JSON)} -> {status, ok, json, snippet}; " +
+    "http_request {method, url (fixed host), headers?, secret_headers? (write-only), body? (JSON)} -> {status, ok, json, snippet}, " +
+    "or with a stored credential {method, connection: <key from list_connections>, url: a path such as /v1/contacts/{{record.id}}, headers?, body?}; " +
     "send_email {to: {member} | {record_owner: true} | {field: <email field>} | {address}, subject, body (plain text)}; " +
-    "for_each {over: <find_records id> | query: {object, where?, limit? (max 200)}, steps: [...]} (current item is {{item.<field>}}); stop {reason?}. " +
+    "for_each {over: <find_records id> | query: {object, where?, limit? (max 200)}, steps: [...]} (current item is {{item.<field>}}), " +
+    "or for_each {items: \"{{steps.<http_request id>.json.<list>}}\", steps: [...]} over a list another system returned ({{item.<Key>}} reads an element; no current record, so use upsert_record); stop {reason?}. " +
     "Placeholders: {{record.<field>}}, {{item.<field>}}, {{steps.<id>.<output>}}, {{event.type}}, {{run.id}}, {{automation.name}}, {{today}}, {{today+3d}}, {{now}}, " +
     "with filters such as {{record.amount | number:2}}, {{record.due_at | add_days:7 | date}}, upper, lower, trim, default:\"x\", truncate:N, join:\", \", count.");
   const Trigger = z.object({
@@ -795,6 +804,12 @@ export function buildAdminServer(client: HlCrmClient): McpServer {
 
   server.registerTool("list_webhooks", { description: "Webhook endpoints with their subscriptions and health.", annotations: read },
     () => run(async () => unwrap(await client.get<{ data: unknown }>("/v1/webhooks"))));
+
+  server.registerTool("list_connections", {
+    description: "Connections: stored credentials for calling other systems (a CRM, a billing API), each bound to one base URL. An http_request step uses one with " +
+      "\"connection\": \"<key>\" and a path as its url. Secrets are never shown, and connections can't be created, changed or tested here: ask the user to do that in Settings → Connections.",
+    annotations: read },
+    () => run(async () => unwrap(await client.get<{ data: unknown }>("/v1/connections"))));
 
   server.registerTool("update_webhook", {
     description: "Change a webhook's URL, subscribed events or description, or enable/disable it. Changing the URL or events changes where CRM data is sent. Defaults to dry_run: true, which shows the current and new values. " + confirmUrl,

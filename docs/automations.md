@@ -87,7 +87,7 @@ The **current record** is the trigger record, or inside `for_each` the item.
 | `send_webhook` | `{"type": "send_webhook", "webhook": "whk_…"}` | `delivery` |
 | `http_request` | see below | `status`, `ok`, `json`, `snippet` |
 | `send_email` | see below | `sent` |
-| `for_each` | `{"type": "for_each", "query": {"object": "contact", "where": {…}, "limit": 100}, "steps": [ … ]}` or `"over": "<find_records id>"` | `count`, `truncated` |
+| `for_each` | `{"type": "for_each", "query": {"object": "contact", "where": {…}, "limit": 100}, "steps": [ … ]}` or `"over": "<find_records id>"`, or `"items": "{{steps.<http id>.json.<list>}}"` | `count`, `truncated` |
 | `stop` | `{"type": "stop", "reason": "nothing to do"}` | ends the run (it succeeds; the reason is kept) |
 
 **upsert_record** matches the way import does: the `key` is `id` or a field whose values are unique (custom unique fields, `contact.email`, `account.domain`), normalised as the database compares it (emails ignore case; domains are compared as domains). A match with nothing to change is left alone. More than one match fails the step.
@@ -102,7 +102,22 @@ The **current record** is the trigger record, or inside `for_each` the item.
 - **Who can read what.** A part or path depends on its field: a recipient, or a `run_roles` member running it, who can't read `hq` is treated as unable to read `hq.city`, `hq.display` or a sort by `hq.city` (skipped, or 403), and writing a part counts as writing the field.
 - **Placeholders** reach into values: `{{record.hq.city}}`, `{{record.hq.display}}` (the one-line address), `{{record.meta.plan}}` (json keys must be lowercase names or list positions to be reachable), and the filters `duration` (`5400` → `1h 30m`) and `percent` / `percent:1` (`12.5` → `12.5%`). A restricted address or json field is refused at save, part by part, and a part of a value the automation holds as restricted is refused when it runs, never filled as empty.
 
-**for_each** goes through the records of an earlier `find_records` step or of its own `query` (default 50, at most 200 per run). When more records match than the cap, the run log says so (`truncated: true` and a note) and the rest are left for the next run. `for_each` can't be nested. Its body sees the item as `{{item.<field>}}`.
+**for_each** goes through the records of an earlier `find_records` step or of its own `query` (default 50, at most 200 per run), or through a list in an HTTP reply (below). When more records match than the cap, the run log says so (`truncated: true` and a note) and the rest are left for the next run. `for_each` can't be nested. Its body sees the item as `{{item.<field>}}`.
+
+**for_each over an HTTP reply.** `"items": "{{steps.<id>.json.<path>}}"` names a list in the parsed JSON reply of an earlier `http_request` step, and the body runs once per element, at most 200 per run:
+
+```json
+{ "type": "http_request", "id": "fetch", "method": "GET", "connection": "salesforce",
+  "url": "/services/data/v62.0/query?q=SELECT+Id,FirstName,LastName,Email+FROM+Contact+WHERE+LastModifiedDate+>+{{now-1h}}+LIMIT+100" },
+{ "type": "for_each", "items": "{{steps.fetch.json.records}}", "steps": [
+  { "type": "upsert_record", "object": "contact", "key": "salesforce_id",
+    "values": { "salesforce_id": "{{item.Id}}", "first_name": "{{item.FirstName}}", "last_name": "{{item.LastName}}", "email": "{{item.Email}}" } } ] }
+```
+
+- `items` is exactly one placeholder into an `http_request` step's `json`. Inside the body `{{item.<key>}}` reads the element, with keys written as the other system writes them (capitals included). There is no current record, so steps that need one (`update_record` without `record`, `notify`, an `if` filter) are refused at save; `upsert_record`, `create_record` and `http_request` work.
+- The elements are another system's data: they are filled in as values, bounded like any placeholder, and never evaluated.
+- A reply is cut at 64 KB and must parse as JSON, so ask the other system for a page that fits (a `LIMIT`, a page size) and a window that matches the schedule (`{{now-1h}}` for an hourly run; `{{now-1h | epoch_ms}}` for APIs that take milliseconds). What didn't fit is not fetched: there is no paging.
+- A reply that holds no list there fails the run as a data failure. On a deployment that allows private targets (`WEBHOOK_ALLOW_INSECURE_TARGETS=true`) replies are not kept, so there is nothing to go through.
 
 ### http_request
 
@@ -126,6 +141,8 @@ The **current record** is the trigger record, or inside `for_each` the item.
 - The run log has the method, the URL without query values (they may carry personal data), header names, the status and the snippet. The audit log has `automation.http_request` with the host and status.
 - Restricted values are never read: automations read records without `restricted:read`, a placeholder that names a restricted field (on the record, the item, or a step's found or written records) is refused when the automation is saved, in any step, and one that names a hidden field is refused in HTTP and email steps. A restricted value that reaches a placeholder another way (a whole record through `{{steps.found.first | json}}`) fails the step, whatever the step does: written to a record, the "[restricted]" the automation reads would replace the real value. The runner holds restricted values as a marker, not as text, so a record whose text is literally "[restricted]" is sent like any other.
 - **Who set the URL.** A run started by a member's change, or by a member asking for it, skips an `http_request` whose URL is filled from a field that member changed (or from the record they chose), when their role can't read everything the run depends on (see send_email below).
+
+**With a connection.** `"connection": "<key>"` names a [connection](connections.md), a credential stored once for the workspace. `url` is then a path (`"/v1/contacts/{{record.id}}"`) under the connection's base URL, and the connection adds its header, fetching an OAuth access token first when it needs one. Such a step can't set that header or have `secret_headers`. A 401 through an OAuth connection gets one new token and one more try. A connection that is turned off, or whose token request fails, fails the step as a configuration failure, with the status and OAuth error code of the token reply and nothing else from it.
 
 **http_request or send_webhook?** Use `send_webhook` to deliver an event to a receiver you control: it is signed (Standard Webhooks), retried for about 22 hours, logged per delivery and replayable, and the payload is the event with the record. Use `http_request` to call someone else's API in the shape it expects (any method, your own JSON body and headers, an API key in a secret header): it is sent once per run, not signed and not retried, and later steps can use its reply.
 
@@ -159,9 +176,9 @@ The **current record** is the trigger record, or inside `for_each` the item.
 | `{{run.id}}`, `{{automation.id}}`, `{{automation.name}}` | this run and automation |
 | `{{today}}`, `{{today+3d}}`, `{{now}}`, `{{now-2h}}` | dates (UTC); units `m`, `h`, `d` |
 
-Filters, applied left to right: `upper`, `lower`, `trim`, `default:"text"`, `truncate:N`, `count`, `join:", "`, `number` / `number:2`, `date`, `datetime`, `add_days:N`, `json`, `duration` (seconds as `1d 2h 3m 4s`), `percent` / `percent:1` (percentage points as `12.5%`). Example: `{{record.due_at | add_days:7 | date}}`.
+Filters, applied left to right: `upper`, `lower`, `trim`, `default:"text"`, `truncate:N`, `count`, `join:", "`, `number` / `number:2`, `date`, `datetime`, `epoch_ms` (milliseconds since 1970), `add_days:N`, `json`, `duration` (seconds as `1d 2h 3m 4s`), `percent` / `percent:1` (percentage points as `12.5%`). Example: `{{record.due_at | add_days:7 | date}}`.
 
-Rules: a path is lowercase names and list positions only, through own properties of plain objects (never a prototype, a method or anything outside the table above). Nothing is evaluated: a record value that looks like a placeholder is copied as text, not filled again. A value that is only a placeholder keeps its type (a number stays a number); inside text it becomes text. Each place escapes what it inserts: URL parts are percent-encoded (and a path segment can't be empty, `.` or `..`), header values lose control characters, email subjects are one line, JSON bodies take values as values. `number` takes 0 to 10 decimals and `add_days` −36,500 to 36,500, checked at save; a filter that can't use a value fails the step as a data failure.
+Rules: a path is names and list positions only (field names are lowercase; the keys of an HTTP reply may have capitals), through own properties of plain objects (never a prototype, a method or anything outside the table above). Nothing is evaluated: a record value that looks like a placeholder is copied as text, not filled again. A value that is only a placeholder keeps its type (a number stays a number); inside text it becomes text. Each place escapes what it inserts: URL parts are percent-encoded (and a path segment can't be empty, `.` or `..`), header values lose control characters, email subjects are one line, JSON bodies take values as values. `number` takes 0 to 10 decimals and `add_days` −36,500 to 36,500, checked at save; a filter that can't use a value fails the step as a data failure.
 
 **Size.** A text holds at most 50 placeholders, a step 200 (refused at save). What a fill produces is bounded while it is filled, per placeholder and in total, and the step fails as soon as it would pass: email body 64 KB, subject 200 characters, each header value 2 KB, URL 8 KB, HTTP body 64 KB, a record value its field's own maximum (2,000 characters for text, 100,000 for long text, or the field's `max_length`; 4 KB for an address, all parts together; 16 KB for a json value; 64 characters for a rating, percent or duration; 10,000 for other types), notification title 500 and body 4,000 characters, filters 16 KB. So one placeholder that yields a large step output can't be repeated into megabytes: `{{steps.f.records | json}}` forty times fails at 64 KB in an email body instead of building 6 MB.
 

@@ -18,7 +18,7 @@ import { route } from "./registry.js";
 import { data, enumOf, list, nullable, object, plain, R, ref, S } from "./responses.js";
 
 /** Through an MCP server: the header a key's client sends, or the surface a connected app's token fixes. */
-const viaMcp = (headers: Headers, ctx: Ctx) => (headers.get("x-hlcrm-surface") ?? "api").endsWith("mcp") || ctx.surface.endsWith("mcp");
+export const viaMcp = (headers: Headers, ctx: Ctx) => (headers.get("x-hlcrm-surface") ?? "api").endsWith("mcp") || ctx.surface.endsWith("mcp");
 
 const WebhookBody = z.object({
   url: z.string().max(2000),

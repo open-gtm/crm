@@ -33,6 +33,7 @@ Permissions are in two areas. **Objects and fields** (`records:read`, `records:w
 | `alerts:manage` | Manage workspace alert rules |
 | `audit:read` | Read the audit log, schema history and access review |
 | `views:manage` | Create, change and delete views shared with the workspace (personal views need only read access to their object) |
+| `connections:manage` | Create, change, test and archive [connections](connections.md): stored credentials that automations use to call other systems. Using one in a step needs `automations:manage`, not this |
 
 Anyone can manage their own keys without `keys:manage`, within the limits below.
 
@@ -57,7 +58,7 @@ These rules are about roles, because roles are the boundary between people. Key 
 | `ops:read` | `records:read` |
 | `ops:write` | `records:read`, `records:write`, `records:archive`, `views:manage` |
 | `restricted:read` | `restricted:read` |
-| `admin` | `schema:manage`, `members:manage`, `roles:manage`, `keys:manage`, `webhooks:manage`, `automations:manage`, `alerts:manage`, `audit:read`, `views:manage` |
+| `admin` | `schema:manage`, `members:manage`, `roles:manage`, `keys:manage`, `webhooks:manage`, `automations:manage`, `alerts:manage`, `audit:read`, `views:manage`, `connections:manage` |
 
 Example: a member with the `member` role and a key with scopes `["ops:read"]` can read records but not write them. The same member with an `admin`-scoped key still cannot change the schema, because the role lacks `schema:manage`.
 

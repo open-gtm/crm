@@ -25,6 +25,7 @@ export const PERMISSIONS = {
   "alerts:manage": "Manage workspace alert rules",
   "audit:read": "Read the audit log, schema history and access review",
   "views:manage": "Create, change and delete views shared with the workspace",
+  "connections:manage": "Create, change and test connections: stored credentials automations use to call other systems",
 } as const;
 export type Permission = keyof typeof PERMISSIONS;
 export const ALL_PERMISSIONS = Object.keys(PERMISSIONS) as Permission[];
@@ -61,7 +62,7 @@ export const SCOPE_PERMISSIONS: Record<Scope, Permission[]> = {
   "ops:read": ["records:read"],
   "ops:write": ["records:read", "records:write", "records:archive", "views:manage"],
   "restricted:read": ["restricted:read"],
-  admin: ["schema:manage", "members:manage", "roles:manage", "keys:manage", "webhooks:manage", "automations:manage", "alerts:manage", "audit:read", "views:manage"],
+  admin: ["schema:manage", "members:manage", "roles:manage", "keys:manage", "webhooks:manage", "automations:manage", "alerts:manage", "audit:read", "views:manage", "connections:manage"],
 };
 
 /** The built-in roles every workspace starts with. They cannot be edited; custom roles can. */

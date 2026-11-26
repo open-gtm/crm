@@ -90,7 +90,7 @@ describe("permission sets: definition", () => {
     const of = (c: string) => cat.filter((p) => p.category === c).map((p) => p.key);
     expect(of("records")).toEqual(["records:read", "records:write", "records:archive", "restricted:read"]);
     expect(of("features")).toEqual(["schema:manage", "members:manage", "roles:manage", "keys:manage", "webhooks:manage", "automations:manage",
-      "alerts:manage", "audit:read", "views:manage"]);
+      "alerts:manage", "audit:read", "views:manage", "connections:manage"]);
   });
 
   it("keep the rules of roles: what reaches records needs record access, and managers can't be limited", async () => {

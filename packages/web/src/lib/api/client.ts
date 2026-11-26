@@ -75,8 +75,8 @@ export const seg = (s: string) => encodeURIComponent(s);
 export function isHeavy(method: Method, path: string, opts: RequestOptions): boolean {
   const body = opts.body as { count?: boolean; dry_run?: boolean } | undefined;
   if (path === "/v1/aggregate" || path === "/v1/ops/merge_records" || /^\/v1\/objects\/[^/]+\/(records\/bulk_update|records\/bulk_archive|export|import|duplicates)$/.test(path)) return true;
-  // Schema and pack plans and applies, automation tests: rare from the app, but the server counts them (packages/server test/web-ui.test.ts keeps this list in step).
-  if (method === "POST" && /^\/v1\/(schema\/(plan|apply)|packs\/(plan|apply|[^/]+\/uninstall)|automations\/(test|[^/]+\/test))$/.test(path)) return true;
+  // Schema and pack plans and applies, automation and connection tests: rare from the app, but the server counts them (packages/server test/web-ui.test.ts keeps this list in step).
+  if (method === "POST" && /^\/v1\/(schema\/(plan|apply)|packs\/(plan|apply|[^/]+\/uninstall)|automations\/(test|[^/]+\/test)|connections\/[^/]+\/test)$/.test(path)) return true;
   if (method === "POST" && (/^\/v1\/automations\/[^/]+\/run$/.test(path) || /\/records\/batch$/.test(path))) return body?.dry_run === true;
   // Files: an upload and a download hold a connection while the bytes move.
   if ((method === "POST" && /^\/v1\/records\/[^/]+\/files$/.test(path)) || (method === "GET" && /^\/v1\/files\/[^/]+\/content$/.test(path))) return true;
