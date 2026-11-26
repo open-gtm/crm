@@ -7,6 +7,7 @@ import { ID_PREFIX_PATTERN, uuidv7 } from "../lib/ids.js";
 import { pluralize } from "../lib/plural.js";
 import { masterKey } from "../config.js";
 import { audit } from "./audit.js";
+import { viaOf } from "./source.js";
 import {
   CATALOG, ENTITIES, isEntity, OWNER_FIELD,
   type CatalogObject, type FieldOptions, type FieldType, type JsonShape, type Sensitivity,
@@ -15,7 +16,7 @@ import type { Ctx } from "./context.js";
 import { emit } from "./events.js";
 import { ADDRESS_PART_NAMES, FIELD_TYPES, fieldRulesProblem, isFieldType, PERCENT, ratingMax, TYPE_INFO } from "./fieldtypes.js";
 import {
-  apiKeyName, archivedObjectNames, archiveFieldRow, bumpSchemaVersion, countFieldsEver, countLinkingRecords, insertCustomField, insertCustomObject, insertSchemaChange, oauthClientName,
+  archivedObjectNames, archiveFieldRow, bumpSchemaVersion, countFieldsEver, countLinkingRecords, insertCustomField, insertCustomObject, insertSchemaChange,
   insertStandardField, insertStandardObject, liveFields, liveObjects, lockWorkspaceSchema, retypeFieldRow, schemaHead, setWorkspaceModules, updateFieldRow,
   updateObjectRow, viewsOfObject,
 } from "./queries/schema.js";
@@ -301,9 +302,9 @@ export async function recordChange(tx: Tx, ctx: Ctx, change: Change & { object_i
   const version = Number(row.schema_version);
   txState()?.ownSchemas.set(row.schema_token, undefined);
   // The connected app or key by name, as layout changes record it (ADR 0017): a label for people; the audit log has the IDs.
-  const via = ctx.oauth ? await oauthClientName(tx, ctx.oauth.grantId) : ctx.keyId ? await apiKeyName(tx, ctx.keyId) : undefined;
+  const via = await viaOf(tx, ctx);
   await insertSchemaChange(tx, { tenantId: ctx.tenantId, version, actorType: ctx.actor.type, actorId: ctx.actor.id, surface: ctx.surface, change: change.change,
-    objectId: change.object_id ?? null, fieldId: change.field_id ?? null, before: change.before, after: change.after, via: via ?? null, pack: ctx.pack ?? null });
+    objectId: change.object_id ?? null, fieldId: change.field_id ?? null, before: change.before, after: change.after, via, pack: ctx.pack ?? null });
   await audit(tx, ctx, { action: `schema.${change.change}`, objectType: change.object, details: { field: change.field, version } });
   await emit(tx, ctx, { type: `schema.${change.change}`, objectType: change.object, data: { field: change.field, version } });
   return version;

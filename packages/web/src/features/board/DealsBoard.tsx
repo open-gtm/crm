@@ -15,6 +15,8 @@ import { Dialog, DialogContent, Menu, MenuContent, MenuItem, MenuLabel, MenuTrig
 import { useToast } from "@/components/ui/toast";
 import { CreateRecordDialog } from "@/features/create/CreateRecordDialog";
 import { FilterButton } from "@/features/list/FilterBuilder";
+import { DealsLayoutLinks } from "@/features/list/ListControls";
+import { isStale, lastActivityField, StalePill } from "@/features/list/stale";
 import { useApi } from "@/lib/api/context";
 import { ApiProblem, asProblem, isBusy } from "@/lib/api/problem";
 import type { AggregateResult, ObjectMeta, OpResult, Page, Pipeline, RecordData, Stage, Where } from "@/lib/api/types";
@@ -93,7 +95,8 @@ export function Board({ meta, pipelines, search, setSearch }: { meta: ObjectMeta
   const filter = search.filter !== undefined ? unpackFilter(search.filter) : null;
   const userWhere = useDebounced(compileWhere(filter, partFields(meta)), 350);
   const where = andWhere({ field: "pipeline", op: "eq", value: pipeline.id }, userWhere) as Where;
-  const [creating, setCreating] = useState(false);
+  // Creating a deal: from the header (no stage) or from the foot of a column (that stage).
+  const [creating, setCreating] = useState<{ stage?: string } | null>(null);
   const [dragging, setDragging] = useState<RecordData | null>(null);
   const [lostFor, setLostFor] = useState<{ deal: RecordData; stage: Stage } | null>(null);
   const stageField = meta.fields.find((f) => f.name === "stage");
@@ -186,7 +189,10 @@ export function Board({ meta, pipelines, search, setSearch }: { meta: ObjectMeta
   return (
     <div className="flex h-full min-h-0 flex-col">
       <PageHeader icon={<Columns3 />} title="Deals board" subtitle={totals.data?.capped ? "Totals cover the 100,000 most recently updated deals" : `${pipeline.name} pipeline`}
-        actions={meta.access.write ? <Button variant="primary" onClick={() => setCreating(true)}><Plus /> New deal</Button> : null} />
+        actions={<>
+          <DealsLayoutLinks filter={filter ? packFilter(filter) : undefined} />
+          {meta.access.write ? <Button variant="primary" onClick={() => setCreating({})}><Plus /> New deal</Button> : null}
+        </>} />
       <div className="flex flex-wrap items-center gap-2 border-b border-line bg-surface px-4 py-2 md:px-6" role="toolbar" aria-label="Board controls">
         {pipelines.length > 1 ? (
           <NativeSelect aria-label="Pipeline" className="h-7 w-auto" value={pipeline.id} onChange={(e) => setSearch({ ...search, pipeline: e.target.value })}>
@@ -214,7 +220,8 @@ export function Board({ meta, pipelines, search, setSearch }: { meta: ObjectMeta
           <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto p-4 md:px-6" aria-label={`${pipeline.name} stages`}>
             {pipeline.stages.map((s) => (
               <Column key={s.id} stage={s} stages={pipeline.stages} meta={meta} deals={byStage.get(s.id) ?? []} total={totals.data?.totals.get(s.id)}
-                totalsLoading={totals.isPending && !totals.error} totalsMissing={Boolean(totals.error && !totals.data)} loading={deals.isPending} canMove={Boolean(canMove)} onMove={requestMove} showAmount={Boolean(showAmount)} />
+                totalsLoading={totals.isPending && !totals.error} totalsMissing={Boolean(totals.error && !totals.data)} loading={deals.isPending} canMove={Boolean(canMove)} onMove={requestMove} showAmount={Boolean(showAmount)}
+                onAdd={meta.access.write ? () => setCreating({ stage: s.id }) : undefined} />
             ))}
           </div>
           <DragOverlay>{dragging ? <Card deal={dragging} meta={meta} stages={pipeline.stages} canMove={false} onMove={() => {}} overlay showAmount={Boolean(showAmount)} /> : null}</DragOverlay>
@@ -233,7 +240,7 @@ export function Board({ meta, pipelines, search, setSearch }: { meta: ObjectMeta
           {" "}<button type="button" className="font-medium text-accent hover:underline" onClick={() => void totals.refetch()}>Try again</button>
         </p>
       ) : null}
-      {creating ? <CreateRecordDialog object="deal" open onOpenChange={setCreating} prefill={{ pipeline: pipeline.id }} stay /> : null}
+      {creating ? <CreateRecordDialog object="deal" open onOpenChange={(o) => !o && setCreating(null)} prefill={{ pipeline: pipeline.id, ...(creating.stage ? { stage: creating.stage } : {}) }} stay /> : null}
       <Dialog open={lostFor !== null} onOpenChange={(o) => !o && setLostFor(null)}>
         {lostFor ? <LostDialog stage={lostFor.stage} onCancel={() => setLostFor(null)} onConfirm={(reason) => {
           const l = lostFor;
@@ -259,25 +266,24 @@ function LostDialog({ stage, onCancel, onConfirm }: { stage: Stage; onCancel: ()
   );
 }
 
-function Column({ stage, stages, meta, deals, total, totalsLoading, totalsMissing, loading, canMove, onMove, showAmount }: {
+function Column({ stage, stages, meta, deals, total, totalsLoading, totalsMissing, loading, canMove, onMove, showAmount, onAdd }: {
   stage: Stage; stages: Stage[]; meta: ObjectMeta; deals: RecordData[]; total: Total | undefined; totalsLoading: boolean; totalsMissing?: boolean; loading: boolean; canMove: boolean;
-  onMove: (d: RecordData, s: Stage) => void; showAmount: boolean;
+  onMove: (d: RecordData, s: Stage) => void; showAmount: boolean; onAdd?: () => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: stage.id, disabled: !canMove });
   const count = total?.count ?? (totalsLoading ? null : deals.length);
   const sums = (total?.sums ?? []).filter((x) => x.amount !== null);
-  const tone = stage.category === "won" ? "border-t-success" : stage.category === "lost" ? "border-t-danger" : "border-t-accent";
+  const dot = stage.category === "won" ? "bg-success" : stage.category === "lost" ? "bg-danger" : "bg-accent";
   return (
     <section ref={setNodeRef} aria-label={`${stage.name}, ${count ?? "…"} deals`}
-      className={cn("flex w-72 shrink-0 flex-col rounded-lg border border-t-2 border-line bg-surface-2/70", tone, isOver && "ring-2 ring-focus")}>
-      <header className="px-3 pb-2 pt-2.5">
-        <div className="flex items-center gap-2">
-          <h2 className="flex-1 truncate text-base font-semibold">{stage.name}</h2>
-          <span className="rounded-full bg-surface px-1.5 text-sm text-muted tabular">{count ?? "…"}</span>
-        </div>
+      className={cn("flex w-72 shrink-0 flex-col rounded-lg border border-line bg-surface-2/70", isOver && "ring-2 ring-focus")}>
+      <header className="flex items-start gap-2 px-3 pb-2 pt-2.5">
+        <span aria-hidden className={cn("mt-1.5 size-2 shrink-0 rounded-full", dot)} />
+        <h2 className="min-w-0 truncate text-base font-semibold">{stage.name}</h2>
+        <span className="mt-px text-sm text-subtle tabular">{count ?? "…"}</span>
         {showAmount && !totalsMissing ? (
-          <p className="mt-0.5 text-sm text-muted tabular">
-            {totalsLoading ? <Skeleton className="h-3 w-20" /> : sums.length ? sums.map((s, i) => <span key={i} className="mr-2">{formatMoney(s.amount, s.currency)}</span>) : formatMoney(0, meta.currency)}
+          <p className="ml-auto flex min-w-0 flex-col items-end text-right text-sm font-medium text-muted tabular">
+            {totalsLoading ? <Skeleton className="h-3 w-20" /> : sums.length ? sums.map((s, i) => <span key={i}>{formatMoney(s.amount, s.currency)}</span>) : formatMoney(0, meta.currency)}
           </p>
         ) : null}
       </header>
@@ -286,6 +292,7 @@ function Column({ stage, stages, meta, deals, total, totalsLoading, totalsMissin
           <Card key={d.id} deal={d} meta={meta} stages={stages} canMove={canMove} onMove={onMove} showAmount={showAmount} />
         ))}
         {!loading && total && total.count > deals.length ? <p className="px-1 text-sm text-subtle">{total.count - deals.length} more not loaded</p> : null}
+        {onAdd ? <Button size="sm" variant="subtle" className="justify-start" aria-label={`Add deal to ${stage.name}`} onClick={onAdd}><Plus /> Add deal</Button> : null}
       </div>
     </section>
   );
@@ -332,6 +339,7 @@ function Card({ deal, meta, stages, canMove, onMove, overlay, showAmount }: {
         <span className="flex-1" />
         {owner ? <span title={owner} className="inline-flex items-center gap-1 text-muted"><Avatar name={owner} /></span> : null}
       </div>
+      {lastActivityField(meta) && isStale(deal.last_activity_at) ? <div className="mt-2"><StalePill value={deal.last_activity_at} /></div> : null}
     </article>
   );
 }

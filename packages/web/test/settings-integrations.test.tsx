@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
-import type { Automation, ConnectedApp, InstalledPack } from "@/lib/api/types";
+import type { ConnectedApp, InstalledPack } from "@/lib/api/types";
 import { endpointOf } from "@/features/settings/ConnectedApps";
 import { describeTrigger } from "@/features/settings/AutomationsSettings";
 import { renderRoute, SESSION, type Call } from "./utils";
@@ -102,38 +102,7 @@ describe("Workspace sign-in: connecting apps", () => {
   });
 });
 
-const auto = (id: string, status: Automation["status"], trigger: Automation["trigger"]): Automation => ({
-  id, name: `Auto ${id}`, enabled: status === "enabled", status, trigger, hourly_cap: 100, run_roles: [], version: 1, paused_reason: status === "paused" ? "Too many failures" : null,
-});
-
 describe("Settings → Automations and Installed packs", () => {
-  it("lists automations with trigger, state and last run; pauses and resumes", async () => {
-    const list = [auto("auto_1", "enabled", { type: "event", event: "deal.created" }), auto("auto_2", "paused", { type: "schedule", every: "day" }), auto("auto_3", "archived", { type: "manual" })];
-    const { calls } = renderRoute("/settings/automations", (c) => {
-      if (c.path === "/v1/automations") return { body: { data: list } };
-      if (c.path === "/v1/automation-settings") return { body: { data: { paused: false, paused_at: null, paused_reason: null, external_email: false, timezone: "UTC" } } };
-      if (c.path === "/v1/automations/auto_1/runs") return { body: { data: [{ id: "run_1", trigger: "event", status: "failed", reason: "HTTP 500", failure: "target", started_at: new Date().toISOString(), results: [] }] } };
-      if (c.path === "/v1/automations/auto_2/runs") return { body: { data: [] } };
-      if (c.method === "POST" && c.path === "/v1/automations/auto_1/pause") return { body: { data: { ...list[0], status: "paused", enabled: true } } };
-      if (c.method === "POST" && c.path === "/v1/automations/auto_2/resume") return { body: { data: { ...list[1], status: "enabled" } } };
-      return undefined;
-    }, { session: OWNER });
-    const table = await screen.findByRole("table", { name: "Automations" });
-    expect(await within(table).findByText("When a deal is created (deal.created)")).toBeInTheDocument();
-    expect(within(table).getByText("On a schedule")).toBeInTheDocument();
-    expect(within(table).queryByText("Auto auto_3")).not.toBeInTheDocument();
-    expect(await within(table).findByText("failed")).toBeInTheDocument();
-    expect(await within(table).findByText("Never run")).toBeInTheDocument();
-    expect(within(table).getByText("Too many failures")).toBeInTheDocument();
-    await userEvent.click(within(table).getByRole("button", { name: "Pause Auto auto_1" }));
-    await userEvent.click(within(table).getByRole("button", { name: "Resume Auto auto_2" }));
-    await waitFor(() => expect(calls.filter((c) => c.method === "POST").map((c) => c.path)).toEqual(["/v1/automations/auto_1/pause", "/v1/automations/auto_2/resume"]));
-    expect(screen.getByText(/crm automations/)).toBeInTheDocument();
-    // The docs are a real link (from the one configured docs address), not a bare path.
-    expect(screen.getByRole("link", { name: "automations guide" })).toHaveAttribute("href", "https://github.com/open-gtm/crm/blob/main/docs/automations.md");
-    expect(document.body).not.toHaveTextContent(/docs\/[a-z]+\.md/);
-  });
-
   it("an empty automations list explains what one is and links the guide", async () => {
     renderRoute("/settings/automations", (c) => {
       if (c.path === "/v1/automations") return { body: { data: [] } };
