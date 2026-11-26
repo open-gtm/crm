@@ -78,7 +78,8 @@ export async function syncStandardObjects(sql: postgres.Sql): Promise<void> {
 /**
  * Least-privilege grants for the app role. Append-only tables get INSERT and SELECT only; spent confirm tokens are
  * inserted, read and expired, never changed. An installed pack's row is kept after an uninstall (it keeps versions
- * going forward and its names reserved), so the app never deletes one.
+ * going forward and its names reserved), so the app never deletes one. A deleted workspace's tombstone is written
+ * only by app.purge_tenant (migration 027), so the app reads it and nothing more.
  */
 function grantsSql(role: string): string {
   return `
@@ -94,6 +95,7 @@ function grantsSql(role: string): string {
     ${ifTable("merges", `REVOKE UPDATE, DELETE, TRUNCATE ON merges FROM ${role}`)}
     ${ifTable("confirm_tokens", `REVOKE UPDATE, TRUNCATE ON confirm_tokens FROM ${role}`)}
     ${ifTable("installed_packs", `REVOKE DELETE, TRUNCATE ON installed_packs FROM ${role}`)}
+    ${ifTable("deleted_workspaces", `REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON deleted_workspaces FROM ${role}`)}
   `;
 }
 

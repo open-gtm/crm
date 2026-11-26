@@ -10,7 +10,7 @@ import { logger } from "./lib/logger.js";
 
 /**
  * Server entry point. One image runs every role:
- *   api | mcp | worker | migrate | bootstrap | sign-in-link | seed | audit-verify | mcp-stdio | healthcheck
+ *   api | mcp | worker | migrate | bootstrap | sign-in-link | delete-workspace | seed | audit-verify | mcp-stdio | healthcheck
  */
 const [command, ...rest] = process.argv.slice(2);
 
@@ -108,6 +108,23 @@ async function main(): Promise<void> {
       await closeDb();
       return;
     }
+    case "delete-workspace": {
+      // Deletes a workspace and everything in it, now, with no grace period (ADR 0020). The ID must be given twice.
+      const { values } = parseArgs({ args: rest, options: { workspace: { type: "string" }, confirm: { type: "string" } } });
+      const usage = "Usage: delete-workspace --workspace ws_… --confirm ws_… (the same ID twice: this deletes the workspace and everything in it, at once, for good)";
+      if (!values.workspace || !values.confirm) throw new ConfigError(usage);
+      if (values.workspace !== values.confirm) throw new ConfigError(`--confirm must repeat the workspace ID exactly. ${usage}`);
+      assertStartupConfig("cli");
+      await assertSafeDbRole();
+      const { deleteWorkspaceNow, parseWorkspaceId } = await import("./core/disposal.js");
+      const gone = await deleteWorkspaceNow(parseWorkspaceId(values.workspace), { type: "operator" });
+      const rows = Object.values(gone.rows_deleted).reduce((a, b) => a + b, 0);
+      process.stdout.write(`Deleted workspace ${gone.id}: ${rows} rows in ${Object.values(gone.rows_deleted).filter((n) => n > 0).length} tables, `
+        + `${gone.audit_rows} audit entries (chain ended at position ${gone.audit_chain_pos ?? 0}${gone.audit_head_hash ? `, hash ${gone.audit_head_hash}` : ""}).\n`
+        + "A tombstone with these facts and no customer content is kept in deleted_workspaces. Backups made earlier still hold the workspace until they age out.\n");
+      await closeDb();
+      return;
+    }
     case "seed": {
       assertStartupConfig("cli");
       await assertSafeDbRole();
@@ -135,7 +152,7 @@ async function main(): Promise<void> {
       return;
     }
     default:
-      process.stderr.write("Usage: hl-crm-db-server <api|mcp|worker|migrate|bootstrap|sign-in-link|seed|audit-verify|mcp-stdio|healthcheck>\n");
+      process.stderr.write("Usage: hl-crm-db-server <api|mcp|worker|migrate|bootstrap|sign-in-link|delete-workspace|seed|audit-verify|mcp-stdio|healthcheck>\n");
       process.exitCode = 2;
   }
 }

@@ -37,6 +37,8 @@ const NO_ID_ROUTES = new Set([
   // The caller's own session and password, and this workspace's sign-in setting.
   "GET /v1/auth/session", "POST /v1/auth/sign-out", "GET /v1/auth/sessions", "POST /v1/auth/sessions/revoke-others",
   "POST /v1/auth/password", "DELETE /v1/auth/password", "DELETE /v1/auth/sso", "PATCH /v1/workspace/sign-in",
+  // Deleting the caller's own workspace (ADR 0020): it names the workspace by its name, never an ID.
+  "POST /v1/workspace/deletion", "DELETE /v1/workspace/deletion",
   // Views and preferences listed for the caller, and the caller's own workspace directory.
   "GET /v1/views", "GET /v1/objects/:object/views", "GET /v1/users", "GET /v1/me/preferences", "PUT /v1/me/preferences",
   "POST /v1/objects/:object/duplicates",
@@ -57,6 +59,7 @@ const BODY_ID_ROUTES = new Set([
   "POST /v1/me/alerts", "POST /v1/me/alerts/backtest", "POST /v1/alerts", "POST /v1/alerts/backtest",
   "POST /v1/schema/plan", "POST /v1/schema/apply", "POST /v1/objects/:object/import", "POST /v1/aggregate", "POST /v1/views",
   "POST /v1/ops/merge_records", "POST /v1/objects/:object/records/bulk_update", "POST /v1/objects/:object/records/bulk_archive",
+  "POST /v1/ops/erase_contact",
   // Takes a member ID in its query (?member=usr_…); its case is below.
   "GET /v1/apps",
 ]);
@@ -178,6 +181,8 @@ describe("cross-tenant isolation", () => {
       ["POST", "/v1/ops/send_quote", { quote: bIds.quote }],
       ["POST", "/v1/ops/accept_quote", { quote: bIds.quote }],
       ["POST", "/v1/ops/revise_quote", { quote: bIds.quote }],
+      ["POST", "/v1/ops/erase_contact", { contact: bIds.contact }],
+      ["POST", "/v1/ops/erase_contact", { contact: bIds.contact, dry_run: false }],
       ["POST", "/v1/objects/quote_line_item/records", { quote: bIds.quote, description: "x", unit_price: 1 }],
       ["POST", "/v1/roles", { key: "copied", name: "x", copy_from: bIds.role }],
       ["POST", "/v1/permission-sets", { key: "copied_set", name: "x", copy_from: bIds.permission_set }],
