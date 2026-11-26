@@ -120,6 +120,14 @@ export const listRoute = createRoute({
   component: lazyRouteComponent(() => import("./features/list/ObjectListPage"), "ObjectListPage"),
 });
 
+/** The layout editor of an object's record page. A static segment, so it wins over a record ID; no record ID is "customize". */
+export const customizeRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/o/$object/customize",
+  validateSearch: (s: Record<string, unknown>): { record?: string } => (typeof s.record === "string" && /^[a-z]{1,8}_[0-9A-Za-z]{26}$/.test(s.record) ? { record: s.record } : {}),
+  component: lazyRouteComponent(() => import("./features/layout-editor/LayoutEditorPage"), "LayoutEditorPage"),
+});
+
 export const recordRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "/o/$object/$id",
@@ -178,7 +186,7 @@ const settingsChildren = [settingsIndex, settingsAccount, settingsNotifications,
 const routeTree = rootRoute.addChildren([
   signInRoute,
   signedOutRoute,
-  appRoute.addChildren([homeRoute, listRoute, recordRoute, boardRoute, tasksRoute, inboxRoute, settingsRoute.addChildren(settingsChildren)]),
+  appRoute.addChildren([homeRoute, listRoute, customizeRoute, recordRoute, boardRoute, tasksRoute, inboxRoute, settingsRoute.addChildren(settingsChildren)]),
 ]);
 
 export function createAppRouter(context: RouterContext, history?: RouterHistory) {
