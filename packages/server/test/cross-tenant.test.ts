@@ -34,7 +34,7 @@ const NO_ID_ROUTES = new Set([
   "GET /v1/objects/:object/layout/draft", "PUT /v1/objects/:object/layout/draft", "DELETE /v1/objects/:object/layout/draft",
   "POST /v1/objects/:object/layout/publish", "GET /v1/objects/:object/layout/versions", "GET /v1/objects/:object/layout/versions/:version",
   "POST /v1/objects/:object/layout/restore",
-  "GET /v1/webhooks", "POST /v1/webhooks", "GET /v1/automations", "GET /v1/connections", "POST /v1/connections",
+  "GET /v1/webhooks", "POST /v1/webhooks", "GET /v1/automations", "GET /v1/events/summary", "GET /v1/automations/runs/summary", "GET /v1/connections", "POST /v1/connections",
   "GET /v1/me/notifications", "GET /v1/me/attention", "GET /v1/me/notification-preferences", "PATCH /v1/me/notification-preferences",
   "GET /v1/me/alerts", "GET /v1/alerts", "GET /v1/schema/export", "GET /v1/objects/:object/export",
   // The caller's own session and password, and this workspace's sign-in setting.

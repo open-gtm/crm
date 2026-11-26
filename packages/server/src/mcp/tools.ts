@@ -676,9 +676,9 @@ export function buildAdminServer(client: HlCrmClient): McpServer {
   }, (a) => run(() => client.patch("/v1/workspace/modules", { modules: a.modules, dry_run: a.dry_run ?? true })));
 
   server.registerTool("get_schema_changes", {
-    description: "Schema change history, newest first: what changed, who changed it and through which surface.",
-    inputSchema: { limit: z.number().int().min(1).max(500).optional() }, annotations: read,
-  }, ({ limit }) => run(async () => unwrap(await client.get<{ data: unknown }>("/v1/schema/changes", { limit }))));
+    description: "Schema change history, newest first: what changed, who changed it, through which surface (web, admin-mcp, cli, api), connected app or key (`via`), and for which pack. `object` narrows it to one object and its fields.",
+    inputSchema: { limit: z.number().int().min(1).max(500).optional(), object: z.string().optional() }, annotations: read,
+  }, ({ limit, object }) => run(async () => unwrap(await client.get<{ data: unknown }>("/v1/schema/changes", { limit, object }))));
 
   server.registerTool("get_audit_log", {
     description: "Audit log entries, newest first. Filter by action prefix (e.g. 'contact.', 'schema.').",

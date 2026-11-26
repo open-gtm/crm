@@ -6,9 +6,10 @@ import { audit } from "./audit.js";
 import { can, type Ctx } from "./context.js";
 import { DISGUISING } from "./fieldtypes.js";
 import {
-  apiKeyName, changeById, changesOf, deleteDraft, draftOf, insertChange, insertVersion, markChangeReviewed, oauthClientName, pageLayout, publishPageLayout,
+  changeById, changesOf, deleteDraft, draftOf, insertChange, insertVersion, markChangeReviewed, pageLayout, publishPageLayout,
   saveDraft, trimChanges, trimVersions, versionOf, versionsOf, type ChangeRow, type Contributor, type Source, type StoredLayout, type VersionRow,
 } from "./queries/layouts.js";
+import { viaOf } from "./source.js";
 import { getObject, isModuleOn, loadSchema, lockSchema, type FieldMeta, type ObjectMeta, type Schema } from "./schema.js";
 import { actorRef } from "./webhooks.js";
 
@@ -420,8 +421,7 @@ const manager = (ctx: Ctx) => {
 
 /** Where a change comes from: the surface the request arrived through, and the connected app or key by name. */
 async function sourceOf(tx: Tx, ctx: Ctx): Promise<Source> {
-  const via = ctx.oauth ? await oauthClientName(tx, ctx.oauth.grantId) : ctx.keyId ? await apiKeyName(tx, ctx.keyId) : undefined;
-  return { actorType: ctx.actor.type, actorId: ctx.actor.id, surface: ctx.surface, via: via ?? null };
+  return { actorType: ctx.actor.type, actorId: ctx.actor.id, surface: ctx.surface, via: await viaOf(tx, ctx) };
 }
 const sourceOut = (r: { actor_type: string; actor_id: string | null; surface: string; via: string | null }): SourceOut =>
   ({ surface: r.surface, actor: actorRef(r.actor_type, r.actor_id), via: r.via });

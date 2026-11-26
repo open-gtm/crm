@@ -338,6 +338,9 @@ describe("an agent_changes component", () => {
     expect(within(top[1]!).getByText("Created this deal")).toBeInTheDocument();
     const asked = calls.find((c) => c.path === "/v1/events")!;
     expect(asked.query.get("record")).toBe(ID);
+    // The server narrows the list to agents and to the component's window.
+    expect(asked.query.get("surface")).toBe("agents");
+    expect(Date.parse(asked.query.get("since")!)).toBeLessThan(Date.now() - 29 * 86_400_000);
   });
 
   it("says so when agents changed nothing", async () => {

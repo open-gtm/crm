@@ -87,7 +87,7 @@ Schema-changing tools **default to `dry_run: true`** and return a diff (`changes
 | `update_object` | Relabel, describe or hide an object |
 | `create_pipeline` | A deal pipeline with stages |
 | `set_modules` | Turn modules on or off |
-| `get_schema_changes` | Who changed what in the schema, and through which surface |
+| `get_schema_changes` | Who changed what in the schema, through which surface (web, admin-mcp, cli, api), connected app or API key (`via`), and for which schema pack. `object` narrows it to one object and its fields. |
 | `get_page_layout` | How an object's record page is arranged: key facts, and columns of components. Returns the shared draft when there is one (with its `revision`, what it changes and who changed it through what), else the published layout. `published: true` ignores the draft. |
 | `set_page_layout` | Change the shared draft, the same one people edit in the web UI. Defaults to `dry_run: true`, which returns `changes` in sentences and `warnings`. Takes the whole layout and the `revision` read; a draft someone changed since is not overwritten. `note` records what the user asked for. Nothing is published. |
 | `publish_page_layout` | Publish the draft as the next version, for every member. Defaults to a dry run that shows what would change, including other people's changes to the draft. `overwrite` publishes over a layout that changed since the draft was started. |

@@ -12,7 +12,8 @@ import { FieldValue } from "@/meta/registry";
 /** What GET /v1/events returns for one event (the part this card reads). */
 interface ApiEvent {
   id: string; type: string; occurred_at: string;
-  actor: { type: string; id: string | null; surface: string };
+  /** `via`: the connected app or API key, by name. The API gives it on the member's own events, and to audit readers. */
+  actor: { type: string; id: string | null; surface: string; via?: string | null };
   data: Record<string, unknown>;
 }
 
@@ -20,9 +21,6 @@ interface ApiEvent {
 const AGENT_SURFACES = new Set(["api", "cli", "admin-mcp", "ops-mcp"]);
 const SURFACE_LABEL: Record<string, string> = { api: "API", cli: "CLI", "admin-mcp": "MCP", "ops-mcp": "MCP" };
 const DAY = 86_400_000;
-/** Events come 200 at a time, newest first; this many pages is more than any record's recent history needs. */
-const MAX_PAGES = 5;
-
 export const isAgentEvent = (e: Pick<ApiEvent, "actor">) => AGENT_SURFACES.has(e.actor.surface);
 
 /** The events on a record within the last `days` days that agents made, newest first. */
@@ -35,19 +33,9 @@ function useRecordEvents(recordId: string, days: number) {
   return useQuery({
     queryKey: ["events", "record", recordId, days],
     retry: false,
-    queryFn: async ({ signal }) => {
-      const since = Date.now() - days * DAY;
-      const out: ApiEvent[] = [];
-      let before: string | undefined;
-      for (let page = 0; page < MAX_PAGES; page++) {
-        const r = await api.get<{ data: ApiEvent[]; next_before: string | null }>("/v1/events", { record: recordId, limit: 200, before }, signal);
-        out.push(...r.data);
-        const oldest = r.data[r.data.length - 1];
-        if (!r.next_before || !oldest || Date.parse(oldest.occurred_at) < since) break;
-        before = r.next_before;
-      }
-      return out;
-    },
+    // The server narrows the list to agents' surfaces and to the window; the newest 200 are plenty for one record.
+    queryFn: async ({ signal }) => (await api.get<{ data: ApiEvent[]; next_before: string | null }>("/v1/events",
+      { record: recordId, surface: "agents", since: new Date(Date.now() - days * DAY).toISOString(), limit: 200 }, signal)).data,
   });
 }
 
@@ -84,8 +72,9 @@ const SHOWN_FIELDS = 4;
 
 /**
  * Changes made on this record through API keys, MCP and the CLI in the last `days` days, from the event log.
- * The log says which surface and member or key acted, never which app, so none is named. It shows nothing
- * when the member's role can't read the events.
+ * The log says which surface and member acted. The app or key is named only where the API gives it: on the
+ * member's own agents, and to those who read the audit log. It shows nothing when the member's role can't
+ * read the events.
  */
 export function AgentChanges({ meta, recordId, days }: { meta: ObjectMeta; recordId: string; days: number }) {
   const q = useRecordEvents(recordId, days);
@@ -112,7 +101,7 @@ export function AgentChanges({ meta, recordId, days }: { meta: ObjectMeta; recor
                     <Badge tone="info">{SURFACE_LABEL[e.actor.surface] ?? e.actor.surface}</Badge>
                     <time dateTime={e.occurred_at} title={formatDateTime(e.occurred_at)} className="ml-auto text-sm text-subtle">{formatRelative(e.occurred_at)}</time>
                   </div>
-                  <p className="text-sm text-muted">By <bdi>{e.actor.id ? names.get(e.actor.id) ?? e.actor.id : "an unknown actor"}</bdi></p>
+                  <p className="text-sm text-muted">{e.actor.via ? <><bdi>{e.actor.via}</bdi>, for </> : "By "}<bdi>{e.actor.id ? names.get(e.actor.id) ?? e.actor.id : "an unknown actor"}</bdi></p>
                   {changes.length ? (
                     <ul className="mt-1.5 flex flex-col gap-1">
                       {changes.slice(0, SHOWN_FIELDS).map((c) => (
