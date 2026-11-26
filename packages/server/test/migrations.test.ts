@@ -293,7 +293,7 @@ describe("migrations", () => {
       for (const id of contacts) await tx`INSERT INTO contacts (tenant_id, id, first_name) VALUES (${ta}, ${id}, 'Old')`;
     });
 
-    expect(await migrate(url)).toEqual(["029_workspace_limits.sql"]);
+    expect(await migrate(url)).toEqual(["028_sign_up.sql", "029_workspace_limits.sql"]);
 
     const counts = (tenant: string) => inTenant(tenant, (tx) => tx<{ txid: string; delta: number }[]>`SELECT txid::text, delta::int FROM record_counts ORDER BY txid`);
     expect(await counts(ta)).toEqual([{ txid: "0", delta: 3 }]);
