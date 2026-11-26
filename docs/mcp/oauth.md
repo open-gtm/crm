@@ -47,6 +47,17 @@ Menu names change; the parts that matter are the URL and that the client does OA
 
 The client then opens your browser at `<PUBLIC_URL>/oauth/authorize`. If you aren't signed in, you sign in as usual and come back. If your email belongs to several workspaces, the workspace you sign in to is the one the app reaches; to connect another workspace, sign in to it and connect again.
 
+### A new person connecting from Claude
+
+By default only existing members can connect: someone who isn't a member reaches the sign-in page and can go no further. On a server with self sign-up on (`SIGN_UP=true`, [docs/sign-in.md](../sign-in.md#creating-a-workspace-self-sign-up)), a person the server has never seen can start from the client:
+
+1. They add `<MCP_PUBLIC_URL>/mcp/ops` (or `/mcp/admin`) to Claude or another client, as above.
+2. The client opens their browser at the sign-in page. They choose **Create a workspace**, enter their email, and type the code from the email.
+3. They name their workspace. It is created, they are its owner, and they are signed in.
+4. They land on the consent page for the app that sent them, approve, and are back in the client, connected to their new workspace.
+
+The connection request rides along as `return_to` through every step. The new workspace has no API keys; the app's connection is the only credential. To connect the second server too, they add it and approve again, already signed in.
+
 ## The consent page
 
 It shows, before you decide:

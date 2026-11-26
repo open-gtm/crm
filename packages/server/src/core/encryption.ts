@@ -7,6 +7,11 @@ import { currentTenantKey, insertTenantKey } from "./queries/encryption.js";
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const cache = new Map<string, { key: Buffer; version: number; expires: number }>();
 
+/** Forgets a workspace's data key in this process, once the workspace is deleted. Other processes forget it within the cache's five minutes. */
+export function forgetTenantKey(tenantId: string): void {
+  cache.delete(tenantId);
+}
+
 /** Creates the tenant's first data key. Called once, when the workspace is created. */
 export async function createTenantKey(tx: Tx, tenantId: string): Promise<void> {
   const dek = randomBytes(32);

@@ -30,9 +30,14 @@ describe("database isolation", () => {
       SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relrowsecurity`;
     for (const { relname } of tables) {
-      if (["api_keys", "sessions", "sign_in_identities", "sign_in_flows", "oauth_clients", "oauth_codes", "oauth_tokens", "oauth_assertions"].includes(relname)) {
+      // Tombstones of deleted workspaces belong to no workspace and hold nothing of a customer's (ADR 0020):
+      // readable without a context, like tenant_directory; their policy is there to refuse writes.
+      if (relname === "deleted_workspaces") continue;
+      if (["api_keys", "sessions", "sign_in_identities", "sign_in_flows", "oauth_clients", "oauth_codes", "oauth_tokens", "oauth_assertions",
+        "workspace_sign_ups"].includes(relname)) {
         // Authentication, sign-in and OAuth may read single rows by a presented hash, identity or client ID
-        // (narrow lookup policies, ADR 0009 and 0010); with no context they see nothing.
+        // (narrow lookup policies, ADR 0009 and 0010), and the record of sign-ups shows itself only to the
+        // transaction creating a workspace by sign-up (ADR 0018); with no context they see nothing.
         const rows = await app.unsafe(`SELECT * FROM "${relname}"`);
         expect(rows.length).toBe(0);
         continue;

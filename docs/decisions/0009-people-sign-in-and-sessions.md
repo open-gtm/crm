@@ -4,6 +4,8 @@ Status: accepted (2026-11-16)
 
 > **Since built:** the web UI ([`packages/web`](../../packages/web/README.md)) and the OAuth authorization server for remote MCP ([ADR 0010](0010-oauth-for-mcp.md)) both exist now and use the sessions described here. Where this record says "later" or "not built" for them, read it as history. How people sign in today, including the first owner's path with a server-printed link, is in [`docs/sign-in.md`](../sign-in.md).
 
+> **Self sign-up** is now built too, off by default ([ADR 0018](0018-self-sign-up.md)). Where this record says nobody can sign up, read it as the default.
+
 ## Context
 
 Everything authenticated with API keys. A web UI (later) and an OAuth consent screen for remote MCP (next) need people to sign in from a browser. The ground rules are: four ways to sign in (an email code or link, optional single sign-on through any OpenID Connect provider, email and password, and a one-time link printed by a server command); invite only, so only existing active members sign in; no tokens in the browser, so sessions live on the server behind an HttpOnly cookie on the API's origin; keys unchanged. The code will later run a hosted service that has to pass a SOC 2 audit, so every authentication event is audited, deprovisioning ends access at once, and nothing sensitive is stored in the clear.

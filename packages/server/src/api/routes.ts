@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { getUsage } from "../core/limits.js";
 import { describeAccess } from "../core/access.js";
 import { auditLogPage } from "../core/queries/audit.js";
 import { verifyInTx } from "../core/auditchain.js";
@@ -17,6 +18,7 @@ import { FIELD_TYPES } from "../core/fieldtypes.js";
 import type { JsonShape } from "../core/catalog.js";
 import { actorRef } from "../core/webhooks.js";
 import { archiveRole, createRole, getRole, listRoles, permissionCatalog, roleAccess, updateRole } from "../core/roles.js";
+import { pendingDeletion } from "../core/disposal.js";
 import { accessReview, addMember, addServiceAccount, getWorkspace, listMembers, updateMember } from "../core/workspace.js";
 import { badRequest, unprocessable } from "../lib/errors.js";
 import { memberName } from "../auth/queries.js";
@@ -137,8 +139,19 @@ route({
 
 route({
   method: "GET", path: "/v1/workspace", scope: "ops:read", tag: "workspace", summary: "Workspace settings",
-  response: data(object({ id: S.str, name: S.str, currency: S.str, modules: S.strs, sign_in: ref("SignInSettings") })),
-  handler: async ({ tx }) => ({ body: { data: await getWorkspace(tx) } }),
+  response: data(object({ id: S.str, name: S.str, currency: S.str, modules: S.strs, sign_in: ref("SignInSettings"),
+    deletion: { ...nullable(object({ requested_at: S.time, requested_by: S.str, scheduled_for: S.time })),
+      description: "Set while the workspace is scheduled for deletion (POST /v1/workspace/deletion): who asked, when, and when it is due. null otherwise" } })),
+  handler: async ({ tx }) => ({ body: { data: { ...(await getWorkspace(tx)), deletion: await pendingDeletion(tx) } } }),
+});
+
+route({
+  method: "GET", path: "/v1/workspace/usage", scope: "admin", tag: "workspace",
+  // Anyone who configures the workspace can run into a limit, so any configuration permission reads them.
+  permission: ["members:manage", "schema:manage", "keys:manage", "webhooks:manage", "automations:manage", "audit:read"],
+  summary: "What the workspace uses against each of its limits. The limits are set by whoever runs the server; nothing in the API changes them",
+  response: data(object({ limits: list(ref("UsageLine")) })),
+  handler: async ({ tx }) => ({ body: { data: await getUsage(tx, await loadSchema(tx)) } }),
 });
 
 route({

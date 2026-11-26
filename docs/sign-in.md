@@ -6,7 +6,9 @@ The server ships a few plain sign-in pages under `/auth/…`, and serves the web
 
 ## Who can sign in
 
-Only existing, active members. Nobody can sign up, and no sign-in method creates a member or a workspace. An admin adds people with `POST /v1/members` (or `crm members add`). Service accounts never sign in; they use keys.
+Only existing, active members. By default nobody can sign up: no sign-in method creates a member or a workspace. An admin adds people with `POST /v1/members` (or `crm members add`), and the operator makes workspaces with `bootstrap`. Service accounts never sign in; they use keys.
+
+An operator can let people create a workspace of their own from the sign-in page: see [Creating a workspace](#creating-a-workspace-self-sign-up). It is off unless `SIGN_UP=true`.
 
 A member is a row per workspace, so the same email can be a member of several workspaces. A person proves who they are once, then picks the workspace. Each session belongs to one workspace. With one match there is no extra step.
 
@@ -26,7 +28,7 @@ A member is a row per workspace, so the same email can be a member of several wo
 `GET /auth/capabilities` says which methods this server offers. It reveals nothing about any account or workspace:
 
 ```json
-{ "enabled": true, "methods": { "email_code": true, "password": true, "sso": { "name": "Okta", "start": "/auth/sso" } }, "code_length": 8 }
+{ "enabled": true, "methods": { "email_code": true, "password": true, "sso": { "name": "Okta", "start": "/auth/sso" } }, "code_length": 8, "sign_up": false }
 ```
 
 ### Email code and link
@@ -99,6 +101,24 @@ Creating or rotating an API key, changing a password without the current one and
 
 The return path travels in the link itself (`--return-to`, stored with the link on the server), not in browser storage, so it works whichever tab or window opens the link.
 
+## Creating a workspace (self sign-up)
+
+Off by default. With `SIGN_UP=true`, anyone who can prove an email address can create a workspace and becomes its owner. It needs `PUBLIC_URL` and `SMTP_URL`; with either missing the server refuses to start. `GET /auth/capabilities` says `"sign_up": true` when it is on and email works. Why it is built this way is in [ADR 0018](decisions/0018-self-sign-up.md).
+
+Turning it on makes the server a public service: read [Limits](#limits) and set `TRUST_PROXY` if the server is behind a reverse proxy, or every visitor counts as one client address.
+
+1. On the sign-in page, **Create a workspace** opens `/auth/sign-up`. The person enters their email and gets an 8-digit code, valid once, for 10 minutes, in that browser.
+2. They enter the code. Nothing has been created yet. They have 30 minutes for the next step.
+3. They name the workspace (and, optionally, themselves and a currency; the default is USD). The workspace is created, they are its owner, and they are signed in.
+
+- **It keeps where the person was going.** `return_to` is carried from the first step to the last, so someone sent here by an app's connection request ([OAuth for MCP](mcp/oauth.md#a-new-person-connecting-from-claude)) lands back on its consent page. With none, they land in the app.
+- **No API keys are made.** `bootstrap` prints two keys to the operator's terminal; a web page is no place to show a secret once. The owner creates keys in the app (Settings → API keys) when they need one.
+- **An address that already has an account can still create another workspace,** up to `SIGN_UP_MAX_WORKSPACES_PER_EMAIL` (3). The naming page lists the workspaces the address already belongs to and offers sign-in instead. The workspaces are separate: different members, records and audit logs. Sign-in then asks which one.
+- **`SIGN_UP_ALLOWED_DOMAINS`** (comma-separated, for example `example.com,example.org`) limits sign-up to addresses at those domains. Anyone else is told so (`403 sign_up_domain`) and gets no email. Subdomains are not included.
+- **Everything else is as after `bootstrap`:** the standard objects, the default pipeline, the system roles. Other people are still added by an admin.
+
+Not built: a CAPTCHA, blocking disposable email domains, signing up through single sign-on, and deleting a workspace.
+
 ## Sessions
 
 A session is a row in Postgres. The browser holds only a random 256-bit token in an HttpOnly cookie; the database holds its SHA-256. No token is ever given to page scripts.
@@ -147,6 +167,9 @@ A refusal is `403` with code `csrf_failed`. `GET` routes don't change state. (Tw
 | `GET /auth/sso/callback` | (from the provider) | redirect to `return_to`, `/auth/choose` or `/auth/error` |
 | `POST /auth/server-link` | `token` | `signed_in` or `choose_workspace` |
 | `POST /auth/choose` | `workspace` (`ws_…`) | `signed_in` |
+| `POST /auth/sign-up` | `email`, optional `return_to` | `202 {"status": "code_sent"}`, always; `403 sign_up_domain` for an address outside `SIGN_UP_ALLOWED_DOMAINS`; `404` when sign-up is off |
+| `POST /auth/sign-up/verify` | `code` | `{"status": "name_workspace"}` |
+| `POST /auth/sign-up/workspace` | `workspace_name`, optional `name`, optional `currency` | `signed_in`; `409 sign_up_cap` or `429 sign_up_limited` (the step can be tried again) |
 
 `signed_in` sets the session cookie and returns `workspace`, `return_to`, `csrf_token`, `expires_at` and `idle_expires_at`. `choose_workspace` returns the workspaces (ID and name only), and `more_workspaces: true` when the address belongs to more than are listed; the choice works once, for 5 minutes, in this browser. `workspace` (`ws_…`) looks in that workspace only. `return_to` must be a path on this origin of at most 2,048 characters (long enough for an OAuth authorization request): it is checked before and after normalisation, dot segments (`/./`, `/../`, also percent-encoded) are refused, and anything doubtful becomes `/auth/signed-in`.
 
@@ -160,9 +183,11 @@ All `/auth` and `/v1/auth` responses have `Cache-Control: no-store`, as do all r
 
 The answer to "email me a code" is the same whether the email belongs to an active member, a disabled one or nobody, and so is the answer to a wrong password, a member without a password, a workspace that turned passwords off, and a locked account. Finding the memberships and sending the email happen after the response, and a password check for an unknown email still costs one hash. Rate limits keyed by email apply whether or not the email exists. The workspace choice is only shown after the person has proved the identity. One timing difference remains: a password that is checked against several workspaces (the same email with a password in each) takes one hash per workspace.
 
+Self sign-up keeps the same property. Asking for a sign-up code looks nothing up, so the answer and the email are the same for an address that already belongs to a member and one that belongs to nobody; the limits keyed by email apply to any email. The workspaces an address already belongs to are named only after the address is proven with the code, as the workspace choice does.
+
 ## Limits
 
-All in memory, per process.
+All in memory, per process, except where the table says otherwise. A client address is counted as itself for IPv4 and by its /64 for IPv6 (one subscriber's allocation), here and at the API's own limits on failed keys and invalid session cookies, so a host can't get a fresh allowance from each address it holds.
 
 | Limit | Value |
 |---|---|
@@ -176,6 +201,11 @@ All in memory, per process.
 | Invalid session cookies per client address | 30 a minute, before the database is touched |
 | Requests per signed-in member (all their sessions) | 20 a second, bursts of 200 (as per key); a count takes 2, an aggregate 2 plus one per grouping and measure, an import one per 100 rows |
 | Password hashes at once | 4 running, 64 waiting; past that a sign-in gets `503` |
+| Sign-up codes per client address | 10 an hour. Sign-up codes also count toward the two per-email code limits above, so one inbox gets no more mail for there being two forms |
+| Sign-up emails the server sends | `SIGN_UP_EMAILS_PER_HOUR` (300); past it, skipped and logged as an error, and the requester isn't told |
+| Workspaces one email may create by sign-up | `SIGN_UP_MAX_WORKSPACES_PER_EMAIL` (3), in all; counted in the database; past it `409 sign_up_cap` |
+| Workspaces one client address may create by sign-up | `SIGN_UP_WORKSPACES_PER_ADDRESS_DAY` (5) a day; counted in the database; past it `429 sign_up_limited` |
+| Workspaces sign-up creates, server-wide | `SIGN_UP_WORKSPACES_PER_HOUR` (50) and `SIGN_UP_WORKSPACES_PER_DAY` (300); counted in the database; past either `429 sign_up_limited` and an error in the log (`sign_up_ceiling`), at most once an hour |
 
 **Lockout.** After 5 password failures in a row, password sign-in for that member locks for 1 minute, then 2, 4 and so on up to an hour per further failure. Each attempt is counted before the password is checked, and the fifth locks at once, so many guesses sent in parallel still get only five checks. Wrong `current_password` guesses when changing a password from a session count the same way (and a locked member gets `429 password_locked` there). It locks only password sign-in. The email code, SSO and server links still work, and any successful sign-in clears the lock. So someone guessing at a password can keep that member's password sign-in locked, but can't keep the member out.
 
@@ -201,6 +231,7 @@ In the member's workspace, with surface `web` and the session ID (`ses_…`) in 
 | `oauth.code_reuse_detected`, `oauth.refresh_reuse_detected` | A code or a used refresh token was presented again; the connection was revoked |
 | `oauth.grant_revoked` | A member or an admin disconnected an app |
 | `member.disabled` | Now also with `sessions_revoked` and `apps_revoked` |
+| `workspace.created` | With `via`: `bootstrap` (the operator's command, surface `system`) or `sign_up` (a person on the sign-in page, surface `web`, followed by their `auth.signed_in`) |
 
 Attempts for an email that belongs to nobody have no workspace to be audited in; they are rate limited and, for SSO, logged with a reason (never the email). No audit entry, log line or table holds a code, token, password or CSRF token: sessions and links are stored as SHA-256 hashes, codes as an HMAC under a key derived from `HLCRM_MASTER_KEY`, and the CSRF token is computed, not stored.
 
@@ -227,7 +258,13 @@ Attempts for an email that belongs to nobody have no workspace to be audited in;
 | `SMTP_URL`, `SMTP_FROM` | unset | Email, also used for alerts |
 | `TRUST_PROXY` | `false` | Use `X-Forwarded-For` for client addresses (only behind your own proxy) |
 | `MCP_PUBLIC_URL`, `MCP_SERVICE_SECRET` | unset | OAuth for the MCP servers (connected apps); see [`docs/mcp/oauth.md`](mcp/oauth.md) |
+| `SIGN_UP` | `false` | Let anyone who proves an email address create a workspace. Needs `PUBLIC_URL` and `SMTP_URL`, or the server refuses to start |
+| `SIGN_UP_ALLOWED_DOMAINS` | empty (any) | Comma-separated email domains that may sign up |
+| `SIGN_UP_MAX_WORKSPACES_PER_EMAIL` | 3 | Workspaces one address may create by sign-up |
+| `SIGN_UP_WORKSPACES_PER_ADDRESS_DAY` | 5 | Workspaces one client address may create by sign-up in a day |
+| `SIGN_UP_WORKSPACES_PER_HOUR`, `SIGN_UP_WORKSPACES_PER_DAY` | 50, 300 | Server-wide ceilings on workspaces created by sign-up |
+| `SIGN_UP_EMAILS_PER_HOUR` | 300 | Server-wide ceiling on sign-up codes emailed |
 
 ## Not built
 
-Multi-factor authentication (TOTP) and passkeys, SCIM, self sign-up, browser or OAuth sign-in for the `crm` CLI, and internationalized email addresses.
+Multi-factor authentication (TOTP) and passkeys, SCIM, a CAPTCHA for self sign-up, browser or OAuth sign-in for the `crm` CLI, and internationalized email addresses.

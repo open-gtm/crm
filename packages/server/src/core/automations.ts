@@ -1,4 +1,5 @@
 import type { Tx } from "../db/pool.js";
+import { assertRoom } from "./limits.js";
 import { ApiError, conflict, forbidden, notFound, unprocessable } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
 import { decodeId, encodeId, uuidv7 } from "../lib/ids.js";
@@ -23,7 +24,7 @@ import {
   hasRunForEvent, insertEventRun, insertManualRun, manualRunCounts, recentRunCounts, runsOf,
 } from "./queries/automation-runs.js";
 import {
-  archiveAutomationRow, automationById, automationsListeningFor, countLiveAutomations, deleteSuppression, insertAutomation, insertSuppression, liveAutomations,
+  archiveAutomationRow, automationById, automationsListeningFor, deleteSuppression, insertAutomation, insertSuppression, liveAutomations,
   liveRoles, pauseAutomationRow, resumeAutomationRow, saveAutomationSettings, scheduledAutomations, setNextRun, suppressionOf, updateAutomationDefinition,
 } from "./queries/automations.js";
 import { compileQuery, type Where } from "./query.js";
@@ -508,8 +509,7 @@ export async function createAutomation(tx: Tx, ctx: Ctx, input: AutomationInputT
   const v = await validate(tx, ctx, input, null);
   const extra = { ...(v.nextRuns ? { next_runs: v.nextRuns } : {}) };
   if (dryRun) return { dry_run: true, summary: v.summary, warnings: v.warnings, ...extra, automation: preview(v, input.enabled ?? true, input.hourly_cap ?? 100) };
-  const count = await countLiveAutomations(tx);
-  if ((count ?? 0) >= 200) throw conflict("A workspace can have at most 200 automations");
+  await assertRoom(tx, ctx.tenantId, "automations");
   const id = uuidv7();
   const secrets = Object.keys(v.secrets).length ? await encryptValue(tx, ctx.tenantId, id, "automation_secrets", v.secrets) : null;
   await insertAutomation(tx, {
