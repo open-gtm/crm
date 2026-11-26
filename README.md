@@ -201,6 +201,7 @@ crm CLI         MCP: /mcp/admin, /mcp/ops    your code / curl
 - **The API is the only enforcement point.** The MCP servers and the `crm` CLI are thin clients that call the API with the caller's own key.
 - **Standard objects** (Contact, Account, Lead, Deal, Activity, Task, …) are typed tables. **Custom fields and objects** are JSONB validated against metadata, so schema changes never run DDL.
 - **Events, automations and webhooks:** every change is an event; automations and signed webhooks act on them. See [`docs/webhooks.md`](docs/webhooks.md) and [`docs/alerts.md`](docs/alerts.md).
+- **Limits per workspace** (records, members, keys, requests and more), for a server that holds many: see [`docs/limits.md`](docs/limits.md).
 - **Isolation, keys, encryption and audit:** see [`docs/security/threat-model.md`](docs/security/threat-model.md).
 - **Full design:** [`docs/data-model.md`](docs/data-model.md), the decision records in [`docs/decisions/`](docs/decisions) and [`ROADMAP.md`](ROADMAP.md).
 

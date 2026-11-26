@@ -15,11 +15,29 @@ x-hardened: &hardened
     - no-new-privileges:true
   pids_limit: 256
 
+# Per-workspace limits (docs/limits.md): a whole number, or "unlimited". Empty keeps the server's built-in default.
+# Shared with the migrate service, where the operator's `limits` command runs and shows them.
+x-limits: &limits
+  LIMIT_RECORDS: ${LIMIT_RECORDS:-}
+  LIMIT_MEMBERS: ${LIMIT_MEMBERS:-}
+  LIMIT_SERVICE_ACCOUNTS: ${LIMIT_SERVICE_ACCOUNTS:-}
+  LIMIT_API_KEYS: ${LIMIT_API_KEYS:-}
+  LIMIT_CUSTOM_OBJECTS: ${LIMIT_CUSTOM_OBJECTS:-}
+  LIMIT_CUSTOM_FIELDS: ${LIMIT_CUSTOM_FIELDS:-}
+  LIMIT_WEBHOOKS: ${LIMIT_WEBHOOKS:-}
+  LIMIT_AUTOMATIONS: ${LIMIT_AUTOMATIONS:-}
+  LIMIT_REQUESTS_PER_MINUTE: ${LIMIT_REQUESTS_PER_MINUTE:-}
+  FILE_QUOTA_MB: ${FILE_QUOTA_MB:-1024}
+  AUTOMATION_ACTIONS_PER_HOUR: ${AUTOMATION_ACTIONS_PER_HOUR:-5000}
+  AUTOMATION_HTTP_PER_HOUR: ${AUTOMATION_HTTP_PER_HOUR:-500}
+  AUTOMATION_EMAILS_PER_HOUR: ${AUTOMATION_EMAILS_PER_HOUR:-200}
+
 x-app: &app
   <<: *hardened
   image: *image
   restart: unless-stopped
   environment: &app-env
+    <<: *limits
     NODE_ENV: production
     LOG_LEVEL: info
     DATABASE_URL: postgres://hlcrm_app:${HLCRM_APP_PASSWORD:?run sh scripts/init-env.sh}@postgres:5432/hlcrm
@@ -28,7 +46,6 @@ x-app: &app
     BLOB_DIR: /data/blobs
     FILE_STORE: ${FILE_STORE:-postgres}
     FILE_MAX_MB: ${FILE_MAX_MB:-10}
-    FILE_QUOTA_MB: ${FILE_QUOTA_MB:-1024}
     S3_ENDPOINT: ${S3_ENDPOINT:-}
     S3_BUCKET: ${S3_BUCKET:-}
     S3_REGION: ${S3_REGION:-us-east-1}
@@ -55,10 +72,7 @@ x-app: &app
     OAUTH_ACCESS_TOKEN_MINUTES: ${OAUTH_ACCESS_TOKEN_MINUTES:-60}
     OAUTH_REFRESH_TOKEN_DAYS: ${OAUTH_REFRESH_TOKEN_DAYS:-30}
     OAUTH_GRANT_MAX_DAYS: ${OAUTH_GRANT_MAX_DAYS:-180}
-    # Automations: per-workspace hourly caps, per-automation and per-recipient email caps (docs/automations.md).
-    AUTOMATION_ACTIONS_PER_HOUR: ${AUTOMATION_ACTIONS_PER_HOUR:-5000}
-    AUTOMATION_HTTP_PER_HOUR: ${AUTOMATION_HTTP_PER_HOUR:-500}
-    AUTOMATION_EMAILS_PER_HOUR: ${AUTOMATION_EMAILS_PER_HOUR:-200}
+    # Automations: per-automation and per-recipient email caps (docs/automations.md). The per-workspace hourly caps are with the limits above.
     AUTOMATION_EMAILS_PER_AUTOMATION_HOUR: ${AUTOMATION_EMAILS_PER_AUTOMATION_HOUR:-50}
     AUTOMATION_EMAILS_PER_RECIPIENT_DAY: ${AUTOMATION_EMAILS_PER_RECIPIENT_DAY:-5}
     # The web UI the api serves at PUBLIC_URL (packages/web/README.md). The image has it in /app/web;
@@ -97,6 +111,7 @@ services:
     image: *image
     command: ["migrate"]
     environment:
+      <<: *limits
       DATABASE_URL: postgres://hlcrm_app:${HLCRM_APP_PASSWORD:?run sh scripts/init-env.sh}@postgres:5432/hlcrm
       MIGRATOR_DATABASE_URL: postgres://hlcrm_migrator:${HLCRM_MIGRATOR_PASSWORD:?run sh scripts/init-env.sh}@postgres:5432/hlcrm
     depends_on:

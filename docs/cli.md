@@ -358,6 +358,8 @@ crm keys create --name ci --scopes ops:read > ci-key.txt     # the secret alone 
 crm keys rotate key_01JD… --overlap-hours 24
 crm keys revoke key_01JD…
 
+crm usage                                    # what the workspace uses against each of its limits (docs/limits.md)
+
 crm members list
 crm members add --email ana@example.com --name "Ana" --role member
 crm members add --service-account --name "Import bot" --role member

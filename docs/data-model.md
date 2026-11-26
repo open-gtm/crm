@@ -165,7 +165,7 @@ curl -s -OJ localhost:8787/v1/files/file_…/content -H "Authorization: Bearer $
 curl -s -X DELETE localhost:8787/v1/files/file_… -H "Authorization: Bearer $KEY"              # remove
 ```
 
-- **Limits.** 10 MB per file and 1 GB per workspace by default (`FILE_MAX_MB`, `FILE_QUOTA_MB`); `GET /v1/files/limits` shows them. The 1 MB limit on JSON bodies is unchanged.
+- **Limits.** 10 MB per file and 1 GB per workspace by default (`FILE_MAX_MB`, `FILE_QUOTA_MB`); `GET /v1/files/limits` shows them. The per-workspace figure is a workspace limit, so the operator can set another for one workspace, and an upload past it answers 409 `limit_reached` ([limits.md](limits.md)). The 1 MB limit on JSON bodies is unchanged.
 - **Where the bytes are.** In Postgres by default (`file_blobs`), so one backup covers everything. `FILE_STORE=s3` keeps new files in an S3-compatible bucket (`S3_ENDPOINT`, `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`), sealed with the workspace's data key: the bucket alone can't be read, so `HLCRM_MASTER_KEY` and the database are needed to restore them. Back the bucket up with the database.
 - **No virus scanner is built in.** Files are `unscanned` and are always sent as a download (`attachment`, `application/octet-stream`, `nosniff`), never opened in the page. The `content_type` a file shows is detected from its first bytes; the uploader's is ignored.
 - **Names** are one line with no `/`, `\` or control character.

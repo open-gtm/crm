@@ -38,6 +38,8 @@ fi
   echo "# AUTOMATION_EMAILS_PER_HOUR=200"
   echo "# AUTOMATION_EMAILS_PER_AUTOMATION_HOUR=50"
   echo "# AUTOMATION_EMAILS_PER_RECIPIENT_DAY=5"
+  echo "# LIMIT_RECORDS=unlimited             per-workspace limits: a number or unlimited (docs/limits.md); also LIMIT_MEMBERS,"
+  echo "#                                     LIMIT_API_KEYS, LIMIT_CUSTOM_OBJECTS, LIMIT_WEBHOOKS, LIMIT_REQUESTS_PER_MINUTE, …"
   if [ "$dev" = true ]; then
     echo "# Development only: create the hlcrm_test database on first init of the Postgres volume."
     echo "HLCRM_CREATE_TEST_DB=true"
