@@ -19,6 +19,8 @@ The surface of an API key's request is what its client reports in the `X-HLCRM-S
 
 - **Schema changes.** `GET /v1/schema/changes` (and the admin MCP `get_schema_changes`) list every change with `surface`, `actor`, `via` and `pack`; `?object=` narrows it to one object and its fields. Needs `audit:read`.
 - **Objects and fields.** `GET /v1/objects` and `GET /v1/objects/{object}` give each object's and field's `origin`: `standard` (built in), `custom` (made in this workspace) or `pack`, with the pack's name. Callers with `audit:read` also get `last_change` beside the object and each field: what changed, when, and its source.
+- **Events.** An event's `actor` has the surface and, in `GET /v1/events`, `via`: on the caller's own events and for callers with `audit:read`; to others the surface is enough. The list filters by `actor` (`me` or an ID), `surface` (`agents` is API keys, the CLI and both MCP servers together) and `since`. Webhook payloads don't carry `via`.
+- **Summaries for admins.** `GET /v1/events/summary` (`audit:read`) counts changes per member, surface and app or key over the last hours (24 by default, 168 at most). Reads are not recorded, so it counts changes only. `GET /v1/automations/runs/summary` counts every automation's runs by status, with each one's newest failure.
 - **Page layouts.** Every change to a layout's shared draft and every published version carries its source ([ADR 0017](decisions/0017-agent-first-page-layouts.md)).
 
-The web UI shows these in Settings → Objects & fields and in the layout editor's history.
+The web UI shows these in Settings → Objects & fields, in the layout editor's history, on a record's "Changes by agents", and on Home ("Your agents", and the admin Home).

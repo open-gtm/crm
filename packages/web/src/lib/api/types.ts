@@ -272,3 +272,26 @@ export interface AuditEntry {
   seq: number; at: string; action: string; surface: string; actor: string; key: string | null; object: string | null;
   record_id: string | null; request_id: string | null; details: unknown; sealed: boolean;
 }
+
+/** One event of GET /v1/events (the part Home reads). `via` is the connected app or key by name, when the API says. */
+export interface EventRow {
+  id: string; type: string; occurred_at: string; object: string | null; record_id: string | null;
+  actor: { type: string; id: string | null; surface: string; via?: string | null };
+  data: Record<string, unknown>;
+}
+/** GET /v1/events/summary (needs audit:read): changes made through API keys, the CLI and MCP, per source. */
+export interface EventsSummary {
+  since: string;
+  sources: { actor: string | null; surface: string; via: string | null; changes: number; records: number; last_at: string }[];
+}
+/** GET /v1/automations/runs/summary: runs in the last hours, by status and per automation. */
+export interface RunsSummary {
+  since: string;
+  totals: { succeeded: number; failed: number; skipped: number; queued: number; running: number };
+  automations: { id: string; name: string; succeeded: number; failed: number; skipped: number; open: number; last_failed_at: string | null; last_failure: string | null }[];
+}
+/** One row of GET /v1/schema/changes (needs audit:read). */
+export interface SchemaChange {
+  version: number; changed_at: string; change: string; object: string | null; field: string | null; surface: string;
+  via: string | null; pack: string | null; actor: string;
+}
