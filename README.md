@@ -52,11 +52,11 @@ git pull
 docker compose up -d --build    # with a published image: docker compose pull && docker compose up -d
 ```
 
-Keep your `.env` (it holds `HLCRM_MASTER_KEY`, which the database backup does not).
+Keep your `.env` (it holds `HLCRM_MASTER_KEY`, which the database backup does not). [`docs/backup-restore.md`](docs/backup-restore.md) covers what else to back up, how to restore and how to check a restore.
 
 ### Running it for real
 
-Compose binds every port to 127.0.0.1, and terminating TLS in front of the API and MCP ports is your job. If a reverse proxy sits in front of the API, set `TRUST_PROXY=true` so failed-login limits use the real client address, and only then. Back up Postgres, and keep a copy of `HLCRM_MASTER_KEY` outside the database backups: without it, restricted fields can't be decrypted. The software enforces workspace isolation, roles and permissions, scoped keys, field encryption and a tamper-evident audit log. Running it securely (hosts, network, backups, access, monitoring) is your responsibility, and the software itself makes no compliance claims such as "SOC 2 compliant".
+Compose binds every port to 127.0.0.1, and terminating TLS in front of the API and MCP ports is your job. If a reverse proxy sits in front of the API, set `TRUST_PROXY=true` so failed-login limits use the real client address, and only then. Back up Postgres and the audit anchors, and keep a copy of `HLCRM_MASTER_KEY` outside the database backups: without it, restricted fields can't be decrypted ([`docs/backup-restore.md`](docs/backup-restore.md)). The software enforces workspace isolation, roles and permissions, scoped keys, field encryption and a tamper-evident audit log. Running it securely (hosts, network, backups, access, monitoring) is your responsibility, and the software itself makes no compliance claims such as "SOC 2 compliant".
 
 ## Use it from Claude
 
