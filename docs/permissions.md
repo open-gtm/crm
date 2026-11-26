@@ -6,12 +6,17 @@ Every request to the API is allowed or refused by two questions: does this key h
 
 - **Permission:** one thing that can be done, such as `records:write` or `roles:manage`. The list is fixed in the code. `GET /v1/permissions` returns it.
 - **Role:** a named set of permissions, kept per workspace. Every workspace has four system roles and can add custom roles. A custom role can also have object and field rules (see [Object and field access](#object-and-field-access)).
-- **Member:** a user or a service account. Each member has exactly one role.
+- **Permission set:** extra access on top of a role, built like a custom role (permissions, object rules, field rules). A member can hold several. See [Permission sets](#permission-sets).
+- **Member:** a user or a service account. Each member has exactly one role, and any number of permission sets (up to 20).
 - **API key:** belongs to one member. It has scopes (`admin`, `ops:write`, `ops:read`, `restricted:read`).
 
-A key's effective permissions are the member's role permissions **intersected with** what the key's scopes unlock. Scopes only narrow a key. A scope can never give a key something its member's role does not have. The role is read on every request, so changing a role (its permissions or its rules) or disabling a member takes effect on the next call, with the same key.
+A member's access is their role and their permission sets together. Wherever this page says "the member's role" about what a member can do, read it as that combined access.
+
+A key's effective permissions are the member's permissions (role and sets) **intersected with** what the key's scopes unlock. Scopes only narrow a key. A scope can never give a key something its member's role does not have. The role is read on every request, so changing a role (its permissions or its rules) or disabling a member takes effect on the next call, with the same key.
 
 ## Permissions
+
+Permissions are in two areas. **Objects and fields** (`records:read`, `records:write`, `records:archive`, `restricted:read`): what may be done with records, refined per object and per field. **Features**: everything else, one per feature of the CRM. `GET /v1/permissions` gives each permission its `category` (`records` or `features`), and a role or set returns `record_permissions` and `feature_permissions` beside `permissions`.
 
 | Permission | Allows |
 |---|---|
@@ -21,7 +26,7 @@ A key's effective permissions are the member's role permissions **intersected wi
 | `restricted:read` | See the values of restricted fields |
 | `schema:manage` | Change objects, fields, pipelines and modules |
 | `members:manage` | Add, change and disable members and service accounts; list and end their browser sessions and unlink their single sign-on (an owner's only by an owner) |
-| `roles:manage` | Create and change roles |
+| `roles:manage` | Create and change roles and permission sets |
 | `keys:manage` | Create, rotate and revoke API keys for other members, and list all keys |
 | `webhooks:manage` | Manage webhook endpoints and their deliveries |
 | `automations:manage` | Manage automations |
@@ -102,6 +107,38 @@ Roles can be referred to by key (`integrator`) or by ID (`role_…`).
 
 Other role endpoints: `GET /v1/roles` and `GET /v1/roles/{id}` (any authenticated key with at least one permission, so every member can read every role's definition and member count), `PATCH /v1/roles/{id}` to change a custom role's name, description or permissions, and `DELETE /v1/roles/{id}` to archive one. A role cannot be archived while an active member holds it. `PATCH /v1/members/{id}` and `PATCH /v1/service-accounts/{id}` take `role` and/or `active`.
 
+## Permission sets
+
+A permission set gives a member something their role doesn't, without a new role for every combination. It has the same shape as a custom role, in the two areas above:
+
+```sh
+# Deal desk: read and change deals, with the margin field read-only, and manage shared views
+curl -s -X POST localhost:8787/v1/permission-sets -H "Authorization: Bearer $ADMIN_KEY" -H "Content-Type: application/json" -d '{
+  "key": "deal_desk", "name": "Deal desk",
+  "permissions": ["views:manage"],
+  "objects": { "deal": { "read": true, "write": true } },
+  "fields": { "deal": { "margin": "read" } }
+}'
+
+# Give it to a member (the list is the whole list: sets left out are taken away)
+curl -s -X PATCH localhost:8787/v1/members/usr_… -H "Authorization: Bearer $ADMIN_KEY" -H "Content-Type: application/json" \
+  -d '{"permission_sets": ["deal_desk"]}'
+
+# Or when adding a member or a service account
+curl -s -X POST localhost:8787/v1/service-accounts -H "Authorization: Bearer $ADMIN_KEY" -H "Content-Type: application/json" \
+  -d '{"name": "Quote bot", "role": "read_only", "permission_sets": ["deal_desk"]}'
+```
+
+- **The most permissive wins.** A member can do something when their role or any of their sets allows it, and a field gets the widest access any of them gives. A deny, or a hidden or read-only field, shapes only the role or set it is written in: it never takes away what another gives. To keep a field from someone, no role or set they hold may show it.
+- **Permissions that aren't per object are a plain union.** A member who holds `restricted:read` through one set sees restricted values on every object they can read.
+- **Routes.** `GET /v1/permission-sets` and `GET /v1/permission-sets/{id}` (any member), `POST`, `PATCH` and `DELETE` (`roles:manage`), and `GET /v1/permission-sets/{id}/access` for what a set gives by itself. A set is referred to by key or by ID (`pset_…`). Roles and sets are named separately: a set may share a role's key, and neither is found through the other's routes.
+- **The same rules as roles.** A set that holds `automations:manage`, `webhooks:manage` or `alerts:manage` must hold the record permissions they reach, and a set that manages those or the schema can't have denying rules or field rules. On an object with a rule, write needs read and archive needs write.
+- **Escalation.** Creating or changing a set needs every permission and all record access it gives. Giving a set to a member needs `members:manage` and the same. Nobody changes their own sets, or changes or archives a set they hold. A set can't be archived while an active member holds it.
+- **Where it shows.** `GET /v1/me` and `GET /v1/auth/session` list the caller's `permission_sets`; `GET /v1/me/access` is the combined result; `GET /v1/members` lists each member's sets; the access review lists each set with its permissions and rules, and `effective_permissions`.
+- **Audited** as `permission_set.created`, `permission_set.updated`, `permission_set.archived`, and `member.permission_sets_changed` or `service_account.permission_sets_changed` with the sets added and removed.
+
+In the web UI: Settings → Permission sets to define them, and Settings → Members to assign them. With the CLI: `crm permission-sets` and `crm members update --permission-sets` ([cli.md](cli.md)). The MCP servers have no tools for them, as for roles. Schema packs carry roles, not permission sets. See [ADR 0013](decisions/0013-permission-sets.md).
+
 ## Object and field access
 
 `records:read`, `records:write` and `records:archive` are a role's defaults for every object. A custom role can change them per object, and limit single fields. System roles have no rules.
@@ -177,6 +214,10 @@ Route checks admit a key that has the needed access on at least one object; the 
   - `convert_lead`: write on the lead's `status`; read on contact and on `lead.contact`; write on deal and the fields it sets. The lead's account is copied to the deal only when the key can read `lead.account` (and then needs read on account). The default deal name is built from what the key can read of the contact and lead.
   - `move_deal_stage`: write on `deal.stage` (and `lost_reason` when sent). Leaving a lost stage clears `lost_reason` only for a key that can write it; otherwise it is left as it was.
   - `assign_owner`: write on the record's `owner` field.
+  - `create_quote`: write on quote (and on quote_line_item when lines are given); the quote and each line then go through the normal create. A quote takes its deal's account, primary contact and name only where the key can read them on the deal.
+  - `send_quote`: write on `quote.status`.
+  - `accept_quote`: write on `quote.status` and on order. The deal is moved to its won stage only for a key that can write `deal.stage`; otherwise it is left as it is and the result says so.
+  - `revise_quote`: write on quote and on quote_line_item.
   - `log_activity`: write on activity, read on every record in `related_to`.
   Bookkeeping the platform does after a change is not checked as the caller's write: a contact's lifecycle stage moving forward, history activities (`lead_converted`, `task_completed`), deal stage history, `last_activity_at`, account-contact links and a deal's probability from its stage.
 - **Copies.** When the platform copies a value from one record into another on a caller's behalf (a contact's account into a new lead, a lead's account into a deal, names into a default deal name), it copies only what the caller can read on the source; otherwise the copy is left empty. Platform-written activity subjects carry no record values (see History activities).
@@ -184,6 +225,8 @@ Route checks admit a key that has the needed access on at least one object; the 
 - **Schema.** Objects and fields are listed to anyone who can use the schema, with the caller's access: names are not data. Record counts in `GET /v1/schema` are given only for readable objects. The schema document (`GET /v1/schema/export`, `crm schema pull`) lists every object and field too, and adds `access` (as in `GET /v1/me/access`) when the key can't read, write and archive everything; plan and apply ignore it. Plan and apply need `schema:manage`, so they always run with unrestricted record access. Objects of a module that is turned off are left out of the document, as from `GET /v1/objects`.
 - **Export.** `GET /v1/objects/{object}/export` (CSV or NDJSON) refuses an object the key can't read with 403 before doing anything (no audit entry is written for a refusal). A field the key can't read has no column, rather than an empty one, and its values are in no row. Filters, sorts and relation paths go through the same check as listing. Relations to records on an object the key can't read are IDs only, and `related` names in NDJSON follow the reader's access. Every export that returns rows is audited as `<object>.exported`.
 - **Import.** `POST /v1/objects/{object}/import` checks everything before it reads a record, and refuses the whole request with 403, naming every column at once: write on the object (and read with an upsert key); write on every mapped field, so a column the key can't write must be mapped to `""`; read on the upsert key (matching on a field you can't read would show which values exist; a key you can read but not write still matches, and such rows can only update); read on a relation's target object, and on the field a relation is looked up by (`account.domain`). Owner lookups by member email need write on `owner`, like `assign_owner`. A lookup compares values as the field does (emails and domains ignore case, other unique fields are exact). Rows then go through the normal create and update, so every rule above applies to them, and their errors quote only the file's values. A cell holding `[restricted]` in a restricted field is left alone, so a redacted export imports back without overwriting values. For a key without `restricted:read`, a value in a restricted field always counts as a change (comparing it would confirm or refute a guess), so a dry run says "update" whatever the stored value is.
+- **Record page layouts.** `GET /v1/objects/{object}/layout` needs read on the object; setting or removing a layout needs `schema:manage`. A layout names fields, never values, and changes no one's access: a field a role can't read is hidden on the page wherever the layout places it.
+- **Files.** A file follows the record it is attached to: listing and downloading need read on that record's object, attaching and removing need write (`records:write`, or the object's rule). Field rules don't apply (a file is not in a field), so a role that can read an object can read every file on its records. A file's ID alone gives nothing: each call finds the record first, and refuses as it would refuse the record.
 - **Restore.** `POST /v1/objects/{object}/records/{id}/restore` needs archive on the object (`records:archive`). When another record now holds one of the record's unique values, the refusal names the field only if the key can read it, and never the value. Warnings about relations to archived records cover only fields and target objects the key can read. A merged record can't be restored.
 - **Duplicates.** `POST /v1/objects/{object}/duplicates` needs read on the object. Grouping on a field shows which records share its value, so a rule naming a field the key can't read is refused with 403; a default rule that would use one is skipped and listed in `skipped_rules`; restricted fields are never matched on (422). Groups are serialized as the key sees records.
 - **Merge.** `POST /v1/ops/merge_records` needs write and archive on the object, checked before anything is looked up. The survivor's blank fields are filled from the duplicates only where the key can read and write the field (restricted values only with `restricted:read`); other fields are left as they are and named in `not_filled` when the key can read them. Choosing a field the key can't write, or a restricted value without `restricted:read`, is refused with 403. Field changes go through the normal update, so its checks and its events (filtered per reader) apply. A relation whose target object the key can't read is not filled (listed in `not_filled`), rather than failing the merge. Moving references is bookkeeping and happens on every object, including ones the key can't read or write (a reference left pointing at an archived duplicate would be corrupt data); the result lists moved references only for objects and fields the key can read, and each moved record's `reference_move` event is filtered per reader like any update. A real merge needs its dry run's `confirm_token`, which only the same credential can use (see [Confirm tokens and sessions](#sessions-and-keys)). A hierarchy cycle is named only to a key that can read `account.parent_account`.
@@ -204,7 +247,7 @@ Automations, webhook payloads and alert backtests run with full record access, a
 - **You cannot grant what you do not hold.** Creating a role, editing a role, assigning a role, and creating a key for someone else each need the caller to hold every permission involved, and record access at least as wide as the role's, per object and per field. You cannot grant read on `deal`, or on a field, that you cannot read yourself. Editing a role checks its access before and after the change.
 - **You cannot change a role you hold,** or archive it.
 - **You cannot change your own role or disable yourself.**
-- **You cannot act on a member who holds more than you do:** change, disable or mint keys for someone whose role has a permission or record access you lack.
+- **You cannot act on a member who holds more than you do:** change, disable or mint keys for someone whose role or permission sets have a permission or record access you lack.
 - **Owner-only rules:** only an owner can assign the `owner` role, change or disable an owner, or create, rotate or revoke an owner's keys.
 - **The last active owner is protected.** It cannot be demoted or disabled, including when two owners try to demote each other at the same moment.
 - **Key scopes stay within the caller's.** A key cannot create a key with a scope it does not itself have, and the new key's scopes must be usable by its member's role.
@@ -276,6 +319,8 @@ Each of these writes an audit-log entry with the actor, key and surface: `role.c
 ## Limits
 
 - **Heavy requests are gated.** Requests that can hold a database connection for seconds (the duplicate finder, merges, bulk update and archive, dry runs included, a batch create's dry run, import, export, and schema plan and apply, aggregates, and lists and queries with `count`) run at most 2 at once per credential (the API key; for a browser session, the signed-in member across all their sessions; for a connected app, its connection, with at most 4 at once across all of one member's connected apps) and at most half the connection pool (5) at once in a server process, so ordinary requests always find a connection. One over either limit is refused at once with 429 `too_many_heavy_requests` and `Retry-After: 1`, never queued. The rate limit and a route's extra cost are charged to the same credential. Previews are charged by their work: a bulk or batch-create dry run one token per 10 records (by filter, once the count is known), a merge 5 per duplicate. The gate and the buckets are in memory per process, like the rate limit.
+- **Warnings about recipients name roles.** Saving an alert or automation warns about roles whose members can't read what it depends on. A member of such a role who can read it through a permission set still gets the notification.
+- **`run_roles` names roles.** A permission set can't be listed to let its holders run an automation.
 - **Record rules are per object and per field, not per record.** There is no record-level sharing (for example, "only records I own").
 - **Some things a hidden field still changes are visible.** A record's `version` and `updated_at` change when a hidden field changes, and so do `*.updated` events (with the hidden field removed) and personal alerts on `*.updated` without `changed_fields`. A caller can tell that something changed, not what.
 - **Search on objects with hidden fields is limited.** It doesn't use the search index and looks only at the object's 10,000 newest records (custom objects: most recently updated), so an older record can't be found by search for that role. Filter with `POST /v1/query` on a readable field instead.
@@ -302,4 +347,4 @@ Each of these writes an audit-log entry with the actor, key and surface: `role.c
 - **The email suppression list** needs `automations:manage` to add to (`POST /v1/email-suppressions`) and to remove from: with `records:write` alone, a key could stop the workspace's email to anyone. `POST /v1/email-suppressions/check` needs `records:read` and shows the free-text reason only with `automations:manage` Removing an address is refused through MCP (keyed on the request's surface, so for keys that say they are MCP and for connected apps alike): letting automations email someone who asked not to be is a person's decision, like turning external email on.
 - **Credentials and automations.** The hourly caps, the run queue's limits and the workspace caps count runs and sends, whoever asked; the rate-limit cost of a run request (2, plus 2 per record) and the heavy-request slot of a dry run or a test go to the credential that asked (`credential(ctx)`: the key, the member's sessions together, or the connection). The checks for `run_roles` use the caller's record access as the credential narrows it: a connected app's scopes, like a key's, can take away `records:write` and so the right to run at all. What a run does is the automation's, never the credential's: it runs with the automation's own access whatever credential asked.
 
-See [ADR 0007](decisions/0007-roles-and-permissions.md) and [ADR 0008](decisions/0008-object-and-field-permissions.md) for why it is built this way.
+See [ADR 0007](decisions/0007-roles-and-permissions.md), [ADR 0008](decisions/0008-object-and-field-permissions.md) and [ADR 0013](decisions/0013-permission-sets.md) for why it is built this way.

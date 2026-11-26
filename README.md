@@ -2,7 +2,7 @@
 
 hl-crm-db (headless CRM database) is an open-source CRM backend with no required UI: a database, schema engine, record API and MCP servers. Work with it from Claude or any MCP client, from your own code through the REST API, from the `crm` command-line tool, or in a browser with the web UI the API serves. Self-host it with Docker: Postgres is the only other dependency.
 
-Status: **v0.1, Phase 1 MVP.** Built: foundations, schema engine and custom objects, records API with saved views, merges, bulk changes and restore, MCP servers with OAuth for remote clients, people sign-in from a browser, a web UI, events and automations (schedules, HTTP requests, email, loops), signed webhooks, alerts and notifications, the `crm` CLI with schema-as-code and CSV import and export, field types from text to address, json, rating, percent and duration, and schema packs that set up a workspace for a use case (recruiting, a support desk). See [`ROADMAP.md`](ROADMAP.md) for what is built, what is next and what is deliberately left out.
+Status: **v0.2, Phase 1 MVP.** Built: foundations, schema engine and custom objects, records API with saved views, merges, bulk changes and restore, MCP servers with OAuth for remote clients, people sign-in from a browser, a web UI, events and automations (schedules, HTTP requests, email, loops), signed webhooks, alerts and notifications, the `crm` CLI with schema-as-code and CSV import and export, field types from text to address, json, rating, percent and duration, and schema packs that set up a workspace for a use case (recruiting, a support desk). New in 0.2: permission sets on top of roles, files and Markdown notes on records, quotes and orders, and a board, a calendar and grouped tables for any object, with record pages whose sections can be arranged. See [`ROADMAP.md`](ROADMAP.md) for what is built, what is next and what is deliberately left out.
 
 **What to expect.** This is a first release for testers. It has automated tests (unit, integration, cross-tenant isolation and browser tests) but no independent security audit and no production track record, and there is no published image or npm package yet. Back up your database and your `.env` (it holds the encryption master key), and report problems through the repository's issues (security problems: see [`SECURITY.md`](SECURITY.md)).
 
@@ -34,11 +34,11 @@ The two keys:
 - **Admin key**: changes the shape of the CRM (objects, fields, pipelines), manages members and keys, and can read and write data.
 - **Ops key**: everyday work with records. It cannot change the schema.
 
-**Roles and permissions.** Each member has one role (owner, admin, member, read_only, or a custom role you define), and a role is a set of permissions, optionally with rules per object and per field. A key's scopes can only narrow what its member's role allows, never widen it. Roles are managed in the web UI (Settings → Roles), with `crm roles` or through the REST API. See [`docs/permissions.md`](docs/permissions.md), including its limits.
+**Roles and permissions.** Each member has one role (owner, admin, member, read_only, or a custom role you define), and a role is a set of permissions, optionally with rules per object and per field. A member can also hold permission sets, which add access on top of the role: per object and field, and per feature. A key's scopes can only narrow what its member is allowed, never widen it. Roles and permission sets are managed in the web UI (Settings → Roles, Settings → Permission sets), with `crm roles` and `crm permission-sets` or through the REST API. See [`docs/permissions.md`](docs/permissions.md), including its limits.
 
 Optional demo data: `docker compose run --rm api seed` creates a separate "Demo Co" workspace with accounts, contacts, deals and leads, and prints its keys.
 
-To pin a release once images are published, set `HLCRM_VERSION=0.1.0` in `.env`. Optional settings (email, webhook targets) are listed in [`.env.example`](.env.example).
+To pin a release once images are published, set `HLCRM_VERSION=0.2.0` in `.env`. Optional settings (email, webhook targets) are listed in [`.env.example`](.env.example).
 
 **If something goes wrong:** `docker compose ps` shows what is running, and `docker compose logs api` (or `migrate`, `mcp`, `worker`, `postgres`) shows why something isn't. Compose publishes ports 8787 (API and web UI), 8788 (MCP) and 5433 (Postgres) on your own machine only; if another program already uses one, either stop it or change the number before the colon in that `ports:` line of `docker-compose.yml` (and `PUBLIC_URL` in `.env` to match for 8787). `.env` is read once when Postgres first starts: to start over from nothing, run `docker compose down -v` (this deletes the database) and `sh scripts/init-env.sh` after deleting `.env`.
 
@@ -132,11 +132,35 @@ API keys are for machines. People sign in from a browser with an emailed code or
 
 ## The web UI
 
-The API serves a web app at `PUBLIC_URL` (the Docker image includes it): lists with filters, sorting, saved views and inline editing, record pages with related records and a timeline, a deals board, your tasks and inbox, a command palette, and settings for members, roles, API keys, webhooks and the audit log, each shown only when your role allows it. Every screen is built from your workspace's metadata, so custom objects and fields work with no change. Sign in at `/sign-in`, or open a link from `docker compose run --rm api sign-in-link --email you@example.com` (outside Docker: `hl-crm-db-server sign-in-link …`). `WEB_UI=false` turns it off for an API-only deployment. To run it in development, retheme it or fork it, see [`packages/web/README.md`](packages/web/README.md).
+The API serves a web app at `PUBLIC_URL` (the Docker image includes it): lists with filters, sorting, saved views and inline editing, shown as a table, a board by any select or status field, a calendar by any date field, or grouped with totals; record pages with related records, notes, files and a timeline, whose sections an admin can arrange per object; a deals board, your tasks and inbox, a command palette, and settings for members, roles, API keys, webhooks and the audit log, each shown only when your role allows it. Every screen is built from your workspace's metadata, so custom objects and fields work with no change. Sign in at `/sign-in`, or open a link from `docker compose run --rm api sign-in-link --email you@example.com` (outside Docker: `hl-crm-db-server sign-in-link …`). `WEB_UI=false` turns it off for an API-only deployment. To run it in development, retheme it or fork it, see [`packages/web/README.md`](packages/web/README.md).
 
 ## Use it from the command line
 
 The `crm` CLI keeps the workspace schema in a file you review and apply (`crm schema pull`, `plan`, `apply`), imports and exports CSV, and manages keys, members and roles. It isn't on npm yet: build it from source. See [`docs/cli.md`](docs/cli.md).
+
+## Quotes and orders
+
+A quote is made for a deal, priced by its lines, sent, and accepted, which makes an order:
+
+```sh
+curl -s -X POST localhost:8787/v1/ops/create_quote -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"deal": "deal_…", "lines": [{"description": "Seats", "quantity": 12, "unit_price": 49.5}]}'
+curl -s -X POST localhost:8787/v1/ops/send_quote   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"quote": "quote_…"}'
+curl -s -X POST localhost:8787/v1/ops/accept_quote -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"quote": "quote_…"}'
+```
+
+A sent quote can't be changed (`revise_quote` makes the next version), and accepting one marks its deal won. Whether a quote needs a deal, and whether accepting marks the deal won, are workspace settings. See [`docs/data-model.md`](docs/data-model.md#quotes-and-orders-as-built).
+
+## Files and notes
+
+Any record can have files attached, and notes are written in Markdown and shown formatted:
+
+```sh
+curl -s -X POST "localhost:8787/v1/records/deal_…/files?name=contract.pdf" -H "Authorization: Bearer $KEY" --data-binary @contract.pdf
+curl -s -OJ localhost:8787/v1/files/file_…/content -H "Authorization: Bearer $KEY"
+```
+
+Files are kept in Postgres unless you set `FILE_STORE=s3`, are limited to 10 MB each by default, and are always sent as downloads (there is no virus scanner built in). See [`docs/data-model.md`](docs/data-model.md#files-and-notes).
 
 ## Custom objects
 

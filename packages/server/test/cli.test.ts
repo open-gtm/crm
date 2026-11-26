@@ -447,6 +447,55 @@ describe("crm roles, webhooks, access review and events", () => {
     expect((await crm(["roles", "archive", key, "--yes"])).code).toBe(0);
   });
 
+  it("permission sets: create, show, give to a member and take away, archive", async () => {
+    const key = `cli_set_${Date.now().toString(36)}`;
+    const made = await crm(["permission-sets", "create", "--key", key, "--name", "CLI set", "--permissions", "views:manage", "--object", "deal:read=allow", "--json"]);
+    expect(made.code, made.err).toBe(0);
+    expect(JSON.parse(made.out).data).toMatchObject({ key, feature_permissions: ["views:manage"], record_permissions: [], objects: { deal: { read: true } } });
+    expect(JSON.parse(made.out).data.id).toMatch(/^pset_/);
+    expect((await crm(["permission-sets", "list"])).out).toContain(key);
+    const shown = await crm(["permission-sets", "get", key]);
+    expect(shown.code, shown.err).toBe(0);
+    expect(shown.out).toContain("feature_permissions");
+    expect((await crm(["permission-sets", "update", key, "--field", "deal.amount=read"])).code).toBe(0);
+    const access = JSON.parse((await crm(["permission-sets", "access", key, "--json"])).out).data.objects.find((o: { object: string }) => o.object === "deal");
+    expect(access).toMatchObject({ read: true, write: false, fields: { amount: "read" } });
+
+    const added = await crm(["members", "add", "--email", uniqueEmail("cliset"), "--name", "Set Holder", "--role", "read_only", "--permission-sets", key, "--json"]);
+    expect(added.code, added.err).toBe(0);
+    const member = JSON.parse(added.out).data as { id: string; permission_sets: string[] };
+    expect(member.permission_sets).toEqual([key]);
+    expect((await crm(["members", "list"])).out).toContain(key);
+    // Held by an active member, so it can't be archived yet (a conflict).
+    expect((await crm(["permission-sets", "archive", key, "--yes"])).code).not.toBe(0);
+    const cleared = await crm(["members", "update", member.id, "--permission-sets", "none", "--json"]);
+    expect(JSON.parse(cleared.out).data.permission_sets).toEqual([]);
+    expect((await crm(["members", "update", member.id])).code).toBe(2);
+    expect((await crm(["permission-sets", "archive", key, "--no-input"])).code).toBe(6);
+    expect((await crm(["permission-sets", "archive", key, "--yes"])).code).toBe(0);
+  });
+
+  it("files: attach a local file to a record, list, download it back and remove it", async () => {
+    const contact = await create(ws.keys.ops, "contact", { first_name: "Filey", email: uniqueEmail("clifile") });
+    writeFileSync(file("brief.txt"), "The brief, line one.\nLine two.\n");
+    const attached = await crm(["files", "attach", contact.id, file("brief.txt"), "--json"]);
+    expect(attached.code, attached.err).toBe(0);
+    const info = JSON.parse(attached.out).data as { id: string; name: string; size: number; content_type: string };
+    expect(info).toMatchObject({ name: "brief.txt", size: 31, content_type: "text/plain" });
+    expect((await crm(["files", "list", contact.id])).out).toContain("brief.txt");
+    const out = file("copy.txt");
+    const got = await crm(["files", "download", info.id, "--output", out]);
+    expect(got.code, got.err).toBe(0);
+    expect(readFileSync(out, "utf8")).toBe("The brief, line one.\nLine two.\n");
+    // An existing file is not replaced without a yes.
+    expect((await crm(["files", "download", info.id, "--output", out, "--no-input"])).code).toBe(6);
+    expect((await crm(["files", "attach", contact.id, file("no-such-file.txt")])).code).toBe(2);
+    expect((await crm(["files", "list", "not an id"])).code).toBe(2);
+    expect((await crm(["files", "remove", info.id, "--no-input"])).code).toBe(6);
+    expect((await crm(["files", "remove", info.id, "--yes"])).code).toBe(0);
+    expect(JSON.parse((await crm(["files", "list", contact.id, "--json"])).out).data).toEqual([]);
+  });
+
   it("webhooks: list, get, test, deliveries; the secret goes to stdout alone", async () => {
     const hook = await call("POST", "/v1/webhooks", { key: ws.keys.admin, body: { url: "https://hooks.example.com/cli", events: ["contact.created"] } });
     const id = hook.json.data.id as string;

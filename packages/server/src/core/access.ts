@@ -26,6 +26,8 @@ const VERB: Record<RecordAction, string> = { read: "read", write: "create or cha
 /** Rules per role, valid for one access_version (bumped with every rule change), so each process reloads on change. */
 const cache = new Map<string, { version: string; rules: RoleRules }>();
 const CACHE_MAX = 10_000;
+/** For each cached role or set: the object each of its limited fields is on. Combining rules needs it. */
+const fieldObjects = new Map<string, Map<string, string>>();
 
 /** A role's rules: one query on a cache miss, none on a hit. */
 export async function loadRoleRules(tx: Tx, tenantId: string, roleId: string, accessVersion: string | number): Promise<RoleRules> {
@@ -35,20 +37,114 @@ export async function loadRoleRules(tx: Tx, tenantId: string, roleId: string, ac
   if (hit && hit.version === version) return hit.rules;
   const rows = await roleRuleRows(tx, roleId);
   const rules: RoleRules = { objects: new Map(), fields: new Map() };
+  const ofField = new Map<string, string>();
   for (const r of rows) {
     if (r.kind === "o") rules.objects.set(r.id, { read: r.can_read, write: r.can_write, archive: r.can_archive });
-    else rules.fields.set(r.id, r.access!);
+    else {
+      rules.fields.set(r.id, r.access!);
+      if (r.object_id) ofField.set(r.id, r.object_id);
+    }
   }
   cache.delete(key);
   cache.set(key, { version, rules });
+  fieldObjects.set(key, ofField);
   for (const k of cache.keys()) {
     if (cache.size <= CACHE_MAX) break;
     cache.delete(k);
+    fieldObjects.delete(k);
   }
   return rules;
 }
 
+
 export const hasRules = (r: RoleRules) => r.objects.size > 0 || r.fields.size > 0;
+
+// ----------------------------------------------------------------------------------------------
+// A member's access: their role and their permission sets, combined (ADR 0013)
+
+/** A role or a permission set, enough to load its rules. */
+export interface AccessPart { id: string; permissions: readonly string[]; access_version: string | number }
+/** A permission set a member holds, as the member queries return it (queries/roles.ts memberSetsColumn). */
+export interface HeldSet extends AccessPart { key: string }
+/** What a member can do: the union of their role and their sets. `version` changes whenever any part of it does. */
+export interface MemberAccess { permissions: Permission[]; rules: RoleRules; version: string }
+
+interface Part { permissions: ReadonlySet<string>; rules: RoleRules }
+
+/** What one part allows on an object by itself, as canObject decides it for a context holding only that part. */
+function partCan(p: Part, objectId: string, a: RecordAction): boolean {
+  const rule = p.rules.objects.get(objectId);
+  if (!rule) return p.permissions.has(PERMISSION[a]);
+  const ok = (x: RecordAction) => rule[x] ?? p.permissions.has(PERMISSION[x]);
+  if (!ok("read")) return false;
+  if (a === "read") return true;
+  if (!ok("write")) return false;
+  return a === "write" || ok("archive");
+}
+
+function partField(p: Part, objectId: string, fieldId: string): FieldAccess {
+  if (!partCan(p, objectId, "read")) return "none";
+  return p.rules.fields.get(fieldId) ?? (partCan(p, objectId, "write") ? "write" : "read");
+}
+
+/**
+ * The union of several parts as one set of rules: an action on an object is allowed when any part allows
+ * it, and a field gets the widest access any part gives it. A deny or a field limit only shapes the
+ * part it is in. The result is written the way a single role's rules are (an explicit rule for every
+ * object some part has a rule on; a limit for every field that ends up below its object), so everything
+ * that reads a context's rules works unchanged. `objectOfField` says which object a limited field is on.
+ */
+export function combineRules(parts: Part[], objectOfField: ReadonlyMap<string, string>): RoleRules {
+  if (parts.length === 1) return parts[0]!.rules;
+  const objects = new Map<string, ObjectRule>();
+  const any = (objectId: string, a: RecordAction) => parts.some((p) => partCan(p, objectId, a));
+  for (const p of parts) {
+    for (const id of p.rules.objects.keys()) {
+      if (!objects.has(id)) objects.set(id, { read: any(id, "read"), write: any(id, "write"), archive: any(id, "archive") });
+    }
+  }
+  const fields = new Map<string, FieldLimit>();
+  for (const p of parts) {
+    for (const fieldId of p.rules.fields.keys()) {
+      if (fields.has(fieldId)) continue;
+      const objectId = objectOfField.get(fieldId);
+      if (!objectId) continue; // a rule on a field that no longer exists does nothing
+      const widest = parts.reduce<FieldAccess>((best, q) => {
+        const got = partField(q, objectId, fieldId);
+        return RANK[got] > RANK[best] ? got : best;
+      }, "none");
+      const objectLevel: FieldAccess = any(objectId, "write") ? "write" : any(objectId, "read") ? "read" : "none";
+      if (RANK[widest] < RANK[objectLevel]) fields.set(fieldId, widest as FieldLimit);
+    }
+  }
+  return { objects, fields };
+}
+
+/**
+ * A member's access: their role's permissions and rules, widened by every permission set they hold.
+ * With no sets this is the role's own rules and version, exactly as before sets existed.
+ */
+export async function loadMemberAccess(tx: Tx, tenantId: string, role: AccessPart, sets: readonly AccessPart[] = []): Promise<MemberAccess> {
+  const roleRules = await loadRoleRules(tx, tenantId, role.id, role.access_version);
+  const permissions = (list: Iterable<string>) => [...new Set(list)] as Permission[];
+  if (sets.length === 0) return { permissions: permissions(role.permissions), rules: roleRules, version: `${role.id}:${role.access_version}` };
+  const ordered = [...sets].sort((a, b) => a.id.localeCompare(b.id));
+  const parts: Part[] = [{ permissions: new Set(role.permissions), rules: roleRules }];
+  const objectOfField = new Map(fieldObjects.get(`${tenantId}:${role.id}`) ?? []);
+  for (const s of ordered) {
+    parts.push({ permissions: new Set(s.permissions), rules: await loadRoleRules(tx, tenantId, s.id, s.access_version) });
+    for (const [f, o] of fieldObjects.get(`${tenantId}:${s.id}`) ?? []) objectOfField.set(f, o);
+  }
+  return {
+    permissions: permissions(parts.flatMap((p) => [...p.permissions])),
+    rules: combineRules(parts, objectOfField),
+    version: [role, ...ordered].map((p) => `${p.id}:${p.access_version}`).join(","),
+  };
+}
+
+/** Every permission a member holds through their role and their sets (no rules needed, so no query). */
+export const memberPermissions = (m: { permissions: readonly string[]; sets?: readonly AccessPart[] }): Permission[] =>
+  [...new Set([...m.permissions, ...(m.sets ?? []).flatMap((s) => [...s.permissions])])] as Permission[];
 
 /** Record permissions some object rule grants: they make a key scope usable for the role. */
 export function grantedPermissions(rules: RoleRules): Permission[] {

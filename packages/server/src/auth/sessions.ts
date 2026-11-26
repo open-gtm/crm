@@ -1,8 +1,9 @@
 import { config } from "../config.js";
 import { audit } from "../core/audit.js";
 import { ALL_SCOPES, OWNER_ROLE, can, type Ctx, type SignInMethod } from "../core/context.js";
-import { keyOwner, memberAccess, type Principal } from "../core/keys.js";
-import { assertCoversRole } from "../core/roles.js";
+import { actorOf, keyOwner, memberAccess, type Principal } from "../core/keys.js";
+import { memberPermissions } from "../core/access.js";
+import { assertCoversRole, memberRef } from "../core/roles.js";
 import { loadSchema } from "../core/schema.js";
 import { db, type Tx } from "../db/pool.js";
 import { tenantIds } from "../core/auditchain.js";
@@ -79,7 +80,7 @@ export async function resolveSession(token: string): Promise<Principal | null> {
     }
     return {
       tenantId: s.tenant_id, keyId: null, session: { id: s.id, signedInAt: s.signed_in_at, method: s.method },
-      actor: { type: "user", id: s.user_id, role: owner.role },
+      actor: actorOf("user", s.user_id, owner),
       // A session is the member acting with their whole role: every scope the role can use, so nothing is narrowed.
       ...(await memberAccess(tx, s.tenant_id, owner, ALL_SCOPES)),
     } satisfies Principal;
@@ -141,9 +142,9 @@ export async function assertMayManageSignInOf(tx: Tx, ctx: Ctx, userId: string) 
   if (!m) throw notFound("Member");
   if (ctx.actor.type === "user" && ctx.actor.id === userId) return;
   if (m.role === OWNER_ROLE && ctx.actor.role !== OWNER_ROLE) throw forbidden("Only an owner can see or change an owner's sign-in");
-  const over = m.permissions.filter((p) => !ctx.permissions.has(p));
+  const over = memberPermissions(m).filter((p) => !ctx.permissions.has(p));
   if (over.length) throw forbidden(`This member has permissions you don't hold: ${over.join(", ")}`);
-  await assertCoversRole(tx, ctx, await loadSchema(tx), { id: m.role_id, key: m.role, permissions: m.permissions, access_version: m.access_version }, "This member's role");
+  await assertCoversRole(tx, ctx, await loadSchema(tx), memberRef(m), "This member");
 }
 
 /** Deletes sessions that ended more than a day ago, in every workspace. The worker runs this hourly. */

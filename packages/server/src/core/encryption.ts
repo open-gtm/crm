@@ -40,3 +40,18 @@ export async function decryptValue(tx: Tx, tenantId: string, recordId: string, s
   const plain = open(key, Buffer.from(m[2]!, "base64"), `${tenantId}|${recordId}|${storageKey}`);
   return JSON.parse(plain.toString("utf8"));
 }
+
+/**
+ * Seals a file's bytes with the workspace's data key, bound to the workspace and the file: for stores
+ * outside the database, which know nothing about workspaces. Returns the key version to keep with the file.
+ */
+export async function sealBytes(tx: Tx, tenantId: string, fileId: string, data: Buffer): Promise<{ sealed: Buffer; version: number }> {
+  const { key, version } = await currentKey(tx, tenantId);
+  return { sealed: seal(key, data, `${tenantId}|file|${fileId}`), version };
+}
+
+export async function openBytes(tx: Tx, tenantId: string, fileId: string, sealed: Buffer, keyVersion: number): Promise<Buffer> {
+  const { key, version } = await currentKey(tx, tenantId);
+  if (keyVersion !== version) throw new Error("file uses a retired key version; re-encryption pending");
+  return open(key, sealed, `${tenantId}|file|${fileId}`);
+}

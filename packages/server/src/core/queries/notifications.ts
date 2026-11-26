@@ -1,6 +1,7 @@
 import type { Tx } from "../../db/pool.js";
 import type { Permission } from "../context.js";
 import type { Prefs, Severity } from "../notifications.js";
+import { memberSetsColumn, type HeldSetRow } from "./roles.js";
 
 /**
  * The SQL of notifications, their email deliveries and members' notification preferences
@@ -24,14 +25,14 @@ export async function savePrefs(tx: Tx, tenantId: string, userId: string, prefs:
 // --- Recipients -------------------------------------------------------------------------------------
 
 /** A member and their role, enough to build the role's context. */
-export interface MemberRole { id: string; role_id: string; role_key: string; permissions: Permission[]; access_version: string }
+export interface MemberRole { id: string; role_id: string; role_key: string; permissions: Permission[]; access_version: string; sets: HeldSetRow[] }
 
 /** The members among `ids` who are active and whose role isn't archived, with their roles. */
 export async function activeMemberRoles(tx: Tx, ids: string[]): Promise<MemberRole[]> {
   return tx<MemberRole[]>`
-    SELECT u.id, r.id AS role_id, r.key AS role_key, r.permissions, r.access_version::text
-    FROM users u JOIN roles r ON r.tenant_id = u.tenant_id AND r.id = u.role_id
-    WHERE u.id = ANY(${ids}::uuid[]) AND u.disabled_at IS NULL AND r.archived_at IS NULL`;
+    SELECT m.id, r.id AS role_id, r.key AS role_key, r.permissions, r.access_version::text, ${memberSetsColumn(tx, "user")}
+    FROM users m JOIN roles r ON r.tenant_id = m.tenant_id AND r.id = m.role_id
+    WHERE m.id = ANY(${ids}::uuid[]) AND m.disabled_at IS NULL AND r.archived_at IS NULL`;
 }
 
 /** An active member by user ID. */
@@ -196,12 +197,12 @@ export type ClaimedDeliveryRow = {
 export async function claimDueDeliveries(tx: Tx, now: Date, leaseUntil: Date): Promise<ClaimedDeliveryRow[]> {
   return tx<ClaimedDeliveryRow[]>`
       UPDATE notification_deliveries d SET next_attempt_at = ${leaseUntil}
-      FROM users u JOIN roles r ON r.tenant_id = u.tenant_id AND r.id = u.role_id
+      FROM users m JOIN roles r ON r.tenant_id = m.tenant_id AND r.id = m.role_id
       WHERE d.id IN (SELECT id FROM notification_deliveries WHERE status = 'pending' AND next_attempt_at <= ${now}
                      ORDER BY next_attempt_at LIMIT 200 FOR UPDATE SKIP LOCKED)
-        AND u.tenant_id = d.tenant_id AND u.id = d.user_id
-      RETURNING d.id, d.notification_id, d.user_id, d.mode, d.attempts, u.email::text AS email, u.name AS user_name,
-        u.disabled_at IS NOT NULL AS disabled, r.id AS role_id, r.key AS role_key, r.permissions, r.access_version::text`;
+        AND m.tenant_id = d.tenant_id AND m.id = d.user_id
+      RETURNING d.id, d.notification_id, d.user_id, d.mode, d.attempts, m.email::text AS email, m.name AS user_name,
+        m.disabled_at IS NOT NULL AS disabled, r.id AS role_id, r.key AS role_key, r.permissions, r.access_version::text, ${memberSetsColumn(tx, "user")}`;
 }
 
 /** The workspace's name. */

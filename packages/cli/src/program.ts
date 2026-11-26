@@ -4,6 +4,7 @@ import { registerAuth } from "./commands/auth.js";
 import { registerAutomations } from "./commands/automations.js";
 import { registerData } from "./commands/data.js";
 import { registerPack } from "./commands/pack.js";
+import { registerFiles } from "./commands/attachments.js";
 import { registerSchema } from "./commands/schema.js";
 import { Context, type Globals } from "./context.js";
 import { CliError, EXIT, toCliError } from "./errors.js";
@@ -50,6 +51,7 @@ export function buildProgram(rt: Runtime, state: { ctx?: Context }): Command {
   registerAdmin(program, act);
   registerAutomations(program, act);
   registerPack(program, act, collect);
+  registerFiles(program, act);
   // Subcommands inherit exit handling and output settings.
   for (const c of allCommands(program)) c.exitOverride().configureOutput({ writeOut: rt.stdout, writeErr: rt.stderr });
   return program;

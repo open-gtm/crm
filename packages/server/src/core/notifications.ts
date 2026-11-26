@@ -15,7 +15,7 @@ import {
   type ClaimedDeliveryRow, type MemberRole, type NotificationRow,
 } from "./queries/notifications.js";
 import { getRecord } from "./records.js";
-import { contextForRole } from "./roles.js";
+import { contextForRole, memberRef } from "./roles.js";
 import { getObject, loadSchema } from "./schema.js";
 
 /**
@@ -184,9 +184,8 @@ export async function notifyUser(tx: Tx, tenantId: string, userId: string, a: No
   return id;
 }
 
-/** A member's role as a context (no key, no restricted values): what they may see of a record. */
-const memberCtx = (tx: Tx, tenantId: string, m: MemberRole) =>
-  contextForRole(tx, { tenantId, requestId: "notify" }, { id: m.role_id, key: m.role_key, permissions: m.permissions, access_version: m.access_version });
+/** A member's access (their role and permission sets) as a context (no key, no restricted values): what they may see of a record. */
+const memberCtx = (tx: Tx, tenantId: string, m: MemberRole) => contextForRole(tx, { tenantId, requestId: "notify" }, memberRef(m));
 
 /**
  * The users among `ids` who may receive a notification about a record of `object` now: active, with

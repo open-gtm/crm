@@ -11,7 +11,7 @@ export type Prefs = Record<string, unknown>;
 export const PREF_KEY = /^[a-z0-9_.:-]{1,64}$/;
 export const listPrefKey = (object: string) => `list.${object}`;
 
-export interface ListPref { view?: string | null; columns?: string[]; sort?: string }
+export interface ListPref { view?: string | null; columns?: string[]; sort?: string; layout?: "board" | "calendar" | null; by?: string | null; group?: string | null }
 
 export function usePrefs() {
   const api = useApi();

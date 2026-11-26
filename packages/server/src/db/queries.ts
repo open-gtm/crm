@@ -54,6 +54,23 @@ export async function recordMigration(tx: Tx, file: string, checksum: string): P
   await tx`INSERT INTO schema_migrations (name, checksum) VALUES (${file}, ${checksum})`;
 }
 
+// --- Standard objects added to the catalog after a workspace was created -----------------------------
+
+/** Every workspace. Run by the migrator, which owns the tables; each workspace is then entered in its own transaction. */
+export async function allTenantIds(sql: Sql): Promise<string[]> {
+  return (await sql<{ tenant_id: string }[]>`SELECT tenant_id FROM tenant_directory ORDER BY created_at`).map((r) => r.tenant_id);
+}
+
+/** Enters a workspace for the rest of the transaction (row-level security binds the table owner too). */
+export async function enterTenant(tx: Tx, tenantId: string): Promise<void> {
+  await tx`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+}
+
+/** The names of a workspace's objects, standard and custom, archived ones included: a name is never reused. */
+export async function objectNames(tx: Tx): Promise<{ api_name: string; is_system: boolean }[]> {
+  return tx<{ api_name: string; is_system: boolean }[]>`SELECT api_name, is_system FROM objects`;
+}
+
 /** Runs the GRANT and REVOKE statements migrate.ts builds for the app role (whose name it validated). */
 export async function applyGrants(sql: Sql, statements: string): Promise<void> {
   await sql.unsafe(statements);

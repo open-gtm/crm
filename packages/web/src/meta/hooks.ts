@@ -67,7 +67,7 @@ export const isJunction = (o: Pick<ObjectSummary, "name" | "standard">) => o.sta
 
 /** Objects for navigation: readable and not hidden; standard ones first in a working order, then custom ones by label. */
 export function navObjects(all: ObjectSummary[]): { standard: ObjectSummary[]; custom: ObjectSummary[] } {
-  const ORDER = ["contact", "account", "lead", "deal", "task", "activity"];
+  const ORDER = ["contact", "account", "lead", "deal", "quote", "order", "task", "activity"];
   const readable = all.filter((o) => o.access.read && !o.hidden);
   const rank = (o: ObjectSummary) => {
     const i = ORDER.indexOf(o.name);

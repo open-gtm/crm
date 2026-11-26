@@ -1,7 +1,7 @@
 import type { Tx } from "../db/pool.js";
 import { conflict, forbidden, notFound, unprocessable } from "../lib/errors.js";
 import { decodeId, encodeId, uuidv7 } from "../lib/ids.js";
-import { accessShortfall, describeAccess, loadRoleRules, roleCtx, type RoleRules } from "./access.js";
+import { accessShortfall, describeAccess, loadMemberAccess, loadRoleRules, roleCtx, type AccessPart, type RoleRules } from "./access.js";
 import { audit } from "./audit.js";
 import {
   ALL_PERMISSIONS, PERMISSION_REQUIRES, PERMISSIONS, RECORD_ACTIONS, can, isPermission, missingRequired,
@@ -9,11 +9,11 @@ import {
 } from "./context.js";
 import {
   activeMemberCount, archiveRoleRow, deleteFieldRule, deleteObjectRule, insertRole, insertSystemRoles, liveRole, rolesWithMemberCounts,
-  updateRoleDefinition, upsertFieldRule, upsertObjectRule, type RoleRow,
+  updateRoleDefinition, upsertFieldRule, upsertObjectRule, type RoleKind, type RoleRow,
 } from "./queries/roles.js";
 import { loadSchema, type Schema } from "./schema.js";
 
-export type { RoleRow } from "./queries/roles.js";
+export type { RoleKind, RoleRow } from "./queries/roles.js";
 
 const KEY_PATTERN = /^[a-z][a-z0-9_]{1,39}$/;
 
@@ -25,8 +25,21 @@ const RECORD_MANAGERS: Permission[] = ["automations:manage", "webhooks:manage", 
 const MAX_OBJECT_RULES = 500;
 const MAX_FIELD_RULES = 5_000;
 
+/**
+ * Roles and permission sets (ADR 0013) are built and checked the same way; these are the words and
+ * identifiers that differ. A member holds one role and any number of sets, and a set only adds access.
+ */
+const KIND = {
+  role: { prefix: "role", noun: "role", Noun: "Role", plural: "roles", audit: "role" },
+  permission_set: { prefix: "pset", noun: "permission set", Noun: "Permission set", plural: "permission sets", audit: "permission_set" },
+} as const;
+
+/** The permissions catalog is in two areas: what a member may do with records (objects and fields), and features of the CRM. */
+const RECORD_PERMISSIONS: Permission[] = ["records:read", "records:write", "records:archive", "restricted:read"];
+
 /** The permission catalog, for clients building a role editor. `requires` lists what a role must also hold to have it. */
-export const permissionCatalog = () => ALL_PERMISSIONS.map((key) => ({ key, description: PERMISSIONS[key], requires: PERMISSION_REQUIRES[key] ?? [] }));
+export const permissionCatalog = () => ALL_PERMISSIONS.map((key) => ({ key, description: PERMISSIONS[key],
+  category: RECORD_PERMISSIONS.includes(key) ? "records" as const : "features" as const, requires: PERMISSION_REQUIRES[key] ?? [] }));
 
 /** Seeds the system roles for the tenant in `app.tenant_id`. The definitions live in migration 006 (app.seed_system_roles). */
 export async function seedSystemRoles(tx: Tx): Promise<void> {
@@ -50,9 +63,13 @@ export function publicRules(schema: Schema, rules: RoleRules) {
   return { objects, fields };
 }
 
-export const publicRole = (r: RoleRow, members?: number, rules?: ReturnType<typeof publicRules>) => ({
-  id: encodeId("role", r.id), key: r.key, name: r.name, description: r.description,
-  permissions: ALL_PERMISSIONS.filter((p) => r.permissions.includes(p)), is_system: r.is_system,
+export const publicRole = (r: RoleRow, members?: number, rules?: ReturnType<typeof publicRules>, kind: RoleKind = "role") => ({
+  id: encodeId(KIND[kind].prefix, r.id), key: r.key, name: r.name, description: r.description,
+  permissions: ALL_PERMISSIONS.filter((p) => r.permissions.includes(p)),
+  // The same permissions in the two areas a set or role is edited in: records (with the object and field rules) and features.
+  record_permissions: RECORD_PERMISSIONS.filter((p) => r.permissions.includes(p)),
+  feature_permissions: ALL_PERMISSIONS.filter((p) => r.permissions.includes(p) && !RECORD_PERMISSIONS.includes(p)),
+  ...(kind === "role" ? { is_system: r.is_system } : {}),
   ...(rules ? { objects: rules.objects, fields: rules.fields } : {}),
   created_at: r.created_at.toISOString(), updated_at: r.updated_at.toISOString(), archived_at: r.archived_at?.toISOString() ?? null,
   ...(members !== undefined ? { active_members: members } : {}),
@@ -62,22 +79,35 @@ export const publicRole = (r: RoleRow, members?: number, rules?: ReturnType<type
  * Finds a live role by key (`admin`) or ID (`role_…`). `lock` takes a row lock, so a role being
  * assigned can't be archived (and vice versa) by a concurrent request.
  */
-export async function resolveRole(tx: Tx, ref: string, lock: "share" | "update" | null = null): Promise<RoleRow> {
-  if (typeof ref !== "string" || !ref) throw notFound("Role");
+export async function resolveRole(tx: Tx, ref: string, lock: "share" | "update" | null = null, kind: RoleKind = "role"): Promise<RoleRow> {
+  const { Noun, prefix } = KIND[kind];
+  if (typeof ref !== "string" || !ref) throw notFound(Noun);
   const d = decodeId(ref);
-  if (d && d.prefix !== "role") throw notFound("Role");
-  if (!d && !KEY_PATTERN.test(ref)) throw notFound("Role");
-  const row = await liveRole(tx, d ? { id: d.uuid } : { key: ref }, lock);
-  if (!row) throw notFound("Role");
+  if (d && d.prefix !== prefix) throw notFound(Noun);
+  if (!d && !KEY_PATTERN.test(ref)) throw notFound(Noun);
+  const row = await liveRole(tx, d ? { id: d.uuid } : { key: ref }, lock, kind);
+  if (!row) throw notFound(Noun);
   return row;
 }
 
-type RoleRef = Pick<RoleRow, "id" | "key" | "permissions" | "access_version">;
+/** A role (or a set), and optionally the permission sets a member holds on top of it. */
+type RoleRef = Pick<RoleRow, "id" | "key" | "permissions" | "access_version"> & { sets?: readonly AccessPart[] };
 
-/** A role's own access (not narrowed by any key), as a context: to compare with a caller's, or to check a recipient. */
+/**
+ * A role's own access (not narrowed by any key), as a context: to compare with a caller's, or to check
+ * a recipient. With `sets` (a member's permission sets) it is that member's access: role and sets combined.
+ */
 export async function contextForRole(tx: Tx, ctx: Pick<Ctx, "tenantId" | "requestId">, role: RoleRef, opts: { restricted?: boolean } = {}): Promise<Ctx> {
-  return roleCtx(ctx, role, await loadRoleRules(tx, ctx.tenantId, role.id, role.access_version), `${role.id}:${role.access_version}`, opts);
+  const access = await loadMemberAccess(tx, ctx.tenantId, role, role.sets ?? []);
+  return roleCtx(ctx, { key: role.key, permissions: access.permissions }, access.rules, access.version, opts);
 }
+
+/** A member row as the member queries return it: their role's columns and the sets they hold. */
+export interface MemberAccessRow { role_id: string; role_key?: string; role?: string; permissions: readonly string[]; access_version: string; sets: readonly AccessPart[] }
+
+/** The RoleRef of a member: what contextForRole and assertCoversRole need to see everything the member can do. */
+export const memberRef = (m: MemberAccessRow): RoleRef =>
+  ({ id: m.role_id, key: m.role_key ?? m.role ?? "", permissions: m.permissions as Permission[], access_version: m.access_version, sets: m.sets });
 
 /**
  * Refuses a role whose record access reaches beyond the caller's, per object and per field. `rules`
@@ -89,32 +119,32 @@ export async function assertCoversRole(tx: Tx, ctx: Ctx, schema: Schema, role: R
   if (short.length) throw forbidden(`${what} has record access you don't: ${short.slice(0, 10).join("; ")}${short.length > 10 ? "; …" : ""}`);
 }
 
-async function activeMembers(tx: Tx, roleId: string): Promise<number> {
-  return (await activeMemberCount(tx, roleId)) ?? 0;
+async function activeMembers(tx: Tx, roleId: string, kind: RoleKind = "role"): Promise<number> {
+  return (await activeMemberCount(tx, roleId, kind)) ?? 0;
 }
 
-export async function listRoles(tx: Tx, ctx: Ctx, opts: { includeArchived?: boolean } = {}) {
+export async function listRoles(tx: Tx, ctx: Ctx, opts: { includeArchived?: boolean } = {}, kind: RoleKind = "role") {
   const schema = await loadSchema(tx);
-  const rows = await rolesWithMemberCounts(tx, opts.includeArchived ?? false);
+  const rows = await rolesWithMemberCounts(tx, opts.includeArchived ?? false, kind);
   const out = [];
-  for (const r of rows) out.push(publicRole(r, r.members, publicRules(schema, await loadRoleRules(tx, ctx.tenantId, r.id, r.access_version))));
+  for (const r of rows) out.push(publicRole(r, r.members, publicRules(schema, await loadRoleRules(tx, ctx.tenantId, r.id, r.access_version)), kind));
   return out;
 }
 
-export async function getRole(tx: Tx, ctx: Ctx, ref: string) {
-  const r = await resolveRole(tx, ref);
+export async function getRole(tx: Tx, ctx: Ctx, ref: string, kind: RoleKind = "role") {
+  const r = await resolveRole(tx, ref, null, kind);
   const schema = await loadSchema(tx);
-  return publicRole(r, await activeMembers(tx, r.id), publicRules(schema, await loadRoleRules(tx, ctx.tenantId, r.id, r.access_version)));
+  return publicRole(r, await activeMembers(tx, r.id, kind), publicRules(schema, await loadRoleRules(tx, ctx.tenantId, r.id, r.access_version)), kind);
 }
 
-/** What a role's holders can do with records, per object: the role editor's way to check its work. */
-export async function roleAccess(tx: Tx, ctx: Ctx, ref: string) {
-  const r = await resolveRole(tx, ref);
+/** What a role's holders can do with records, per object: the role editor's way to check its work. For a set: what the set alone gives. */
+export async function roleAccess(tx: Tx, ctx: Ctx, ref: string, kind: RoleKind = "role") {
+  const r = await resolveRole(tx, ref, null, kind);
   const role = await contextForRole(tx, ctx, r, { restricted: true });
-  return { role: r.key, permissions: ALL_PERMISSIONS.filter((p) => r.permissions.includes(p)), objects: describeAccess(role, await loadSchema(tx)) };
+  return { [kind]: r.key, permissions: ALL_PERMISSIONS.filter((p) => r.permissions.includes(p)), objects: describeAccess(role, await loadSchema(tx)) };
 }
 
-function checkPermissions(list: unknown): Permission[] {
+function checkPermissions(list: unknown, noun = "role"): Permission[] {
   if (!Array.isArray(list) || list.some((p) => typeof p !== "string" || !isPermission(p))) {
     throw unprocessable(`permissions must be a list of: ${ALL_PERMISSIONS.join(", ")}`);
   }
@@ -122,7 +152,7 @@ function checkPermissions(list: unknown): Permission[] {
   const missing = missingRequired(out);
   if (missing.length) {
     const why = out.filter((p) => PERMISSION_REQUIRES[p]?.some((r) => missing.includes(r)));
-    throw unprocessable(`${why.join(", ")} reach${why.length === 1 ? "es" : ""} record data, so the role must also hold: ${missing.join(", ")}`, { missing });
+    throw unprocessable(`${why.join(", ")} reach${why.length === 1 ? "es" : ""} record data, so the ${noun} must also hold: ${missing.join(", ")}`, { missing });
   }
   return out;
 }
@@ -150,7 +180,7 @@ export interface RulesInput {
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 /** Applies a patch of rules (by api_name) to a role's current rules (by ID). Unknown names are refused. */
-function applyRules(schema: Schema, current: RoleRules, input: RulesInput): RoleRules {
+function applyRules(schema: Schema, current: RoleRules, input: RulesInput, Noun = "Role"): RoleRules {
   const objects = new Map(current.objects);
   const fields = new Map(current.fields);
   const objectNamed = (name: string, where: string) => {
@@ -194,7 +224,7 @@ function applyRules(schema: Schema, current: RoleRules, input: RulesInput): Role
     }
   }
   if (objects.size > MAX_OBJECT_RULES || fields.size > MAX_FIELD_RULES) {
-    throw unprocessable(`A role can have at most ${MAX_OBJECT_RULES} object rules and ${MAX_FIELD_RULES} field rules`);
+    throw unprocessable(`${Noun === "Role" ? "A role" : "A permission set"} can have at most ${MAX_OBJECT_RULES} object rules and ${MAX_FIELD_RULES} field rules`);
   }
   return { objects, fields };
 }
@@ -204,10 +234,10 @@ function applyRules(schema: Schema, current: RoleRules, input: RulesInput): Role
  * needs read and archive needs write; and a role that manages automations, webhooks, alerts or the schema
  * can't be limited at all (those run with, or show signals from, full record access, so limits would be a fiction).
  */
-function checkRules(schema: Schema, permissions: Permission[], rules: RoleRules): void {
+function checkRules(schema: Schema, permissions: Permission[], rules: RoleRules, noun = "role"): void {
   const managers = RECORD_MANAGERS.filter((p) => permissions.includes(p));
   if (managers.length && ([...rules.objects.values()].some((r) => RECORD_ACTIONS.some((a) => r[a] === false)) || rules.fields.size)) {
-    throw unprocessable(`A role with ${managers.join(", ")} must have unrestricted record access: remove its denying object rules and its field rules`);
+    throw unprocessable(`A ${noun} with ${managers.join(", ")} must have unrestricted record access: remove its denying object rules and its field rules`);
   }
   const problems: string[] = [];
   for (const [id, r] of rules.objects) {
@@ -254,77 +284,87 @@ const NO_RULES: RoleRules = { objects: new Map(), fields: new Map() };
 
 export interface CreateRoleInput extends RulesInput { key: string; name: string; description?: string; permissions?: string[]; copy_from?: string }
 
-export async function createRole(tx: Tx, ctx: Ctx, input: CreateRoleInput) {
-  if (!can(ctx, "roles:manage")) throw forbidden("Creating roles needs the roles:manage permission");
-  if (typeof input.key !== "string" || !KEY_PATTERN.test(input.key) || input.key.startsWith("role_")) {
-    throw unprocessable("key must be 2 to 40 lowercase letters, digits or underscores, start with a letter and not start with role_");
+/** True when the caller holds this role or set themselves: nobody changes or archives what gives them their own access. */
+const holds = (ctx: Ctx, kind: RoleKind, key: string) => (kind === "role" ? key === ctx.actor.role : (ctx.actor.permissionSets ?? []).includes(key));
+
+export async function createRole(tx: Tx, ctx: Ctx, input: CreateRoleInput, kind: RoleKind = "role") {
+  const { noun, Noun, plural, prefix, audit: auditName } = KIND[kind];
+  if (!can(ctx, "roles:manage")) throw forbidden(`Creating ${plural} needs the roles:manage permission`);
+  if (typeof input.key !== "string" || !KEY_PATTERN.test(input.key) || input.key.startsWith(`${prefix}_`)) {
+    throw unprocessable(`key must be 2 to 40 lowercase letters, digits or underscores, start with a letter and not start with ${prefix}_`);
   }
   if (!input.name?.trim() || input.name.length > 100) throw unprocessable("name is required (up to 100 characters)");
   const schema = await loadSchema(tx);
-  const source = input.copy_from !== undefined ? await resolveRole(tx, input.copy_from) : null;
-  const permissions = checkPermissions(input.permissions ?? source?.permissions ?? []);
-  assertCanGrant(ctx, permissions, "This role");
+  const source = input.copy_from !== undefined ? await resolveRole(tx, input.copy_from, null, kind) : null;
+  const permissions = checkPermissions(input.permissions ?? source?.permissions ?? [], noun);
+  assertCanGrant(ctx, permissions, `This ${noun}`);
   // Copying a role copies its object and field rules too; rules in the request apply on top.
   const base = source ? await loadRoleRules(tx, ctx.tenantId, source.id, source.access_version) : NO_RULES;
-  const rules = applyRules(schema, base, input);
-  checkRules(schema, permissions, rules);
-  await assertCoversRole(tx, ctx, schema, { id: "", key: input.key, permissions, access_version: "0" }, "This role", rules);
+  const rules = applyRules(schema, base, input, Noun);
+  checkRules(schema, permissions, rules, noun);
+  await assertCoversRole(tx, ctx, schema, { id: "", key: input.key, permissions, access_version: "0" }, `This ${noun}`, rules);
   const description = input.description ?? source?.description ?? "";
   if (description.length > 1000) throw unprocessable("description is limited to 1000 characters");
   const id = uuidv7();
   try {
-    await insertRole(tx, { tenantId: ctx.tenantId, id, key: input.key, name: input.name.trim(), description, permissions, createdBy: ctx.actor.id });
+    await insertRole(tx, { tenantId: ctx.tenantId, id, key: input.key, name: input.name.trim(), description, permissions, createdBy: ctx.actor.id, kind });
   } catch (e) {
-    if ((e as { code?: string }).code === "23505") throw conflict(`A role with key "${input.key}" already exists`);
+    if ((e as { code?: string }).code === "23505") throw conflict(`A ${noun} with key "${input.key}" already exists`);
     throw e;
   }
   const saved = await saveRules(tx, ctx, schema, id, NO_RULES, rules);
-  await audit(tx, ctx, { action: "role.created", objectType: "role", recordId: id,
+  await audit(tx, ctx, { action: `${auditName}.created`, objectType: auditName, recordId: id,
     details: { key: input.key, permissions, ...(source ? { copied_from: source.key } : {}),
       ...(saved.objectChanges.length ? { object_rules: saved.objectChanges } : {}), ...(saved.fieldChanges.length ? { field_rules: saved.fieldChanges } : {}) } });
-  return publicRole(await resolveRole(tx, encodeId("role", id)), 0, publicRules(schema, rules));
+  return publicRole(await resolveRole(tx, encodeId(prefix, id), null, kind), 0, publicRules(schema, rules), kind);
 }
 
 export interface UpdateRoleInput extends RulesInput { name?: string; description?: string; permissions?: string[] }
 
-export async function updateRole(tx: Tx, ctx: Ctx, ref: string, patch: UpdateRoleInput) {
-  if (!can(ctx, "roles:manage")) throw forbidden("Changing roles needs the roles:manage permission");
-  const role = await resolveRole(tx, ref, "update");
+export async function updateRole(tx: Tx, ctx: Ctx, ref: string, patch: UpdateRoleInput, kind: RoleKind = "role") {
+  const { noun, Noun, plural, prefix, audit: auditName } = KIND[kind];
+  if (!can(ctx, "roles:manage")) throw forbidden(`Changing ${plural} needs the roles:manage permission`);
+  const role = await resolveRole(tx, ref, "update", kind);
   if (role.is_system) throw forbidden("System roles can't be changed. Create a custom role (copy_from this one) instead");
-  if (role.key === ctx.actor.role) throw forbidden("You can't change a role you hold");
+  if (holds(ctx, kind, role.key)) throw forbidden(`You can't change a ${noun} you hold`);
   const schema = await loadSchema(tx);
-  // Changing a role changes the access of everyone who holds it, so the caller must hold all of it, before and after.
-  assertCanGrant(ctx, role.permissions, "Changing this role");
-  await assertCoversRole(tx, ctx, schema, role, "This role");
-  const permissions = patch.permissions !== undefined ? checkPermissions(patch.permissions) : role.permissions;
+  // Changing a role or set changes the access of everyone who holds it, so the caller must hold all of it, before and after.
+  assertCanGrant(ctx, role.permissions, `Changing this ${noun}`);
+  await assertCoversRole(tx, ctx, schema, role, `This ${noun}`);
+  const permissions = patch.permissions !== undefined ? checkPermissions(patch.permissions, noun) : role.permissions;
   assertCanGrant(ctx, permissions, "This change");
   if (patch.name !== undefined && (!patch.name.trim() || patch.name.length > 100)) throw unprocessable("name must be 1 to 100 characters");
   if (patch.description !== undefined && patch.description.length > 1000) throw unprocessable("description is limited to 1000 characters");
   const before = await loadRoleRules(tx, ctx.tenantId, role.id, role.access_version);
-  const rules = applyRules(schema, before, patch);
-  checkRules(schema, permissions, rules);
+  const rules = applyRules(schema, before, patch, Noun);
+  checkRules(schema, permissions, rules, noun);
   await assertCoversRole(tx, ctx, schema, { ...role, permissions }, "This change", rules);
   const name = patch.name?.trim() ?? role.name;
   const description = patch.description ?? role.description;
   await updateRoleDefinition(tx, role.id, name, description, permissions);
   const saved = await saveRules(tx, ctx, schema, role.id, before, rules);
   const changed = diff(role.permissions, permissions);
-  await audit(tx, ctx, { action: "role.updated", objectType: "role", recordId: role.id,
+  await audit(tx, ctx, { action: `${auditName}.updated`, objectType: auditName, recordId: role.id,
     details: { key: role.key, permissions_added: changed.added, permissions_removed: changed.removed,
       ...(saved.objectChanges.length ? { object_rules: saved.objectChanges } : {}), ...(saved.fieldChanges.length ? { field_rules: saved.fieldChanges } : {}),
       ...(name !== role.name ? { name_changed: true } : {}), ...(description !== role.description ? { description_changed: true } : {}) } });
-  return publicRole(await resolveRole(tx, encodeId("role", role.id)), await activeMembers(tx, role.id), publicRules(schema, rules));
+  return publicRole(await resolveRole(tx, encodeId(prefix, role.id), null, kind), await activeMembers(tx, role.id, kind), publicRules(schema, rules), kind);
 }
 
-/** Archives a custom role. Refused while any active member holds it; disabled holders keep it until re-enabled with another role. */
-export async function archiveRole(tx: Tx, ctx: Ctx, ref: string) {
-  if (!can(ctx, "roles:manage")) throw forbidden("Archiving roles needs the roles:manage permission");
-  const role = await resolveRole(tx, ref, "update");
+/**
+ * Archives a custom role or a permission set. Refused while any active member holds it; disabled holders
+ * keep a role until re-enabled with another one, and simply no longer have an archived set.
+ */
+export async function archiveRole(tx: Tx, ctx: Ctx, ref: string, kind: RoleKind = "role") {
+  const { noun, plural, prefix, audit: auditName } = KIND[kind];
+  if (!can(ctx, "roles:manage")) throw forbidden(`Archiving ${plural} needs the roles:manage permission`);
+  const role = await resolveRole(tx, ref, "update", kind);
   if (role.is_system) throw forbidden("System roles can't be archived");
-  if (role.key === ctx.actor.role) throw forbidden("You can't archive a role you hold");
-  const n = await activeMembers(tx, role.id);
-  if (n > 0) throw conflict(`${n} active member(s) hold this role; give them another role first`);
+  if (holds(ctx, kind, role.key)) throw forbidden(`You can't archive a ${noun} you hold`);
+  const n = await activeMembers(tx, role.id, kind);
+  if (n > 0) throw conflict(kind === "role" ? `${n} active member(s) hold this role; give them another role first`
+    : `${n} active member(s) hold this permission set; take it away from them first`);
   await archiveRoleRow(tx, role.id);
-  await audit(tx, ctx, { action: "role.archived", objectType: "role", recordId: role.id, details: { key: role.key, permissions: role.permissions } });
-  return { id: encodeId("role", role.id), key: role.key, archived: true };
+  await audit(tx, ctx, { action: `${auditName}.archived`, objectType: auditName, recordId: role.id, details: { key: role.key, permissions: role.permissions } });
+  return { id: encodeId(prefix, role.id), key: role.key, archived: true };
 }

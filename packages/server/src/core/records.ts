@@ -16,7 +16,7 @@ import {
   updateRecordRow, valueHeldElsewhere, type RecordRow,
 } from "./queries/records.js";
 import { getObject, loadSchema, quoteIdent, SEARCH_TEXT_TYPES, type FieldMeta, type ObjectMeta, type Schema } from "./schema.js";
-import { afterCreate, afterUpdate, beforeCreate, beforeUpdate, type Draft } from "./standard.js";
+import { afterArchive, afterCreate, afterUpdate, beforeArchive, beforeCreate, beforeUpdate, type Draft } from "./standard.js";
 
 export type RecordOut = Record<string, unknown> & { id: string; object: string };
 type Row = RecordRow;
@@ -426,7 +426,7 @@ function applyStatusCategories(obj: ObjectMeta, p: Prepared, extra: Map<string, 
     const def = f.options.values?.find((v) => v.key === value);
     const category = def?.category ?? value;
     if (f.options.operation_only_categories?.includes(category)) {
-      throw forbidden(`${obj.api_name}.${f.api_name} cannot be set to "${value}" directly; use the named operation (for leads: convert_lead)`);
+      throw forbidden(`${obj.api_name}.${f.api_name} cannot be set to "${value}" directly; use the named operation (leads: convert_lead; quotes: send_quote, accept_quote, revise_quote)`);
     }
     if (current) {
       const stored = (current[storageColumns(obj).json] ?? {}) as Record<string, unknown>;
@@ -537,7 +537,9 @@ export async function archiveRecord(tx: Tx, ctx: Ctx, objectName: string, public
   const [current] = await fetchRows(tx, obj, [id], true);
   if (!current) throw notFound(`${obj.label} ${publicId}`);
   if (!current.archived_at) {
+    await beforeArchive(tx, ctx, schema, obj, current);
     await archiveRecordRow(tx, obj.table_name ?? "records", id, ctx.actor.id);
+    await afterArchive(tx, ctx, obj, current);
     await audit(tx, ctx, { action: `${obj.api_name}.archived`, objectType: obj.api_name, recordId: id });
     await emit(tx, ctx, { type: `${obj.api_name}.archived`, objectType: obj.api_name, recordId: id });
   }
@@ -587,11 +589,13 @@ export async function restoreRecord(tx: Tx, ctx: Ctx, objectName: string, public
     }
   }
   const full = (await serialize(tx, internalReader(ctx), schema, obj, [current], { includeHidden: true }))[0]!;
+  await beforeArchive(tx, ctx, schema, obj, current);
   try {
     await restoreRecordRow(tx, table, id, ctx.actor.id, searchText(obj, full));
   } catch (e) {
     translateDbError(e, obj);
   }
+  await afterArchive(tx, ctx, obj, current);
   const warnings = await archivedTargets(tx, ctx, schema, obj, full);
   await audit(tx, ctx, { action: `${obj.api_name}.restored`, objectType: obj.api_name, recordId: id });
   await emit(tx, ctx, { type: `${obj.api_name}.restored`, objectType: obj.api_name, recordId: id });

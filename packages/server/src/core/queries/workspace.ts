@@ -1,5 +1,6 @@
 import type { Tx } from "../../db/pool.js";
 import { OWNER_ROLE, type Permission } from "../context.js";
+import { memberSetsColumn, type HeldSetRow } from "./roles.js";
 
 /**
  * The SQL of the workspace itself, its members and its service accounts (core/workspace.ts; ADR 0012). The
@@ -62,16 +63,16 @@ export async function insertServiceAccount(tx: Tx, s: { tenantId: string; id: st
 }
 
 export interface MemberRow { id: string; email: string | null; name: string; disabled_at: Date | null; created_at: Date;
-  role_id: string; role_key: string; role_name: string; permissions: Permission[]; access_version: string }
+  role_id: string; role_key: string; role_name: string; permissions: Permission[]; access_version: string; sets: HeldSetRow[] }
 
 /** Every user (or every service account) with their role, oldest first. A service account's email is null. */
 export async function membersWithRoles(tx: Tx, type: MemberType): Promise<MemberRow[]> {
   return type === "user"
     ? tx<MemberRow[]>`SELECT m.id, m.email::text AS email, m.name, m.disabled_at, m.created_at, r.id AS role_id, r.key AS role_key,
-                        r.name AS role_name, r.permissions, r.access_version::text
+                        r.name AS role_name, r.permissions, r.access_version::text, ${memberSetsColumn(tx, "user")}
                       FROM users m JOIN roles r ON r.tenant_id = m.tenant_id AND r.id = m.role_id ORDER BY m.created_at`
     : tx<MemberRow[]>`SELECT m.id, NULL AS email, m.name, m.disabled_at, m.created_at, r.id AS role_id, r.key AS role_key,
-                        r.name AS role_name, r.permissions, r.access_version::text
+                        r.name AS role_name, r.permissions, r.access_version::text, ${memberSetsColumn(tx, "service_account")}
                       FROM service_accounts m JOIN roles r ON r.tenant_id = m.tenant_id AND r.id = m.role_id ORDER BY m.created_at`;
 }
 
@@ -86,13 +87,14 @@ export async function memberSignInFacts(tx: Tx): Promise<SignInFactsRow[]> {
     FROM users u LEFT JOIN member_credentials c ON c.tenant_id = u.tenant_id AND c.user_id = u.id`;
 }
 
-export interface MemberRoleRow { id: string; disabled_at: Date | null; role_id: string; role_key: string; permissions: Permission[]; access_version: string }
+export interface MemberRoleRow { id: string; disabled_at: Date | null; role_id: string; role_key: string; permissions: Permission[]; access_version: string;
+  sets: HeldSetRow[] }
 
 /** A member's state and role; `lock` locks the member's row (FOR UPDATE OF m) for the rest of the transaction. */
 export async function memberWithRole(tx: Tx, type: MemberType, id: string, lock: boolean): Promise<MemberRoleRow | undefined> {
   const table = type === "user" ? tx`users` : tx`service_accounts`;
   const [m] = await tx<MemberRoleRow[]>`
-    SELECT m.id, m.disabled_at, r.id AS role_id, r.key AS role_key, r.permissions, r.access_version::text
+    SELECT m.id, m.disabled_at, r.id AS role_id, r.key AS role_key, r.permissions, r.access_version::text, ${memberSetsColumn(tx, type)}
     FROM ${table} m JOIN roles r ON r.tenant_id = m.tenant_id AND r.id = m.role_id
     WHERE m.id = ${id} ${lock ? tx`FOR UPDATE OF m` : tx``}`;
   return m;

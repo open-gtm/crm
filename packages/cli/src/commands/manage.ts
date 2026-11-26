@@ -13,6 +13,10 @@ const roleRef = (r: string) => {
   if (!ROLE_REF.test(r)) throw usage(`"${r}" is not a role key or ID`);
   return r;
 };
+const setRef = (r: string) => {
+  if (!ROLE_REF.test(r)) throw usage(`"${r}" is not a permission set key or ID`);
+  return r;
+};
 const webhookId = (id: string) => {
   if (!WEBHOOK_ID.test(id)) throw usage(`"${id}" is not a webhook ID (whk_…)`);
   return id;
@@ -58,9 +62,9 @@ export function roleBody(opts: { file?: string; key?: string; name?: string; des
 }
 
 const roleOptions = (c: Command) => c
-  .option("--file <path>", "a YAML or JSON file with the role (key, name, description, permissions, objects, fields)")
+  .option("--file <path>", "a YAML or JSON file with the role or permission set (key, name, description, permissions, objects, fields)")
   .option("--name <name>", "display name")
-  .option("--description <text>", "what the role is for")
+  .option("--description <text>", "what it is for")
   .option("--permissions <list>", "comma-separated permissions (see GET /v1/permissions); replaces the list")
   .option("--object <rule>", "object rule, repeatable: object:read|write|archive=allow|deny|inherit", (v: string, p: string[] = []) => [...p, v])
   .option("--field <rule>", "field rule, repeatable: object.field=none|read|inherit", (v: string, p: string[] = []) => [...p, v]);
@@ -160,4 +164,66 @@ export function registerManage(program: Command, act: Act, roles: Command, audit
       ctx.out.table(page.data.map((e) => ({ ...e, ...e.processing })), ["id", "type", "record_id", "occurred_at", "status", "attempts", "last_error"]);
       if (page.next_before) ctx.out.info(`More: --before ${page.next_before}`);
     }));
+}
+
+/**
+ * Permission sets (docs/permissions.md): built like custom roles, held by members on top of their role.
+ * The commands mirror `crm roles`; assigning a set to a member is `crm members update --permission-sets`.
+ */
+export function registerPermissionSets(program: Command, act: Act): void {
+  const sets = program.command("permission-sets").description("Permission sets: extra access members hold on top of their role");
+  const path = (ref?: string) => (ref === undefined ? "/v1/permission-sets" : `/v1/permission-sets/${setRef(ref)}`);
+
+  sets.command("list").description("List permission sets").action(act(async (ctx) => {
+    const { data } = await ctx.client().get<{ data: Record<string, unknown>[] }>(path());
+    if (ctx.g.json) return ctx.out.data({ data });
+    ctx.out.table(data.map((r) => ({ ...r, members: r.active_members })), ["key", "name", "members", "record_permissions", "feature_permissions"]);
+  }));
+
+  sets.command("get <set>").description("Show a permission set by key or pset_… ID, with the record access it gives by itself").action(act(async (ctx, ref: string) => {
+    const client = ctx.client();
+    const { data } = await client.get<{ data: Record<string, unknown> }>(path(ref));
+    const access = (await client.get<{ data: { objects: ObjectAccess[] } }>(`${path(ref)}/access`)).data.objects;
+    if (ctx.g.json) return ctx.out.data({ data, access });
+    for (const [k, v] of Object.entries(data)) {
+      if (k === "objects" || k === "fields" || k === "permissions") continue; // shown as the two areas, and as their effect below
+      ctx.out.line(`${k.padEnd(20)} ${clean(Array.isArray(v) ? v.join(", ") : String(v ?? ""))}`);
+    }
+    ctx.out.table(accessRows(access), ["object", "access", "limited_fields", "restricted"]);
+  }));
+
+  roleOptions(sets.command("create").description("Create a permission set from flags or a file")
+    .option("--key <key>", "2 to 40 lowercase letters, digits or underscores")
+    .option("--copy-from <set>", "start from another permission set's permissions and rules"))
+    .action(act(async (ctx, opts: Parameters<typeof roleBody>[0]) => {
+      const body = roleBody(opts);
+      if (!body.key || !body.name) throw usage("A permission set needs a key and a name (--key, --name or the file)");
+      const { data } = await ctx.client().post<{ data: Record<string, unknown> }>(path(), body);
+      if (ctx.g.json) return ctx.out.data({ data });
+      ctx.out.line(`Created permission set ${clean(String(data.key))} (${String(data.id)}).`);
+    }));
+
+  roleOptions(sets.command("update <set>").description("Change a permission set: only what you pass changes; inherit clears a rule"))
+    .action(act(async (ctx, ref: string, opts: Parameters<typeof roleBody>[0]) => {
+      const body = roleBody(opts);
+      delete body.key;
+      delete body.copy_from;
+      if (Object.keys(body).length === 0) throw usage("Nothing to change");
+      const { data } = await ctx.client().patch<{ data: Record<string, unknown> }>(path(ref), body);
+      if (ctx.g.json) return ctx.out.data({ data });
+      ctx.out.line(`Updated permission set ${clean(String(data.key))}.`);
+    }));
+
+  sets.command("archive <set>").description("Archive a permission set (refused while an active member holds it)").action(act(async (ctx, ref: string) => {
+    await ctx.confirm(`Archive permission set ${ref}? [y/N] `, `Archiving permission set ${ref} can't be undone`);
+    const { data } = await ctx.client().delete<{ data: Record<string, unknown> }>(path(ref));
+    if (ctx.g.json) return ctx.out.data({ data });
+    ctx.out.line(`Archived permission set ${clean(String(data.key))}.`);
+  }));
+
+  sets.command("access <set>").description("What the set gives by itself with each object, and its limited fields").action(act(async (ctx, ref: string) => {
+    const { data } = await ctx.client().get<{ data: { objects: ObjectAccess[] } }>(`${path(ref)}/access`);
+    if (ctx.g.json) return ctx.out.data({ data });
+    ctx.out.table(accessRows(data.objects), ["object", "access", "limited_fields", "restricted"]);
+  }));
 }

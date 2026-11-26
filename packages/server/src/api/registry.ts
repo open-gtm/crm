@@ -10,6 +10,8 @@ export interface HandlerArgs<B = unknown, Q = Record<string, string>> {
   ctx: Ctx;
   params: Record<string, string>;
   body: B;
+  /** The request's bytes, for a route with `rawBody`. */
+  raw?: Buffer;
   query: Q;
   headers: Headers;
   /** What the route's `prepare` returned. */
@@ -23,6 +25,7 @@ export interface HandlerArgs<B = unknown, Q = Record<string, string>> {
 
 export interface HandlerResult {
   status?: number;
+  /** JSON, or text (a CSV export) or bytes (a file download), whose Content-Type the handler sets in `headers`. */
   body: unknown;
   headers?: Record<string, string>;
   /** Work to run after the transaction commits (sending an email), never when it rolls back. Not replayed for an idempotent retry. */
@@ -46,9 +49,14 @@ export interface RouteDef<B = unknown, Q = unknown> {
   summary: string;
   tag: string;
   body?: z.ZodType<B>;
+  /**
+   * The request body is raw bytes (a file upload), read up to `maxBytes()` and handed to the handler as
+   * `raw`. Such a route has no JSON `body`. api/app.ts gives it its own size limit in place of the 1 MB one.
+   */
+  rawBody?: { maxBytes: () => number };
   query?: z.ZodType<Q>;
   /** Path params that hold record or entity IDs, for the cross-tenant test harness. */
-  idParams?: Record<string, "record" | "key" | "webhook" | "automation" | "delivery" | "notification" | "alert" | "member" | "service_account" | "role" | "session" | "view" | "grant">;
+  idParams?: Record<string, "record" | "key" | "webhook" | "automation" | "delivery" | "notification" | "alert" | "member" | "service_account" | "role" | "permission_set" | "session" | "view" | "grant" | "file">;
   /**
    * "session": only a signed-in person (browser session) may call it, never an API key: it acts on the
    * person's own sign-in (their session, their password). Unset: keys and sessions alike.

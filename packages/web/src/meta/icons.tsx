@@ -5,7 +5,7 @@ import {
 
 const STANDARD: Record<string, LucideIcon> = {
   contact: User, account: Building2, lead: Sparkles, deal: Handshake, task: CheckSquare, activity: Activity,
-  account_contact: Link2, deal_contact: Users,
+  account_contact: Link2, deal_contact: Users, quote: FileText, order: Receipt, quote_line_item: Layers, order_line_item: Layers,
 };
 
 /** Words in a custom object's name or label that suggest an icon. */

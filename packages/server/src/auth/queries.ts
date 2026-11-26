@@ -1,4 +1,5 @@
 import type { Permission, SignInMethod } from "../core/context.js";
+import { memberSetsColumn, type HeldSetRow } from "../core/queries/roles.js";
 import type { Tx } from "../db/pool.js";
 import type { Candidate } from "./identity.js";
 import type { RevokeReason } from "./sessions.js";
@@ -73,13 +74,13 @@ export async function memberName(tx: Tx, userId: string): Promise<{ name: string
   return r;
 }
 
-export interface MemberRoleRow { role_id: string; role: string; permissions: Permission[]; access_version: string }
+export interface MemberRoleRow { role_id: string; role: string; permissions: Permission[]; access_version: string; sets: HeldSetRow[] }
 
 /** A member's role, its permissions and the version of its record rules, whatever the member's state. */
 export async function memberRole(tx: Tx, userId: string): Promise<MemberRoleRow | undefined> {
   const [m] = await tx<MemberRoleRow[]>`
-    SELECT r.id AS role_id, r.key AS role, r.permissions, r.access_version::text
-    FROM users u JOIN roles r ON r.tenant_id = u.tenant_id AND r.id = u.role_id WHERE u.id = ${userId}`;
+    SELECT r.id AS role_id, r.key AS role, r.permissions, r.access_version::text, ${memberSetsColumn(tx, "user")}
+    FROM users m JOIN roles r ON r.tenant_id = m.tenant_id AND r.id = m.role_id WHERE m.id = ${userId}`;
   return m;
 }
 

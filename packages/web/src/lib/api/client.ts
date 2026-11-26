@@ -32,6 +32,8 @@ export interface RequestOptions {
   /** Reuse a key to make a repeated action safe; one is made for every write otherwise. */
   idempotencyKey?: string;
   signal?: AbortSignal;
+  /** A file's bytes, sent as the body in place of JSON (see `upload`). */
+  raw?: Blob;
 }
 
 export interface ClientHooks {
@@ -76,6 +78,8 @@ export function isHeavy(method: Method, path: string, opts: RequestOptions): boo
   // Schema and pack plans and applies, automation tests: rare from the app, but the server counts them (packages/server test/web-ui.test.ts keeps this list in step).
   if (method === "POST" && /^\/v1\/(schema\/(plan|apply)|packs\/(plan|apply|[^/]+\/uninstall)|automations\/(test|[^/]+\/test))$/.test(path)) return true;
   if (method === "POST" && (/^\/v1\/automations\/[^/]+\/run$/.test(path) || /\/records\/batch$/.test(path))) return body?.dry_run === true;
+  // Files: an upload and a download hold a connection while the bytes move.
+  if ((method === "POST" && /^\/v1\/records\/[^/]+\/files$/.test(path)) || (method === "GET" && /^\/v1\/files\/[^/]+\/content$/.test(path))) return true;
   if (method === "POST" && path === "/v1/query") return Boolean(body?.count);
   return method === "GET" && String(opts.query?.count) === "true";
 }
@@ -114,6 +118,10 @@ export class ApiClient {
   delete<T>(path: string, opts: Omit<RequestOptions, "body"> = {}): Promise<T> {
     return this.request<T>("DELETE", path, opts);
   }
+  /** Sends a file's bytes as the request body (a route that takes an upload), with the same CSRF, idempotency and retries as any write. */
+  upload<T>(path: string, file: Blob, query?: Query): Promise<T> {
+    return this.request<T>("POST", path, { query, raw: file });
+  }
 
   async request<T>(method: Method, path: string, opts: RequestOptions = {}): Promise<T> {
     if (!isHeavy(method, path, opts)) return this.send<T>(method, path, opts);
@@ -139,7 +147,8 @@ export class ApiClient {
     for (;;) {
       if (write && !this.csrf) await this.refreshCsrf();
       const headers: Record<string, string> = { Accept: "application/json" };
-      if (opts.body !== undefined) headers["Content-Type"] = "application/json";
+      if (opts.raw !== undefined) headers["Content-Type"] = "application/octet-stream";
+      else if (opts.body !== undefined) headers["Content-Type"] = "application/json";
       if (write) {
         if (this.csrf) headers["X-CSRF-Token"] = this.csrf;
         headers["Idempotency-Key"] = idem!;
@@ -150,7 +159,7 @@ export class ApiClient {
         res = await (this.hooks.fetch ?? fetch)(url, {
           method,
           headers,
-          body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+          body: opts.raw ?? (opts.body === undefined ? undefined : JSON.stringify(opts.body)),
           credentials: "same-origin",
           redirect: "error",
           cache: "no-store",

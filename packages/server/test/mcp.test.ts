@@ -86,6 +86,9 @@ describe("MCP servers", () => {
     expect(viaView).toMatchObject({ total: 1, data: [expect.objectContaining({ email: "peter@initech.example" })] });
     const names = (await ops.listTools()).tools.map((t) => t.name);
     for (const t of ["create_view", "update_view", "delete_view"]) expect(names).not.toContain(t);
+    // Files: their names and sizes through MCP, never their bytes, and no tool attaches or removes one.
+    expect(names).toContain("list_files");
+    for (const t of ["upload_file", "download_file", "delete_file"]) expect(names).not.toContain(t);
     await ops.close();
   });
 

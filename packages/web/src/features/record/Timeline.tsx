@@ -13,6 +13,7 @@ import { asProblem } from "@/lib/api/problem";
 import type { ObjectSummary, OpResult, RecordData, TimelineItem } from "@/lib/api/types";
 import { formatDateTime, formatRelative, fromLocalInput, toLocalInput } from "@/lib/format";
 import { qk } from "@/lib/keys";
+import { Markdown } from "@/lib/markdown";
 import { touchedBy, useApplyWrite } from "@/lib/writes";
 import { optionLabel, toneFor } from "@/meta/fields";
 import { useDescribe, useObjects } from "@/meta/hooks";
@@ -21,15 +22,20 @@ import { RecordLink } from "@/meta/registry";
 /** Activity types people log by hand; the others are written by the platform. */
 const PLATFORM_TYPES = new Set(["form_submitted", "lead_converted", "task_completed", "deal_stage_changed", "email_opened"]);
 
-/** Everything that happened on a record, newest first: activities, tasks and (for deals) stage changes. */
-export function Timeline({ recordId }: { recordId: string }) {
+/** A record's timeline items, newest first. The timeline and the Notes section read the same query. */
+export function useTimeline(recordId: string, enabled = true) {
   const api = useApi();
-  const objects = useObjects();
-  const can = (name: string, a: "read" | "write") => Boolean((objects.data ?? []).find((o: ObjectSummary) => o.name === name)?.access[a]);
-  const q = useQuery({
-    queryKey: qk.timeline(recordId),
+  return useQuery({
+    queryKey: qk.timeline(recordId), enabled,
     queryFn: async ({ signal }) => (await api.get<{ data: { items: TimelineItem[] } }>(`/v1/records/${encodeURIComponent(recordId)}/timeline`, { limit: 50 }, signal)).data.items,
   });
+}
+
+/** Everything that happened on a record, newest first: activities, tasks and (for deals) stage changes. */
+export function Timeline({ recordId }: { recordId: string }) {
+  const objects = useObjects();
+  const can = (name: string, a: "read" | "write") => Boolean((objects.data ?? []).find((o: ObjectSummary) => o.name === name)?.access[a]);
+  const q = useTimeline(recordId);
   const [logging, setLogging] = useState(false);
   const [tasking, setTasking] = useState(false);
   return (
@@ -87,7 +93,11 @@ function TimelineEntry({ it, recordId }: { it: TimelineItem; recordId: string })
     <li className="relative">
       <span aria-hidden className={dot}><MessageSquare /></span>
       <p className="text-base"><span className="font-medium">{typeLabel}</span>{a.subject ? <>: {String(a.subject)}</> : null}</p>
-      {typeof a.body === "string" && a.body ? <p className="mt-1 whitespace-pre-wrap break-words rounded-md bg-surface-2 px-3 py-2 text-base text-fg">{a.body}</p> : null}
+      {typeof a.body === "string" && a.body ? (
+        // Notes are written in Markdown (the Notes section); other activities keep their text as typed.
+        a.type === "note" ? <Markdown source={a.body} className="mt-1 rounded-md bg-surface-2 px-3 py-2 text-fg" />
+          : <p className="mt-1 whitespace-pre-wrap break-words rounded-md bg-surface-2 px-3 py-2 text-base text-fg">{a.body}</p>
+      ) : null}
       {others.length ? (
         <p className="mt-1 flex flex-wrap gap-x-2 text-sm text-muted">Also on {others.map((r) => r.display_name
           ? <RecordLink key={r.id} object={r.object!} id={r.id}>{r.display_name}</RecordLink>

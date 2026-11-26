@@ -1,6 +1,6 @@
 import { useQuery, type QueryKey } from "@tanstack/react-query";
 import { Link, Navigate, Outlet, useRouterState } from "@tanstack/react-router";
-import { Bell, Database, FileClock, KeyRound, Lock, Package, Settings, Shield, UserRound, Users, Webhook, Zap } from "lucide-react";
+import { Bell, Database, FileClock, FileText, KeyRound, Lock, Package, Settings, Shield, ShieldPlus, UserRound, Users, Webhook, Zap } from "lucide-react";
 import type { ReactNode } from "react";
 import { NoAccess, PageHeader } from "@/components/feedback";
 import { useApi } from "@/lib/api/context";
@@ -13,11 +13,13 @@ export const SECTIONS: { to: string; label: string; icon: ReactNode; show: (s: S
   { to: "/settings/workspace", label: "Workspace sign-in", icon: <Lock />, show: (s) => s.can("members:manage"), needs: "manage members" },
   { to: "/settings/members", label: "Members", icon: <Users />, show: (s) => s.can("members:manage"), needs: "manage members" },
   { to: "/settings/roles", label: "Roles", icon: <Shield />, show: () => true },
+  { to: "/settings/permission-sets", label: "Permission sets", icon: <ShieldPlus />, show: () => true },
   { to: "/settings/api-keys", label: "API keys", icon: <KeyRound />, show: (s) => s.can("keys:manage"), needs: "manage API keys" },
   { to: "/settings/webhooks", label: "Webhooks", icon: <Webhook />, show: (s) => s.can("webhooks:manage"), needs: "manage webhooks" },
   { to: "/settings/audit", label: "Audit log", icon: <FileClock />, show: (s) => s.can("audit:read"), needs: "read the audit log" },
   { to: "/settings/automations", label: "Automations", icon: <Zap />, show: (s) => s.can("automations:manage"), needs: "manage automations" },
   { to: "/settings/schema", label: "Schema", icon: <Database />, show: () => true },
+  { to: "/settings/commerce", label: "Quotes and orders", icon: <FileText />, show: () => true },
   { to: "/settings/packs", label: "Installed packs", icon: <Package />, show: (s) => ["schema:manage", "roles:manage", "views:manage"].some((p) => s.can(p)), needs: "manage the schema, roles or views" },
 ];
 

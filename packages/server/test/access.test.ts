@@ -506,7 +506,8 @@ describe("route permissions", () => {
     expect(adminTagged).toEqual([]);
     const anyRoutes = routes.filter((r) => requiredPermission(r) === "any").map((r) => `${r.method} ${r.path}`).sort();
     // Only identity and catalogue routes (scope "any") admit any permission; a route can't opt into that with `permission`.
-    expect(anyRoutes).toEqual(["GET /v1/me", "GET /v1/me/access", "GET /v1/me/preferences", "GET /v1/permissions", "GET /v1/roles", "GET /v1/roles/:id",
+    expect(anyRoutes).toEqual(["GET /v1/me", "GET /v1/me/access", "GET /v1/me/preferences", "GET /v1/permission-sets", "GET /v1/permission-sets/:id",
+      "GET /v1/permission-sets/:id/access", "GET /v1/permissions", "GET /v1/roles", "GET /v1/roles/:id",
       "GET /v1/roles/:id/access", "POST /v1/automations/:id/run", "PUT /v1/me/preferences"]);
     expect(routes.filter((r) => (r.permission as unknown) === "any")).toEqual([]);
     // Schema packs need one of the three manage permissions at the gate, then one per part in the handler (core/packs.ts).

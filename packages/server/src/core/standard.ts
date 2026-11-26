@@ -10,6 +10,7 @@ import {
   insertPrimaryAccountLink, insertTaskAssociation, insertTaskCompletedActivity, recordExists, setContactLifecycle, stageNamed, stageNames,
   stageOfPipeline, taskRecords,
 } from "./queries/standard.js";
+import { quoteBeforeCreate, quoteBeforeUpdate, quoteLineBeforeArchive, quoteLineBeforeCreate, quoteLineBeforeUpdate, quoteLineChanged, refuseOrderWrite } from "./commerce-hooks.js";
 import { getObject, type ObjectMeta, type Schema } from "./schema.js";
 
 /** A record being created or updated, shared between the record engine and these hooks. */
@@ -78,6 +79,16 @@ export async function beforeCreate(tx: Tx, ctx: Ctx, d: Draft): Promise<void> {
       break;
     case "deal":
       await prepareDealStage(tx, d);
+      break;
+    case "quote":
+      await quoteBeforeCreate(tx, ctx, d);
+      break;
+    case "quote_line_item":
+      await quoteLineBeforeCreate(tx, ctx, d);
+      break;
+    case "order":
+    case "order_line_item":
+      refuseOrderWrite(d.obj.api_name);
       break;
     case "task": {
       if (!cols.get("assignee_user_id")) {
@@ -170,12 +181,24 @@ export async function afterCreate(tx: Tx, ctx: Ctx, d: Draft): Promise<void> {
     case "lead":
       await bumpLifecycle(tx, ctx, cols.get("contact_id") as string, "lead");
       break;
+    case "quote_line_item":
+      await quoteLineChanged(tx, ctx, cols.get("quote_id") as string);
+      break;
   }
 }
 
 export async function beforeUpdate(_tx: Tx, _ctx: Ctx, d: Draft): Promise<void> {
   const cols = d.prepared.columns;
   switch (d.obj.api_name) {
+    case "quote":
+      quoteBeforeUpdate(d);
+      break;
+    case "quote_line_item":
+      await quoteLineBeforeUpdate(_tx, _ctx, d);
+      break;
+    case "order_line_item":
+      refuseOrderWrite(d.obj.api_name);
+      break;
     case "account": {
       const domain = cols.get("primary_domain");
       if (typeof domain === "string") {
@@ -224,6 +247,18 @@ export async function afterUpdate(tx: Tx, ctx: Ctx, d: Draft): Promise<void> {
   if (d.obj.api_name === "contact" && cols.get("primary_account_id")) {
     await ensureAccountContact(tx, ctx, cols.get("primary_account_id") as string, d.id);
   }
+  if (d.obj.api_name === "quote_line_item") await quoteLineChanged(tx, ctx, d.current!.quote_id as string);
+}
+
+/** Before a record is archived or restored: what the object's rules refuse. `row` is the record as stored. */
+export async function beforeArchive(tx: Tx, ctx: Ctx, schema: Schema, obj: ObjectMeta, row: Record<string, unknown>): Promise<void> {
+  if (obj.api_name === "quote_line_item") await quoteLineBeforeArchive(tx, ctx, schema, row);
+  if (obj.api_name === "order_line_item") refuseOrderWrite(obj.api_name);
+}
+
+/** After a record was archived or restored: what follows from it. */
+export async function afterArchive(tx: Tx, ctx: Ctx, obj: ObjectMeta, row: Record<string, unknown>): Promise<void> {
+  if (obj.api_name === "quote_line_item") await quoteLineChanged(tx, ctx, row.quote_id as string);
 }
 
 async function ensureAccountContact(tx: Tx, ctx: Ctx, accountId: string, contactId: string): Promise<void> {

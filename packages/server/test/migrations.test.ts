@@ -1,4 +1,6 @@
 import postgres from "postgres";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { afterAll, describe, expect, it } from "vitest";
 import { createWorkspace } from "../src/core/workspace.js";
 import { migrate } from "../src/db/migrate.js";
@@ -18,6 +20,23 @@ const url = process.env.TEST_MIGRATOR_URL!;
 const sql = postgres(url, { max: 1, onnotice: () => {} });
 afterAll(() => sql.end());
 
+/**
+ * The upgrade tests below set an old database up through today's server, and today's server reads
+ * permission sets (019) every time it authenticates a key. 019 touches only roles and members (tables
+ * of 006 and before) and is independent of 010 to 018, so those tests apply it early, recorded as the
+ * migrator records it, and then check the migrations in between. 019's own upgrade, over roles and
+ * members that existed before it, has its own test, set up in SQL.
+ */
+async function applyPermissionSetsEarly(upTo: string) {
+  const file = "019_permission_sets.sql";
+  const text = readFileSync(new URL(`../migrations/${file}`, import.meta.url), "utf8");
+  await sql.begin(async (tx) => {
+    await tx.unsafe(text);
+    await tx`INSERT INTO schema_migrations (name, checksum) VALUES (${file}, ${createHash("sha256").update(text).digest("hex")})`;
+  });
+  expect(await migrate(url, undefined, { upTo })).toEqual([]); // nothing new: this refreshes the app role's grants
+}
+
 async function empty() {
   await sql.unsafe("DROP SCHEMA IF EXISTS app CASCADE; DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;");
 }
@@ -29,13 +48,14 @@ describe("migrations", () => {
     expect(applied).toEqual(["001_platform.sql", "002_schema_engine.sql", "003_core_sales.sql", "004_events_webhooks_automations.sql",
       "005_alerts_notifications.sql", "006_roles.sql", "007_chain_order_event_retries.sql", "008_object_field_permissions.sql", "009_schema_token.sql",
       "010_people_sign_in.sql", "012_views_preferences.sql", "013_merges.sql", "014_oauth_for_mcp.sql", "016_automation_engine.sql",
-      "017_field_types_packs.sql", "018_custom_object_owner.sql"]);
+      "017_field_types_packs.sql", "018_custom_object_owner.sql", "019_permission_sets.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql"]);
     expect(await migrate(url)).toEqual([]);
   });
 
   it("upgrade a database at 009 with a workspace, members, a custom role, records and an old-style automation with runs", async () => {
     await empty();
     expect((await migrate(url, undefined, { upTo: "009" })).at(-1)).toBe("009_schema_token.sql");
+    await applyPermissionSetsEarly("009");
     const ws = await createWorkspace({ name: "Before step 5", ownerEmail: `old-owner-${Date.now()}@example.com`, ownerName: "Old Owner" });
     // Custom fields of the old types, added through the API as a 009 server did (the schema code reads nothing newer).
     for (const f of [{ api_name: "old_note", type: "text" }, { api_name: "old_level", type: "number" },
@@ -64,7 +84,7 @@ describe("migrations", () => {
 
     const later = await migrate(url);
     expect(later).toEqual(["010_people_sign_in.sql", "012_views_preferences.sql", "013_merges.sql", "014_oauth_for_mcp.sql", "016_automation_engine.sql",
-      "017_field_types_packs.sql", "018_custom_object_owner.sql"]);
+      "017_field_types_packs.sql", "018_custom_object_owner.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql"]);
 
     // 017 replaced the type CHECK on fields by its own definition, which the old fields pass and the new types too.
     const checks = await sql<{ conname: string; def: string }[]>`
@@ -130,6 +150,7 @@ describe("migrations", () => {
     await closeDb(); // the app's connections hold type IDs of the schema the test above used
     await empty();
     expect((await migrate(url, undefined, { upTo: "017" })).at(-1)).toBe("017_field_types_packs.sql");
+    await applyPermissionSetsEarly("017");
     const ws = await createWorkspace({ name: "Before 018", ownerEmail: `owner-018-${Date.now()}@example.com`, ownerName: "Owner 018" });
     const tenant = decodeId(ws.workspace.id)!.uuid;
     const made = async (body: Record<string, unknown>) => expect((await call("POST", "/v1/objects", { key: ws.keys.admin, body })).status).toBe(201);
@@ -148,7 +169,7 @@ describe("migrations", () => {
       return tx<{ v: string }[]>`SELECT schema_version::text AS v FROM tenants`;
     });
 
-    expect(await migrate(url)).toEqual(["018_custom_object_owner.sql"]);
+    expect(await migrate(url)).toEqual(["018_custom_object_owner.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql"]);
 
     const fields = async (o: string) => (await call("GET", `/v1/objects/${o}`, { key: ws.keys.admin })).json.data.fields as { name: string; type: string; standard?: boolean }[];
     expect((await fields("visit")).map((f) => [f.name, f.type, f.standard])).toEqual([["title", "text", undefined], ["owner", "relation", true]]);
@@ -173,5 +194,82 @@ describe("migrations", () => {
     expect(fk!.def).toBe("FOREIGN KEY (tenant_id, owner_id) REFERENCES users(tenant_id, id)");
     const forced = await sql<{ relname: string; f: boolean }[]>`SELECT relname, relforcerowsecurity AS f FROM pg_class WHERE relname IN ('records', 'users') ORDER BY relname`;
     expect(forced).toEqual([{ relname: "records", f: true }, { relname: "users", f: true }]);
+  });
+  it("019 keeps existing roles and members as they were, and adds permission sets beside them", async () => {
+    await closeDb();
+    await empty();
+    expect((await migrate(url, undefined, { upTo: "018" })).at(-1)).toBe("018_custom_object_owner.sql");
+    // A workspace as an 018 server left it, written in SQL: today's server can't run before 019.
+    const tenant = uuidv7();
+    const ids = await sql.begin(async (tx) => {
+      await tx`INSERT INTO tenant_directory (tenant_id) VALUES (${tenant})`;
+      await tx`SELECT set_config('app.tenant_id', ${tenant}, true)`;
+      await tx`INSERT INTO tenants (tenant_id, name) VALUES (${tenant}, 'Before 019')`;
+      await tx`SELECT app.seed_system_roles()`;
+      const [clerk] = await tx<{ id: string }[]>`
+        INSERT INTO roles (tenant_id, id, key, name, permissions) VALUES (${tenant}, gen_random_uuid(), 'clerk', 'Clerk', '{records:read}') RETURNING id`;
+      const [user] = await tx<{ id: string }[]>`
+        INSERT INTO users (tenant_id, id, email, name, role_id) VALUES (${tenant}, gen_random_uuid(), ${`clerk-019-${Date.now()}@example.com`}, 'Clerk', ${clerk!.id}) RETURNING id`;
+      const [bot] = await tx<{ id: string }[]>`
+        INSERT INTO service_accounts (tenant_id, id, name, role_id) VALUES (${tenant}, gen_random_uuid(), 'Bot', ${clerk!.id}) RETURNING id`;
+      return { clerk: clerk!.id, user: user!.id, bot: bot!.id };
+    });
+
+    expect(await migrate(url)).toEqual(["019_permission_sets.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql"]);
+
+    const inTenant = <T>(fn: (tx: postgres.TransactionSql) => Promise<T>) => sql.begin(async (tx) => {
+      await tx`SELECT set_config('app.tenant_id', ${tenant}, true)`;
+      return fn(tx);
+    });
+    const set = await inTenant(async (tx) => {
+      // Every role that existed is a role, and its members still hold it.
+      expect(await tx`SELECT DISTINCT kind FROM roles`).toEqual([{ kind: "role" }]);
+      expect((await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM roles`)[0]!.n).toBe(5);
+      expect(await tx`SELECT role_id FROM users WHERE id = ${ids.user}`).toEqual([{ role_id: ids.clerk }]);
+      expect(await tx`SELECT count(*)::int AS n FROM member_permission_sets`).toEqual([{ n: 0 }]);
+      // A set may share a role's key, and users and service accounts can hold it.
+      const [row] = await tx<{ id: string }[]>`
+        INSERT INTO roles (tenant_id, id, key, name, permissions, kind) VALUES (${tenant}, gen_random_uuid(), 'clerk', 'Clerk extras', '{records:write,records:read}', 'permission_set') RETURNING id`;
+      await tx`INSERT INTO member_permission_sets (tenant_id, permission_set_id, user_id) VALUES (${tenant}, ${row!.id}, ${ids.user})`;
+      await tx`INSERT INTO member_permission_sets (tenant_id, permission_set_id, service_account_id) VALUES (${tenant}, ${row!.id}, ${ids.bot})`;
+      return row!.id;
+    });
+    // A second live role with that key is still refused.
+    await expect(inTenant((tx) => tx`INSERT INTO roles (tenant_id, id, key, name, permissions) VALUES (${tenant}, gen_random_uuid(), 'clerk', 'Again', '{}')`))
+      .rejects.toThrow(/roles_key/);
+    // A role can't be handed out as a set, a row names exactly one member, and nobody holds a set twice.
+    await expect(inTenant((tx) => tx`INSERT INTO member_permission_sets (tenant_id, permission_set_id, user_id) VALUES (${tenant}, ${ids.clerk}, ${ids.user})`))
+      .rejects.toThrow(/foreign key/);
+    await expect(inTenant((tx) => tx`INSERT INTO member_permission_sets (tenant_id, permission_set_id, user_id, service_account_id)
+                                      VALUES (${tenant}, ${set}, ${ids.user}, ${ids.bot})`)).rejects.toThrow(/check constraint/);
+    await expect(inTenant((tx) => tx`INSERT INTO member_permission_sets (tenant_id, permission_set_id, user_id) VALUES (${tenant}, ${set}, ${ids.user})`))
+      .rejects.toThrow(/member_permission_sets_user/);
+    // The rules of roles hold for sets in the database too: a system row is a role, and what reaches records needs record access.
+    await expect(inTenant((tx) => tx`INSERT INTO roles (tenant_id, id, key, name, permissions, kind, is_system)
+                                      VALUES (${tenant}, gen_random_uuid(), 'sys', 'Sys', '{}', 'permission_set', true)`)).rejects.toThrow(/roles_system_are_roles/);
+    await expect(inTenant((tx) => tx`INSERT INTO roles (tenant_id, id, key, name, permissions, kind)
+                                      VALUES (${tenant}, gen_random_uuid(), 'hooks', 'Hooks', '{webhooks:manage}', 'permission_set')`)).rejects.toThrow(/roles_permission_requires/);
+    // The app role takes sets away from members (DELETE), and still can't delete roles or sets themselves.
+    const [grants] = await sql<{ held: boolean; roles: boolean }[]>`
+      SELECT has_table_privilege('hlcrm_app', 'member_permission_sets', 'SELECT,INSERT,DELETE') AS held, has_table_privilege('hlcrm_app', 'roles', 'DELETE') AS roles`;
+    expect(grants).toEqual({ held: true, roles: false });
+    const [rls] = await sql<{ on: boolean; forced: boolean }[]>`SELECT relrowsecurity AS on, relforcerowsecurity AS forced FROM pg_class WHERE relname = 'member_permission_sets'`;
+    expect(rls).toEqual({ on: true, forced: true });
+
+    // A workspace made before the commerce module (this one, written in SQL, has no objects at all) gets the standard
+    // objects it lacks from the catalog after the migrations, each logged as a schema change, and the module turned on.
+    const after = await inTenant(async (tx) => ({
+      objects: (await tx<{ api_name: string }[]>`SELECT api_name FROM objects WHERE is_system ORDER BY api_name`).map((o) => o.api_name),
+      quoteFields: (await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM fields f JOIN objects o ON o.id = f.object_id WHERE o.api_name = 'quote'`)[0]!.n,
+      modules: (await tx<{ modules: string[] }[]>`SELECT modules FROM tenants`)[0]!.modules,
+      logged: (await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM schema_changes WHERE change_type = 'object_created' AND actor_type = 'system'`)[0]!.n,
+    }));
+    for (const o of ["contact", "deal", "quote", "quote_line_item", "order", "order_line_item"]) expect(after.objects).toContain(o);
+    expect(after.quoteFields).toBeGreaterThan(10);
+    expect(after.modules).toEqual(["core", "sales", "commerce"]);
+    expect(after.logged).toBe(after.objects.length);
+    // Running the migrator again adds nothing more.
+    expect(await migrate(url)).toEqual([]);
+    expect((await inTenant((tx) => tx<{ n: number }[]>`SELECT count(*)::int AS n FROM objects`))[0]!.n).toBe(after.objects.length);
   });
 });
