@@ -55,6 +55,19 @@ describe("the layout choice in the list header", () => {
     const board = await screen.findByRole("link", { name: "Board" });
     expect(board.getAttribute("href")).toBe("/board");
   });
+
+  it("the Board choice shows the same group of deals: the saved view's filter goes with it", async () => {
+    const DEAL = objectMeta({ name: "deal", label: "Deal", plural_label: "Deals", owned: true,
+      pipelines: [{ id: "pipe_1", name: "Sales", is_default: true, stages: [{ id: "stg_a", name: "Discovery", category: "open", default_probability: 10 }] }],
+      fields: [field({ name: "name", type: "text" }), field({ name: "status", type: "single_select", values: [{ key: "open", label: "Open" }, { key: "won", label: "Won" }] })] });
+    const VIEW = { id: "v_1", object: "deal", name: "Open deals", shared: true, owner: null, mine: false, status: "ok", version: 1,
+      where: { field: "status", op: "eq", value: "open" }, sort: [], columns: null };
+    renderRoute("/o/deal?view=v_1", (c) => (c.path === "/v1/objects/deal" ? { body: { data: DEAL } } : c.path === "/v1/objects/deal/views" ? { body: { data: [VIEW] } } : c.path === "/v1/query" ? { body: { data: [], next_cursor: null, total: 0 } } : undefined),
+      { objects: [{ ...OBJECTS[0], name: "deal", label: "Deal", plural_label: "Deals" }] });
+    const board = await screen.findByRole("link", { name: "Board" });
+    await waitFor(() => expect(decodeURIComponent(board.getAttribute("href") ?? "")).toContain("status"));
+    expect(decodeURIComponent(board.getAttribute("href")!)).toMatch(/^\/board\?filter=/);
+  });
 });
 
 describe("active filters as chips", () => {

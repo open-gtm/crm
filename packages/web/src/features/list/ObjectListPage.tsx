@@ -210,6 +210,8 @@ function ListBody({ meta }: { meta: ObjectMeta }) {
     ) : <Skeleton className="h-3 w-16" />])),
   } : undefined;
   const filterActive = Boolean(list.filter && list.filter.children.length);
+  // The board shows the same group of records as this list: the filter in the address, else the saved view's.
+  const boardFilter = list.filterOverridden ? (filterActive ? list.filter : null) : viewFilter;
   const viewError = rows.error instanceof ApiProblem && list.viewId && (rows.error.status === 403 || rows.error.status === 404 || rows.error.code === "view_invalid");
 
   return (
@@ -223,7 +225,7 @@ function ListBody({ meta }: { meta: ObjectMeta }) {
         actions={<>
           <LayoutSwitch layout={layout} onLayout={(l) => showAs({ layout: l === "table" ? undefined : l, by: undefined, month: undefined })}
             hasBoard={boards.length > 0} hasCalendar={dates.length > 0}
-            boardLink={meta.name === "deal" && (meta.pipelines?.length ?? 0) > 0 && layout !== "board" ? { filter: list.filter && filterActive ? packFilter(list.filter) : undefined } : undefined} />
+            boardLink={meta.name === "deal" && (meta.pipelines?.length ?? 0) > 0 && layout !== "board" ? { filter: boardFilter ? packFilter(boardFilter) : undefined } : undefined} />
           {canCreate ? <Button variant="primary" onClick={() => setCreating(true)}><Plus /><span className="truncate">New {meta.label.toLowerCase()}</span></Button> : null}
         </>}
       />
