@@ -51,7 +51,7 @@ export const expired = () => new ApiError(400, "expired", "This sign-in step has
 export const unavailable = (what: string) => new ApiError(404, "unavailable", `${what} is not available on this server`);
 export const rateLimited = (seconds: number) => new ApiError(429, "rate_limited", "Too many sign-in attempts; wait and retry", { retry_after: seconds });
 
-function limit(l: Parameters<typeof hit>[0], key: string): void {
+export function limit(l: Parameters<typeof hit>[0], key: string): void {
   const wait = hit(l, key);
   if (wait !== null) throw rateLimited(wait);
 }
@@ -66,7 +66,7 @@ const pending = new Set<Promise<void>>();
  * Runs `fn` after the response: finding the email's memberships and sending mail happen here, so an
  * email that belongs to someone takes as long to answer as one that doesn't.
  */
-function background(what: string, fn: () => Promise<void>): void {
+export function background(what: string, fn: () => Promise<void>): void {
   const p: Promise<void> = fn().catch((e: Error) => logger.error({ job: what, err: e.message }, "sign-in background task failed"))
     .finally(() => pending.delete(p));
   pending.add(p);
@@ -87,7 +87,7 @@ export function withFlows<T>(keys: { browser?: string | null; link?: string | nu
   }) as Promise<T>;
 }
 
-const live = (f: FlowRow | undefined): f is FlowRow => Boolean(f && !f.consumed_at && f.expires_at.getTime() > Date.now());
+export const live = (f: FlowRow | undefined): f is FlowRow => Boolean(f && !f.consumed_at && f.expires_at.getTime() > Date.now());
 
 async function insertFlow(tx: Tx, f: { purpose: FlowRow["purpose"]; browser?: string | null; link?: string | null; codeHash?: Buffer | null;
   candidates?: Candidate[]; method?: SignInMethod | null; returnTo?: string | null; more?: boolean; minutes: number; id?: string }): Promise<string> {

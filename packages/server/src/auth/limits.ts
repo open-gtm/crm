@@ -41,6 +41,14 @@ export const LIMITS = {
   workspaceEmail: { name: "mailws", max: 60, windowMs: MIN },
   /** Sign-in emails the whole server sends: a last resort far above any one workspace's share. Past it, sends are skipped and logged as errors. */
   globalEmail: { name: "mail", max: 600, windowMs: MIN },
+  /**
+   * Sign-up (ADR 0018). Codes go to addresses nobody has vouched for, so one client address may ask for
+   * few of them (10 an hour, besides the per-email limits above, which sign-up shares with sign-in:
+   * an inbox gets the same few messages whichever form asked). The server-wide ceiling on sign-up email
+   * is a setting (SIGN_UP_EMAILS_PER_HOUR) and so is every cap on workspaces created; those are counted
+   * in the database (workspace_sign_ups), not here.
+   */
+  signUpAddress: { name: "su", max: 10, windowMs: 60 * MIN },
   /** Invitations, a budget of their own (they never use the sign-in one): per workspace and per inviting member, answered with 429. */
   inviteWorkspace: { name: "invws", max: 50, windowMs: 60 * MIN },
   inviteMember: { name: "invby", max: 20, windowMs: 60 * MIN },
