@@ -419,6 +419,23 @@ describe("crm data: bulk changes, merge, duplicates and restore", () => {
     expect((await call("GET", `/v1/records/${b.id}`, { key: ws.keys.ops })).json.data.merged_into).toBe(a.id);
   });
 
+  it("erases a contact for good after a preview, with an admin key", async () => {
+    const c = await create(ws.keys.ops, "contact", { first_name: "Cli", last_name: "Erased", email: uniqueEmail("erase") });
+    const admin = () => ({ env: { HLCRM_CONFIG_DIR: join(home, "config"), HLCRM_API_URL: "http://localhost", HLCRM_API_KEY: ws.keys.admin } });
+    const refused = await crm(["data", "erase", "contact", c.id, "--yes"], ops());
+    expect(refused.code).not.toBe(0);
+    const no = await crm(["data", "erase", "contact", c.id, "--no-input"], admin());
+    expect(no.code).toBe(6);
+    expect(no.out).toContain("contacts: 1");
+    expect((await call("GET", `/v1/records/${c.id}`, { key: ws.keys.ops })).json.data.last_name).toBe("Erased");
+    const yes = await crm(["data", "erase", "contact", c.id, "--yes"], admin());
+    expect(yes.code, yes.err).toBe(0);
+    expect(yes.out).toContain(`Erased ${c.id}`);
+    const got = (await call("GET", `/v1/records/${c.id}`, { key: ws.keys.ops })).json.data;
+    expect(got).toMatchObject({ last_name: "[erased]", email: null });
+    expect(got.erased_at).toBeTruthy();
+  });
+
   it("a record's name can't forge output lines in duplicates", async () => {
     const stamp = Date.now().toString(36);
     const forged = `Forged${stamp}`;

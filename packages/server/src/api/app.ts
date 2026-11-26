@@ -41,6 +41,7 @@ import "./routes-packs.js";
 import "./routes-files.js";
 import "./routes-commerce.js";
 import "./routes-layouts.js";
+import "./routes-disposal.js";
 
 /** `credential`: what authenticated the request: its kind, its ID (for idempotency) and its rate-limit bucket. */
 export type Env = { Variables: { ctx: Ctx; requestId: string; credential: { kind: "key" | "session" | "oauth"; id: string; bucket: string } } };

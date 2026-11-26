@@ -51,7 +51,7 @@ describe("migrations", () => {
     expect(applied).toEqual(["001_platform.sql", "002_schema_engine.sql", "003_core_sales.sql", "004_events_webhooks_automations.sql",
       "005_alerts_notifications.sql", "006_roles.sql", "007_chain_order_event_retries.sql", "008_object_field_permissions.sql", "009_schema_token.sql",
       "010_people_sign_in.sql", "012_views_preferences.sql", "013_merges.sql", "014_oauth_for_mcp.sql", "016_automation_engine.sql",
-      "017_field_types_packs.sql", "018_custom_object_owner.sql", "019_permission_sets.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql", "028_sign_up.sql",
+      "017_field_types_packs.sql", "018_custom_object_owner.sql", "019_permission_sets.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql", "027_data_disposal.sql", "028_sign_up.sql",
       "029_workspace_limits.sql"]);
     expect(await migrate(url)).toEqual([]);
   });
@@ -88,7 +88,7 @@ describe("migrations", () => {
 
     const later = await migrate(url);
     expect(later).toEqual(["010_people_sign_in.sql", "012_views_preferences.sql", "013_merges.sql", "014_oauth_for_mcp.sql", "016_automation_engine.sql",
-      "017_field_types_packs.sql", "018_custom_object_owner.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql", "028_sign_up.sql"]);
+      "017_field_types_packs.sql", "018_custom_object_owner.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql", "027_data_disposal.sql", "028_sign_up.sql"]);
 
     // 017 replaced the type CHECK on fields by its own definition, which the old fields pass and the new types too.
     const checks = await sql<{ conname: string; def: string }[]>`
@@ -173,7 +173,7 @@ describe("migrations", () => {
       return tx<{ v: string }[]>`SELECT schema_version::text AS v FROM tenants`;
     });
 
-    expect(await migrate(url)).toEqual(["018_custom_object_owner.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql", "028_sign_up.sql"]);
+    expect(await migrate(url)).toEqual(["018_custom_object_owner.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql", "027_data_disposal.sql", "028_sign_up.sql"]);
 
     const fields = async (o: string) => (await call("GET", `/v1/objects/${o}`, { key: ws.keys.admin })).json.data.fields as { name: string; type: string; standard?: boolean }[];
     expect((await fields("visit")).map((f) => [f.name, f.type, f.standard])).toEqual([["title", "text", undefined], ["owner", "relation", true]]);
@@ -219,7 +219,7 @@ describe("migrations", () => {
       return { clerk: clerk!.id, user: user!.id, bot: bot!.id };
     });
 
-    expect(await migrate(url)).toEqual(["019_permission_sets.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql", "028_sign_up.sql", "029_workspace_limits.sql"]);
+    expect(await migrate(url)).toEqual(["019_permission_sets.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql", "027_data_disposal.sql", "028_sign_up.sql", "029_workspace_limits.sql"]);
 
     const inTenant = <T>(fn: (tx: postgres.TransactionSql) => Promise<T>) => sql.begin(async (tx) => {
       await tx`SELECT set_config('app.tenant_id', ${tenant}, true)`;
@@ -293,7 +293,7 @@ describe("migrations", () => {
       for (const id of contacts) await tx`INSERT INTO contacts (tenant_id, id, first_name) VALUES (${ta}, ${id}, 'Old')`;
     });
 
-    expect(await migrate(url)).toEqual(["028_sign_up.sql", "029_workspace_limits.sql"]);
+    expect(await migrate(url)).toEqual(["027_data_disposal.sql", "028_sign_up.sql", "029_workspace_limits.sql"]);
 
     const counts = (tenant: string) => inTenant(tenant, (tx) => tx<{ txid: string; delta: number }[]>`SELECT txid::text, delta::int FROM record_counts ORDER BY txid`);
     expect(await counts(ta)).toEqual([{ txid: "0", delta: 3 }]);

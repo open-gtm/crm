@@ -24,7 +24,7 @@ Permissions are in two areas. **Objects and fields** (`records:read`, `records:w
 | `records:write` | Create and update records and run sales operations (default for every object) |
 | `records:archive` | Archive and restore records, merge duplicates, bulk archive (default for every object) |
 | `restricted:read` | See the values of restricted fields |
-| `schema:manage` | Change objects, fields, pipelines and modules |
+| `schema:manage` | Change objects, fields, pipelines and modules. Also erase a person's records for good ([data-model.md](data-model.md#erasing-a-persons-records)): there is no separate permission for that yet |
 | `members:manage` | Add, change and disable members and service accounts; list and end their browser sessions and unlink their single sign-on (an owner's only by an owner) |
 | `roles:manage` | Create and change roles and permission sets |
 | `keys:manage` | Create, rotate and revoke API keys for other members, and list all keys |
