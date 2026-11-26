@@ -180,8 +180,11 @@ const settingsAudit = createRoute({ getParentRoute: () => settingsRoute, path: "
 const settingsSchema = createRoute({ getParentRoute: () => settingsRoute, path: "/schema", component: lazyRouteComponent(() => import("./features/settings/SchemaSettings"), "SchemaSettings") });
 const settingsSchemaObject = createRoute({ getParentRoute: () => settingsRoute, path: "/schema/$schemaObject", component: lazyRouteComponent(() => import("./features/settings/SchemaSettings"), "SchemaObject") });
 const settingsAutomations = createRoute({ getParentRoute: () => settingsRoute, path: "/automations", component: lazyRouteComponent(() => import("./features/settings/AutomationsSettings"), "AutomationsSettings") });
+const settingsAutomationNew = createRoute({ getParentRoute: () => settingsRoute, path: "/automations/new", component: lazyRouteComponent(() => import("./features/settings/AutomationsSettings"), "NewAutomation") });
+const settingsAutomation = createRoute({ getParentRoute: () => settingsRoute, path: "/automations/$automationId", component: lazyRouteComponent(() => import("./features/settings/AutomationsSettings"), "AutomationDetail") });
 const settingsPacks = createRoute({ getParentRoute: () => settingsRoute, path: "/packs", component: lazyRouteComponent(() => import("./features/settings/AutomationsSettings"), "PacksSettings") });
-const settingsChildren = [settingsIndex, settingsAccount, settingsNotifications, settingsWorkspace, settingsMembers, settingsRoles, settingsRole, settingsPermissionSets, settingsPermissionSet, settingsCommerce, settingsKeys, settingsWebhooks, settingsWebhook, settingsConnections, settingsConnection, settingsAudit, settingsSchema, settingsSchemaObject, settingsAutomations, settingsPacks];
+const settingsDataHealth = createRoute({ getParentRoute: () => settingsRoute, path: "/data-health", component: lazyRouteComponent(() => import("./features/settings/data-health/DataHealthSettings"), "DataHealthSettings") });
+const settingsChildren = [settingsIndex, settingsAccount, settingsNotifications, settingsWorkspace, settingsMembers, settingsRoles, settingsRole, settingsPermissionSets, settingsPermissionSet, settingsCommerce, settingsKeys, settingsWebhooks, settingsWebhook, settingsConnections, settingsConnection, settingsAudit, settingsSchema, settingsSchemaObject, settingsAutomations, settingsAutomationNew, settingsAutomation, settingsPacks, settingsDataHealth];
 
 const routeTree = rootRoute.addChildren([
   signInRoute,

@@ -1,6 +1,6 @@
 import { useQuery, type QueryKey } from "@tanstack/react-query";
 import { Link, Navigate, Outlet, useRouterState } from "@tanstack/react-router";
-import { Bell, Database, FileClock, FileText, KeyRound, Lock, Package, Plug, Settings, Shield, ShieldPlus, UserRound, Users, Webhook, Zap } from "lucide-react";
+import { Activity, Bell, Database, FileClock, FileText, KeyRound, Lock, Package, Plug, Settings, Shield, ShieldPlus, UserRound, Users, Webhook, Zap } from "lucide-react";
 import type { ReactNode } from "react";
 import { NoAccess, PageHeader } from "@/components/feedback";
 import { useApi } from "@/lib/api/context";
@@ -20,6 +20,7 @@ export const SECTIONS: { to: string; label: string; icon: ReactNode; show: (s: S
   { to: "/settings/audit", label: "Audit log", icon: <FileClock />, show: (s) => s.can("audit:read"), needs: "read the audit log" },
   { to: "/settings/automations", label: "Automations", icon: <Zap />, show: (s) => s.can("automations:manage"), needs: "manage automations" },
   { to: "/settings/schema", label: "Objects & fields", icon: <Database />, show: () => true },
+  { to: "/settings/data-health", label: "Data health", icon: <Activity />, show: (s) => s.can("records:write"), needs: "change records" },
   { to: "/settings/commerce", label: "Quotes and orders", icon: <FileText />, show: () => true },
   { to: "/settings/packs", label: "Installed packs", icon: <Package />, show: (s) => ["schema:manage", "roles:manage", "views:manage"].some((p) => s.can(p)), needs: "manage the schema, roles or views" },
 ];

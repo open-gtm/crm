@@ -27,11 +27,14 @@ export interface Automation {
   paused_at?: string | null; paused_reason?: string | null; consecutive_failures?: number;
   trigger: { type: "event" | "schedule" | "manual" | (string & {}); event?: string; object?: string; [k: string]: unknown };
   hourly_cap: number; run_roles: string[]; next_run_at?: string | null; version: number; updated_at?: string;
+  /** The filter in the query language, or null; and the steps (secret header values are always null). */
+  condition?: unknown; actions?: Record<string, unknown>[];
 }
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "skipped";
 export interface AutomationRun {
   id: string; trigger: string; status: RunStatus; reason: string | null; cap?: string | null; failure?: "data" | "target" | "config" | null;
   started_at: string; finished_at?: string | null;
+  record_id?: string | null; event_id?: string | null; scheduled_for?: string | null; requested_by?: string | null; results?: Record<string, unknown>[];
 }
 
 export interface InstalledPack {

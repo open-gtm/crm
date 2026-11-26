@@ -1,7 +1,7 @@
 import { useInfiniteQuery, useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import type { RowSelectionState } from "@tanstack/react-table";
-import { Archive, FilterX, Info, PenLine, Plus, RotateCcw, X } from "lucide-react";
+import { Archive, FilterX, Info, PenLine, Plus, RotateCcw, UserPlus, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EmptyState, NoAccess, PageHeader, ProblemView } from "@/components/feedback";
 import { useDebounced } from "@/components/pickers";
@@ -12,20 +12,23 @@ import { CreateRecordDialog } from "@/features/create/CreateRecordDialog";
 import { useApi } from "@/lib/api/context";
 import { ApiProblem, asProblem } from "@/lib/api/problem";
 import type { FieldMeta, ObjectMeta, Page, RecordData, Sort } from "@/lib/api/types";
-import { fromWhere, type Group } from "@/lib/filters";
+import { fromWhere, packFilter, type Group } from "@/lib/filters";
+import { formatTotal, useListTotals } from "./totals";
 import { qk } from "@/lib/keys";
 import { listPrefKey, usePrefs, useSetPrefs, type ListPref } from "@/lib/prefs";
 import { plainLabel } from "@/lib/text";
 import { useApplyWrite } from "@/lib/writes";
+import { canWrite } from "@/meta/fields";
 import { useDescribe } from "@/meta/hooks";
 import { ObjectIcon } from "@/meta/icons";
 import { listRoute } from "@/router";
 import { BulkDialog } from "./BulkDialog";
 import { DataTable } from "./DataTable";
 import { FilterButton } from "./FilterBuilder";
+import { FilterChips } from "./FilterChips";
 import { GroupedList } from "./GroupedList";
-import { boardFields, calendarFields, groupFields, monthOf } from "./layouts";
-import { ColumnsMenu, LayoutMenu, SortMenu, type ListLayout } from "./ListControls";
+import { boardFields, calendarFields, groupFields, monthOf, totalFields } from "./layouts";
+import { ColumnsMenu, LayoutOptions, LayoutSwitch, SortMenu, type ListLayout } from "./ListControls";
 import { nextSearch, resolveList, type ListUrl } from "./listState";
 import { RecordBoard } from "./RecordBoard";
 import { RecordCalendar } from "./RecordCalendar";
@@ -67,7 +70,7 @@ function ListBody({ meta }: { meta: ObjectMeta }) {
   const setPrefs = useSetPrefs();
   const [selection, setSelection] = useState<RowSelectionState>({});
   const [creating, setCreating] = useState(false);
-  const [bulk, setBulk] = useState<null | "archive" | "update">(null);
+  const [bulk, setBulk] = useState<null | { mode: "archive" | "update"; field?: string }>(null);
   const [conflict, setConflict] = useState<RecordData | null>(null);
 
   const setSearch = useCallback((s: ListUrl) => void navigate({ search: s as never, replace: true }), [navigate]);
@@ -158,6 +161,9 @@ function ListBody({ meta }: { meta: ObjectMeta }) {
     getNextPageParam: (last) => last.next_cursor ?? undefined,
     enabled: !waitingForView && plainTable,
   });
+  // What the number columns shown add up to over the whole filtered list (not only the loaded rows).
+  const totalCols = useMemo(() => (plainTable ? totalFields(meta, list.columns) : []), [plainTable, meta, list.columns]);
+  const totals = useListTotals(meta, baseWhere, totalCols, plainTable && !waitingForView);
   const records = useMemo(() => rows.data?.pages.flatMap((p) => p.data) ?? [], [rows.data]);
   const first = rows.data?.pages[0];
   const selectedIds = Object.keys(selection).filter((k) => selection[k]);
@@ -192,6 +198,17 @@ function ListBody({ meta }: { meta: ObjectMeta }) {
   }, [rows.error, restoredView, search.view, view?.name, dropRestored]);
 
   const canCreate = meta.access.write;
+  const ownerField = meta.fields.find((f) => f.name === "owner");
+  const canAssignOwner = Boolean(ownerField && canWrite(ownerField, meta.access, "edit"));
+  const dealSum = meta.name === "deal" ? totals.data?.sums.get("amount") : undefined;
+  const footer = plainTable && totalCols.length && (totals.data || totals.isPending) ? {
+    cells: Object.fromEntries(totalCols.map((f) => [f.name, totals.data ? (
+      <span className="flex flex-col items-end py-1 leading-4">
+        <span className="sr-only">Sum of {f.label.toLowerCase()}: </span>
+        {(totals.data.sums.get(f.name) ?? []).length ? (totals.data.sums.get(f.name) ?? []).map((l) => <span key={l.currency ?? "-"} className="tabular">{formatTotal(f, l)}</span>) : "—"}
+      </span>
+    ) : <Skeleton className="h-3 w-16" />])),
+  } : undefined;
   const filterActive = Boolean(list.filter && list.filter.children.length);
   const viewError = rows.error instanceof ApiProblem && list.viewId && (rows.error.status === 403 || rows.error.status === 404 || rows.error.code === "view_invalid");
 
@@ -201,9 +218,14 @@ function ListBody({ meta }: { meta: ObjectMeta }) {
         icon={<ObjectIcon object={meta} />}
         title={meta.plural_label}
         subtitle={first?.total !== undefined ? (
-          <span aria-live="polite">{first.total_capped ? `More than ${first.total.toLocaleString()}` : first.total.toLocaleString()} {first.total === 1 ? meta.label.toLowerCase() : meta.plural_label.toLowerCase()}{filterActive || list.viewId ? " match" : ""}</span>
+          <span aria-live="polite">{first.total_capped ? `More than ${first.total.toLocaleString()}` : first.total.toLocaleString()} {first.total === 1 ? meta.label.toLowerCase() : meta.plural_label.toLowerCase()}{filterActive || list.viewId ? " match" : ""}{dealSum?.length ? <> · <span className="tabular">{dealSum.map((l) => formatTotal(totalCols.find((f) => f.name === "amount")!, l)).join(" · ")}</span></> : null}</span>
         ) : rows.isPending && plainTable ? <Skeleton className="mt-1 h-3 w-24" /> : null}
-        actions={canCreate ? <Button variant="primary" onClick={() => setCreating(true)}><Plus /><span className="truncate">New {meta.label.toLowerCase()}</span></Button> : null}
+        actions={<>
+          <LayoutSwitch layout={layout} onLayout={(l) => showAs({ layout: l === "table" ? undefined : l, by: undefined, month: undefined })}
+            hasBoard={boards.length > 0} hasCalendar={dates.length > 0}
+            boardLink={meta.name === "deal" && (meta.pipelines?.length ?? 0) > 0 && layout !== "board" ? { filter: list.filter && filterActive ? packFilter(list.filter) : undefined } : undefined} />
+          {canCreate ? <Button variant="primary" onClick={() => setCreating(true)}><Plus /><span className="truncate">New {meta.label.toLowerCase()}</span></Button> : null}
+        </>}
       />
       <div className="flex flex-wrap items-center gap-2 border-b border-line bg-surface px-4 py-2 md:px-6" role="toolbar" aria-label="List controls">
         <ViewsMenu meta={meta} views={views.data ?? []} current={view} modified={list.modified && Boolean(view)}
@@ -215,8 +237,7 @@ function ListBody({ meta }: { meta: ObjectMeta }) {
         {layout === "calendar" ? null : <ColumnsMenu meta={meta} columns={list.columns} overridden={list.columnsOverridden}
           onChange={(c) => setSearch(nextSearch(search, { columns: c }))} onReset={() => setSearch(nextSearch(search, { columns: null }))} />}
         <span className="mx-1 h-5 w-px bg-line" aria-hidden />
-        <LayoutMenu layout={layout}
-          onLayout={(l) => showAs({ layout: l === "table" ? undefined : l, by: undefined, month: undefined })}
+        <LayoutOptions layout={layout}
           boardBy={boardBy} boardFields={boards} onBoardBy={(n) => showAs({ by: n })}
           dateBy={dateBy} dateFields={dates} onDateBy={(n) => showAs({ by: n })}
           groupBy={groupBy} groupFields={groups} onGroupBy={(n) => showAs({ group: n ?? undefined })} />
@@ -228,12 +249,19 @@ function ListBody({ meta }: { meta: ObjectMeta }) {
         {selectedIds.length ? (
           <div className="ml-auto flex items-center gap-2" role="group" aria-label="Selected records">
             <span className="text-sm text-muted">{selectedIds.length} selected</span>
-            {meta.access.write ? <Button size="sm" onClick={() => setBulk("update")}><PenLine /> Change…</Button> : null}
-            {meta.access.archive ? <Button size="sm" variant="danger-ghost" onClick={() => setBulk("archive")}><Archive /> Archive…</Button> : null}
+            {meta.access.write ? <Button size="sm" onClick={() => setBulk({ mode: "update" })}><PenLine /> Change…</Button> : null}
+            {canAssignOwner ? <Button size="sm" onClick={() => setBulk({ mode: "update", field: "owner" })}><UserPlus /> Assign owner…</Button> : null}
+            {meta.access.archive ? <Button size="sm" variant="danger-ghost" onClick={() => setBulk({ mode: "archive" })}><Archive /> Archive…</Button> : null}
             <Button size="sm" variant="ghost" onClick={() => setSelection({})}>Clear</Button>
           </div>
         ) : null}
       </div>
+      <FilterChips meta={meta} filter={list.filter} onChange={(g) => setSearch(nextSearch(search, { filter: g ?? (list.viewId ? { kind: "group", conj: "and", children: [] } : null) }))} />
+      {plainTable && totals.data?.capped ? (
+        <p role="status" className="border-b border-warning/50 bg-warning-soft px-4 py-2 text-base text-warning-fg md:px-6">
+          Totals cover the 100,000 most recently changed records. Filter the list for exact figures.
+        </p>
+      ) : null}
       <div className="min-h-0 flex-1">
         {note ? (
           <div role="status" className="mx-4 mt-3 flex items-start gap-2 rounded-md border border-info/40 bg-info-soft px-3 py-2 text-base text-info-fg md:mx-6">
@@ -272,7 +300,7 @@ function ListBody({ meta }: { meta: ObjectMeta }) {
           )
         ) : (
           <DataTable
-            meta={meta} rows={records} columns={list.columns} sort={list.sort} total={first?.total}
+            meta={meta} rows={records} columns={list.columns} sort={list.sort} total={first?.total} footer={footer}
             onSortChange={(s) => setSearch(nextSearch(search, { sort: s }))}
             selection={selection} onSelectionChange={setSelection}
             onEdit={meta.access.write ? onEdit : undefined}
@@ -282,7 +310,7 @@ function ListBody({ meta }: { meta: ObjectMeta }) {
         )}
       </div>
       {creating ? <CreateRecordDialog object={meta.name} open onOpenChange={setCreating} /> : null}
-      {bulk ? <BulkDialog meta={meta} ids={selectedIds} mode={bulk} onClose={() => setBulk(null)} onDone={() => {
+      {bulk ? <BulkDialog meta={meta} ids={selectedIds} mode={bulk.mode} initialField={bulk.field} onClose={() => setBulk(null)} onDone={() => {
         setBulk(null);
         setSelection({});
       }} /> : null}
