@@ -5,7 +5,7 @@ import { cleanLine } from "../output.js";
 import { FIELD_CONDITION, OBJECT_NAME, RECORD_ID } from "../patterns.js";
 import type { Act } from "../program.js";
 
-/** Record write commands under `crm data`: restore, duplicates, merge, and bulk update and archive (preview, then confirm). */
+/** Record write commands under `crm data`: restore, duplicates, merge, erase, and bulk update and archive (preview, then confirm). */
 
 const objectName = (object: string) => {
   if (!OBJECT_NAME.test(object)) throw usage(`"${object}" is not an object name`);
@@ -129,6 +129,30 @@ export function registerRecordWrites(data: Command, act: Act, collect: (v: strin
       const done = await client.post<MergeResult>("/v1/ops/merge_records", { ...body, dry_run: false, confirm_token: preview.confirm_token });
       if (ctx.g.json) return ctx.out.data({ preview, result: done });
       ctx.out.line(`Merged into ${survivor}.`);
+    }));
+
+  data.command("erase <object> <id>")
+    .description("Erase a person's record for good (a contact with its leads, a lead, or a custom object's record): shows what goes, then asks (--yes to skip)")
+    .option("--keep-emailable", "don't add an erased contact's address to the list automations never email")
+    .action(act(async (ctx, object: string, id: string, opts: { keepEmailable?: boolean }) => {
+      const path = `/v1/objects/${objectName(object)}/records/${recordId(id)}/erase`;
+      const body = opts.keepEmailable ? { suppress_email: false } : {};
+      const client = ctx.client();
+      type EraseResult = { result: { erased: string[]; counts: Record<string, number>; possible_copies: string[] | null; not_erased: string[] }; confirm_token?: string };
+      const preview = await client.post<EraseResult>(path, { ...body, dry_run: true });
+      if (!ctx.g.json) {
+        ctx.out.line(`Erase ${id} for good. Its row stays, blank and archived; these values go:`);
+        ctx.out.line(`  records: ${preview.result.erased.join(", ")}`);
+        for (const [what, n] of Object.entries(preview.result.counts)) if (n > 0) ctx.out.line(`  ${what.replace(/_/g, " ")}: ${n}`);
+        if (preview.result.possible_copies === null) ctx.out.info("Other records that mention this person were not searched (the search took too long).");
+        else if (preview.result.possible_copies.length) ctx.out.info(`Not changed, but they seem to mention this person: ${preview.result.possible_copies.join(", ")}`);
+        ctx.out.info(`Not erased: ${preview.result.not_erased.map(cleanLine).join("; ")}.`);
+      }
+      await ctx.confirm("Erase this record? It can't be undone. [y/N] ", `Erasing removes the values of ${preview.result.erased.length} record(s) for good`);
+      // The token binds the run to this preview: if anything about the record was added since, the server refuses and nothing is erased.
+      const done = await client.post<EraseResult>(path, { ...body, dry_run: false, confirm_token: preview.confirm_token });
+      if (ctx.g.json) return ctx.out.data({ preview, result: done });
+      ctx.out.line(`Erased ${id}.`);
     }));
 
   for (const op of ["update", "archive"] as const) {
