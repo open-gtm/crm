@@ -129,6 +129,9 @@ describe("the catalog rules the purge relies on", () => {
       await tx`SELECT set_config('app.tenant_id', ${ws.tenantId}, true), set_config('app.purging', 'on', true)`;
       await tx`DELETE FROM audit_log`;
     })).rejects.toThrow(/permission denied/);
+    // The table's owner can't write a tombstone either: only the purge's own insert passes the policy.
+    await expect(migrator`INSERT INTO deleted_workspaces (workspace_id, created_at, requested_at, requested_by_type, audit_rows, rows_deleted)
+      VALUES (${ws.tenantId}, now(), now(), 'operator', 0, '{}')`).rejects.toThrow(/row-level security/);
     // Even a role that could delete is refused by the trigger: the setting alone is not the purge.
     await expect(migrator.begin(async (tx) => {
       await tx`SELECT set_config('app.tenant_id', ${ws.tenantId}, true), set_config('app.purging', 'on', true)`;

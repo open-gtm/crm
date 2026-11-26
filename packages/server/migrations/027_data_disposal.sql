@@ -16,8 +16,8 @@ ALTER TABLE tenants
 
 -- What is left of a deleted workspace: that it existed, when it went, who asked, how many rows each
 -- table held and where its audit chain ended. No name, no member, no record. It has no tenant_id
--- column and no row-level security: the workspace it describes is gone. The app role reads it and
--- can never write it (db/migrate.ts revokes that); rows are written only by app.purge_tenant below.
+-- column: the workspace it describes is gone. The app role reads it and can never write it
+-- (db/migrate.ts revokes that); rows are written only by app.purge_tenant below.
 CREATE TABLE deleted_workspaces (
   workspace_id      uuid PRIMARY KEY,             -- the tenant ID the workspace had
   created_at        timestamptz NOT NULL,
@@ -107,6 +107,14 @@ LANGUAGE sql STABLE AS $$
      AND current_setting('app.purging', true) = 'on'
      AND current_user = (SELECT pg_get_userbyid(p.proowner) FROM pg_proc p WHERE p.oid = 'app.purge_tenant(uuid, text, uuid, timestamptz)'::regprocedure)
 $$;
+
+-- Row-level security is on for the tombstones like every other table, with two policies: anyone may
+-- read them (they hold nothing of a customer's, and the workspace they name is gone), and a row can be
+-- inserted only by the purge. With the grants (db/migrate.ts) that leaves no way to change or remove one.
+ALTER TABLE deleted_workspaces ENABLE ROW LEVEL SECURITY;
+ALTER TABLE deleted_workspaces FORCE ROW LEVEL SECURITY;
+CREATE POLICY tombstones_readable ON deleted_workspaces FOR SELECT USING (true);
+CREATE POLICY tombstones_written_by_purge ON deleted_workspaces FOR INSERT WITH CHECK (app.purging());
 
 -- Triggers that fire before a row is deleted stand aside for a purge: the ones that refuse the delete
 -- (audit rows, order lines, the lines of a sent quote), and the one that deletes the row's registry
