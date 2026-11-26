@@ -567,7 +567,7 @@ export async function archiveField(tx: Tx, ctx: Ctx, objectName: string, fieldNa
   const count = await countValues(tx, obj, field);
   const change: Change = {
     change: "field_archived", object: obj.api_name, field: field.api_name, before: fieldSummary(field),
-    warning: `${count} record(s) have a value. Values are kept but hidden and unwritable; they can be purged later.`,
+    warning: `${count} record(s) have a value. Values are kept but hidden and unwritable. Nothing removes them, short of erasing a record.`,
   };
   const token = confirmToken(ctx, schema.version, "archive_field", obj.api_name, field.api_name);
   if (opts.dryRun) return { dry_run: true, schema_version: schema.version, changes: [change], confirm_token: token };

@@ -61,7 +61,7 @@ Both protocol revisions are served on the same URL: 2025-11-25 and earlier (an `
 
 Merges and bulk changes act on many records in one call, so the ops server instructions tell the agent to show the dry run to the user before applying, and the destructive annotation makes MCP clients ask too. Applying needs the dry run's `confirm_token`: always for `merge_records`, and for a bulk change by filter or of more than 25 records (`confirm: true` alone applies nothing there). A token is single-use and binds the exact change previewed (the records, the values or field choices, and for a merge each record's version), so the real run can't apply something other than what the dry run showed. It does not show that a person saw the preview: a model can run the dry run and the real run back to back. What protects against a model that was told (or tricked) into applying is per-call approval of destructive tools in the client. Both are refused for a key without `records:archive` where they archive.
 
-The ops server has **no** tool that changes the schema, pipelines, modules, automations, webhooks, workspace alerts, members or keys. Even with an admin key, the API refuses admin operations that arrive through the ops surface.
+The ops server has **no** tool that changes the schema, pipelines, modules, automations, webhooks, workspace alerts, members or keys, and none that erases a record. No MCP server, and no app connected over OAuth, can ask for the workspace to be deleted: an owner does that through the API or a browser session ([data-model.md](../data-model.md#deleting-a-workspace)). Even with an admin key, the API refuses admin operations that arrive through the ops surface.
 
 **Limited roles.** If the key's role has object or field rules ([`docs/permissions.md`](../permissions.md#object-and-field-access)), the tools return only what the role can see: fields it can't read are missing from records and events, and objects it can't read are skipped by `search` and show `records: null` in `get_schema_summary`. A refused call returns a 403 whose message names the object or field (for example `This key can't write contact.phone`), and the server instructions tell the agent not to retry it. Nothing in the tools works around a rule.
 
@@ -86,6 +86,7 @@ Schema-changing tools **default to `dry_run: true`** and return a diff (`changes
 | `update_object` | Relabel, describe or hide an object |
 | `create_pipeline` | A deal pipeline with stages |
 | `set_modules` | Turn modules on or off |
+| `erase_record` | Erase a person's record for good: a contact (with its leads), a lead or a custom object's record. Defaults to a dry run that lists what goes and returns the `confirm_token` a real run needs. Can't be undone. See [data-model.md](../data-model.md#erasing-a-persons-records) |
 | `get_schema_changes` | Who changed what in the schema, and through which surface |
 | `get_audit_log`, `verify_audit_log` | Audit trail and its integrity check |
 | `list_members`, `list_api_keys` | Oversight. Key secrets are never returned or created here. |
@@ -128,6 +129,6 @@ What is **not** a security boundary:
 
 What you should do:
 
-- **Keep per-call approval on for write tools on the admin server.** In Claude Code and Claude Desktop, do not "always allow" `register_webhook`, `update_webhook`, `replay_webhook_delivery`, `test_webhook`, `create_automation`, `update_automation`, `run_automation`, `resume_automation`, `create_workspace_alert` or `update_alert`. Read the URL in the approval prompt before you accept.
+- **Keep per-call approval on for write tools on the admin server.** In Claude Code and Claude Desktop, do not "always allow" `register_webhook`, `update_webhook`, `replay_webhook_delivery`, `test_webhook`, `create_automation`, `update_automation`, `run_automation`, `resume_automation`, `create_workspace_alert`, `update_alert` or `erase_record`. Read the URL in the approval prompt before you accept. `erase_record` can't be undone: its confirm token shows the erasure is the one its dry run listed, not that a person read the list.
 - **Give the ops server an ops key**, not an admin key, and connect the admin server only when you are changing the CRM's setup. With OAuth, approve the admin server only for a client you trust with setup changes, and disconnect it at `/auth/apps` when you're done; an owner can stop apps getting `admin` at all.
 - Treat a request from the agent to send data somewhere you did not mention as a sign of injected instructions.
