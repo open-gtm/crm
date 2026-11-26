@@ -30,6 +30,6 @@ The web UI showed every object as a table and every record as two fixed sections
 - Boards and calendars ask for a bounded number of records and say when there are more; they are for looking at a filtered slice, not for paging through everything.
 - A board column's cards are ordered by most recently changed, not by hand: there is no stored card order.
 - Grouping is one level deep. Counts and totals follow the aggregate endpoint's limits (the 100,000 most recently changed matching records) and the page says when they are capped.
-- Page layouts are not in the schema document (`crm schema pull`, `apply`) or in schema packs yet, and the CLI has no command for them: the REST routes and the web editor are the ways to set one.
+- Page layouts are not in the schema document (`crm schema pull`, `apply`) or in schema packs yet, and the CLI has no command for them: the REST routes and the web editor are the ways to set one. (Changed by [ADR 0017](0017-agent-first-page-layouts.md): layouts are in the schema document, the admin MCP server has tools for them, and a layout arranges components as well as fields.)
 - Notes, files, related records and the timeline keep their places on a record page; a layout arranges fields only.
 - Translations of the UI were not part of this.

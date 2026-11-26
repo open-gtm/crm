@@ -15,7 +15,7 @@ import { navObjects, useDescribes, useObjects } from "@/meta/hooks";
 import { ObjectIcon } from "@/meta/icons";
 import { FieldValue, RecordLink } from "@/meta/registry";
 
-interface Reference { meta: ObjectMeta; field: FieldMeta }
+export interface Reference { meta: ObjectMeta; field: FieldMeta }
 
 /**
  * Objects the record page's timeline already shows (logged activities and tasks, linked however they
@@ -39,25 +39,52 @@ export function useReferences(object: string): { refs: Reference[]; loading: boo
 
 const SHOWN = 5;
 
-export function RelatedLists({ object, id, name }: { object: string; id: string; name: string }) {
+/** How a list is named in `exclude`: the object and the relation field that points at the record. */
+export const listKey = (object: string, field: string) => `${object}.${field}`;
+
+/** Related lists a layout draws elsewhere, so the group doesn't show them twice. */
+export interface RelatedExclude { lists?: ReadonlySet<string>; objects?: ReadonlySet<string> }
+
+export const keep = (r: Reference, exclude?: RelatedExclude) => !exclude?.lists?.has(listKey(r.meta.name, r.field.name)) && !exclude?.objects?.has(r.meta.name);
+
+/** Every related list the member can read, one card each, minus those the layout places on their own. */
+export function RelatedLists({ object, id, name, exclude }: { object: string; id: string; name: string; exclude?: RelatedExclude }) {
   const { refs, loading } = useReferences(object);
   if (loading) return <div className="flex flex-col gap-3" aria-busy="true">{[1, 2].map((i) => <Skeleton key={i} className="h-24" />)}</div>;
-  if (!refs.length) return null;
+  const shown = refs.filter((r) => keep(r, exclude));
+  if (!shown.length) return null;
   return (
     <div className="flex flex-col gap-4">
-      {refs.slice(0, 10).map((r) => <RelatedList key={`${r.meta.name}.${r.field.name}`} r={r} id={id} name={name} several={refs.filter((x) => x.meta.name === r.meta.name).length > 1} />)}
+      {shown.slice(0, 10).map((r) => <RelatedList key={listKey(r.meta.name, r.field.name)} r={r} id={id} name={name} several={refs.filter((x) => x.meta.name === r.meta.name).length > 1} />)}
     </div>
   );
 }
 
-function RelatedList({ r, id, name, several }: { r: Reference; id: string; name: string; several: boolean }) {
+/**
+ * The related lists of `object` (all of them, or just the one through `field`) on a record of `of`, each limited
+ * to `rows` rows: a layout's `related` and `quotes` components. Nothing when the member can't read the object.
+ */
+export function RelatedOf({ of, object, field, rows, id, name }: { of: string; object: string; field?: string; rows: number; id: string; name: string }) {
+  const { refs, loading } = useReferences(of);
+  if (loading) return <Skeleton className="h-24 w-full" />;
+  const mine = refs.filter((r) => r.meta.name === object);
+  const shown = field === undefined ? mine : mine.filter((r) => r.field.name === field);
+  if (!shown.length) return null;
+  return (
+    <div className="flex flex-col gap-4">
+      {shown.map((r) => <RelatedList key={listKey(r.meta.name, r.field.name)} r={r} id={id} name={name} rows={rows} several={mine.length > 1} />)}
+    </div>
+  );
+}
+
+function RelatedList({ r, id, name, several, rows = SHOWN }: { r: Reference; id: string; name: string; several: boolean; rows?: number }) {
   const api = useApi();
   const [creating, setCreating] = useState(false);
   const cols = defaultColumns(r.meta).filter((c) => c !== r.field.name).slice(0, 2);
   const where = { field: r.field.name, op: "eq", value: id };
   const q = useQuery({
-    queryKey: qk.related(r.meta.name, { field: r.field.name, id, cols }),
-    queryFn: ({ signal }) => api.request<Page>("POST", "/v1/query", { signal, body: { object: r.meta.name, where, limit: SHOWN, count: true, fields: ["display_name", ...cols], sort: [{ field: "updated_at", dir: "desc" }],
+    queryKey: qk.related(r.meta.name, { field: r.field.name, id, cols, rows }),
+    queryFn: ({ signal }) => api.request<Page>("POST", "/v1/query", { signal, body: { object: r.meta.name, where, limit: rows, count: true, fields: ["display_name", ...cols], sort: [{ field: "updated_at", dir: "desc" }],
       ...(includable(r.meta, cols).length ? { include: includable(r.meta, cols) } : {}) } }),
   });
   const title = several ? `${r.meta.plural_label} (${r.field.label})` : r.meta.plural_label;
@@ -86,7 +113,7 @@ function RelatedList({ r, id, name, several }: { r: Reference; id: string; name:
             ))}
           </ul>
         )}
-      {total !== undefined && total > SHOWN ? (
+      {total !== undefined && total > rows ? (
         <div className="border-t border-line px-4 py-2">
           <Link to="/o/$object" params={{ object: r.meta.name }} search={{ filter: packFilter({ kind: "group", conj: "and", children: [{ kind: "cond", path: [r.field.name], op: "eq", value: id }] }) }}
             className="text-sm font-medium text-accent hover:underline">View all {total.toLocaleString()}</Link>

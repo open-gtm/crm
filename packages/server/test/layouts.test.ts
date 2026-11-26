@@ -15,7 +15,7 @@ beforeAll(async () => {
 
 describe("record page layouts", () => {
   it("an object has the default page until a layout is set, then its sections in order", async () => {
-    expect((await get("contact")).json.data).toEqual({ object: "contact", custom: false, sections: [], updated_at: null });
+    expect((await get("contact")).json.data).toMatchObject({ object: "contact", custom: false, version: 0, sections: [], updated_at: null });
     const set = await put("contact", [
       { title: "Who", fields: ["first_name", "last_name", "job_title"] },
       { title: "Reach them", fields: ["email", "phone"] },
@@ -76,7 +76,7 @@ describe("record page layouts", () => {
   it("reset brings the default page back", async () => {
     await put("account", [{ title: "A", fields: ["name"] }]);
     const reset = await call("DELETE", "/v1/objects/account/layout", { key: ws.keys.admin });
-    expect(reset.json.data).toEqual({ object: "account", custom: false, sections: [], updated_at: null });
+    expect(reset.json.data).toMatchObject({ object: "account", custom: false, sections: [], updated_at: null });
     expect((await call("DELETE", "/v1/objects/account/layout", { key: ws.keys.admin })).status).toBe(200);
   });
 });

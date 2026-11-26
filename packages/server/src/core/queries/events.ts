@@ -10,17 +10,19 @@ export interface EventRow {
   id: string; type: string; object_type: string | null; record_id: string | null; occurred_at: Date;
   actor_type: string; actor_id: string | null; surface: string; data: Record<string, unknown>; causation_depth: number;
   automation_id: string | null;
+  /** The connected app or API key the change came through, by name. Only the events list selects it. */
+  via?: string | null;
 }
 
 /** Writes one outbox event. */
 export async function insertEvent(tx: Tx, e: {
   tenantId: string; id: string; type: string; objectType: string | null; recordId: string | null; actorType: string; actorId: string | null;
-  surface: string; data: Record<string, unknown>; causationDepth: number; automationId: string | null;
+  surface: string; via: string | null; data: Record<string, unknown>; causationDepth: number; automationId: string | null;
 }): Promise<void> {
   await tx`
-    INSERT INTO outbox_events (tenant_id, id, type, object_type, record_id, actor_type, actor_id, surface, data, causation_depth, automation_id)
+    INSERT INTO outbox_events (tenant_id, id, type, object_type, record_id, actor_type, actor_id, surface, via, data, causation_depth, automation_id)
     VALUES (${e.tenantId}, ${e.id}, ${e.type}, ${e.objectType}, ${e.recordId},
-            ${e.actorType}, ${e.actorId}, ${e.surface}, ${tx.json(e.data as never)},
+            ${e.actorType}, ${e.actorId}, ${e.surface}, ${e.via}, ${tx.json(e.data as never)},
             ${e.causationDepth}, ${e.automationId})`;
 }
 
@@ -53,16 +55,25 @@ export interface RecentEventsFilter {
   all: boolean;
   readable: string[];
   status: "pending" | "processed" | "dead" | null;
+  /** Only events this member or service account caused. */
+  actor: string | null;
+  /** Only events that came through one of these surfaces. */
+  surfaces: string[] | null;
+  /** Only events at or after this time. */
+  since: Date | null;
   limit: number;
 }
 
 /** Recent events, newest first, with their processing state. */
 export async function recentEvents(tx: Tx, f: RecentEventsFilter): Promise<(EventRow & EventProcessing)[]> {
   return tx<(EventRow & EventProcessing)[]>`
-      SELECT id, type, object_type, record_id, occurred_at, actor_type, actor_id, surface, data, causation_depth, automation_id,
+      SELECT id, type, object_type, record_id, occurred_at, actor_type, actor_id, surface, via, data, causation_depth, automation_id,
              processed_at, dead_at, attempts, last_error, next_attempt_at
       FROM outbox_events
       WHERE (${f.type}::text IS NULL OR type LIKE ${(f.type ?? "").replace(/[\\%_]/g, (c) => `\\${c}`) + "%"})
+        AND (${f.actor}::uuid IS NULL OR actor_id = ${f.actor}::uuid)
+        AND (${f.surfaces}::text[] IS NULL OR surface = ANY(${f.surfaces}::text[]))
+        AND (${f.since}::timestamptz IS NULL OR occurred_at >= ${f.since}::timestamptz)
         AND (${f.record}::uuid IS NULL OR record_id = ${f.record}::uuid)
         AND (${f.before}::uuid IS NULL OR id < ${f.before}::uuid)
         AND (${f.all} OR record_id IS NULL OR object_type = ANY(${f.readable}::text[]))
@@ -71,4 +82,16 @@ export async function recentEvents(tx: Tx, f: RecentEventsFilter): Promise<(Even
           OR (${f.status} = 'dead' AND dead_at IS NOT NULL)
           OR (${f.status} = 'pending' AND processed_at IS NULL AND dead_at IS NULL))
       ORDER BY id DESC LIMIT ${f.limit}`;
+}
+
+export interface ActivityRow { actor_type: string; actor_id: string | null; surface: string; via: string | null; changes: number; records: number; last_at: Date }
+
+/** Changes since `since`, counted per actor, surface and app or key: who and what is writing to the workspace. */
+export async function activityBySource(tx: Tx, since: Date, surfaces: string[], limit: number): Promise<ActivityRow[]> {
+  return tx<ActivityRow[]>`
+    SELECT actor_type, actor_id, surface, via, count(*)::int AS changes, count(DISTINCT record_id)::int AS records, max(occurred_at) AS last_at
+    FROM outbox_events
+    WHERE occurred_at >= ${since} AND surface = ANY(${surfaces}::text[])
+    GROUP BY actor_type, actor_id, surface, via
+    ORDER BY changes DESC, last_at DESC LIMIT ${limit}`;
 }

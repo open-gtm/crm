@@ -155,6 +155,8 @@ export interface Ctx {
    * servers, with the surface fixed by the token's resource. Audit entries name the grant and client.
    */
   oauth?: { grantId: string; clientId: string };
+  /** The schema pack being applied or uninstalled, by name: its schema changes are recorded as the pack's. */
+  pack?: string;
   /** What this request may do. Every authorization decision reads this, through `can`. */
   permissions: ReadonlySet<Permission>;
   /** Per-object and per-field rules of the role, when it has any. Read through core/access.ts. */

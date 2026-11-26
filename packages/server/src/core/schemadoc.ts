@@ -6,12 +6,13 @@ import { audit } from "./audit.js";
 import { CATALOG, type FieldType, type JsonShape, type SelectValue, type Sensitivity } from "./catalog.js";
 import { ratingMax, TYPE_INFO } from "./fieldtypes.js";
 import type { Ctx } from "./context.js";
+import { exportLayout, resetLayout, setLayout } from "./layouts.js";
 import { actorRef } from "./webhooks.js";
 import { schemaChangesSince, type DriftRow } from "./queries/schema.js";
 import { addStage, createPipeline, listPipelines, reorderStages, updatePipeline, updateStage } from "./pipelines.js";
 import {
   addField, archiveField, confirmToken, createObject, isModuleOn, loadSchema, lockSchema, retypeField, SAFE_RETYPES, setModules, updateField,
-  updateObject, type Change, type FieldInput, type FieldMeta, type FieldPatch, type ObjectMeta, type ObjectPatch,
+  getObject, updateObject, type Change, type FieldInput, type FieldMeta, type FieldPatch, type ObjectMeta, type ObjectPatch,
 } from "./schema.js";
 
 /**
@@ -72,6 +73,11 @@ export interface DocObject {
   standard?: boolean;
   module?: string;
   fields?: DocField[];
+  /**
+   * The record page layout (ADR 0017), by field and object name. Left out: the layout is left as it is.
+   * null: the default page. Applying publishes it as the object's next layout version.
+   */
+  layout?: unknown;
 }
 
 export interface DocStage { id?: string; name: string; category?: "open" | "won" | "lost"; probability?: number | null }
@@ -143,11 +149,16 @@ function objectOrder(a: ObjectMeta, b: ObjectMeta): number {
 export async function exportSchema(tx: Tx, ctx: Ctx): Promise<SchemaDoc & { schema_version: number }> {
   const schema = await loadSchema(tx);
   // Objects of a module that is off are left out, as GET /v1/objects does; apply leaves objects a document omits alone.
-  const objects: DocObject[] = [...schema.objects.values()].filter((o) => isModuleOn(schema, o)).sort(objectOrder).map((o) => ({
-    id: encodeId("obj", o.id), name: o.api_name, label: o.label, plural_label: o.plural_label, description: o.description || undefined,
-    id_prefix: o.id_prefix, display_field: o.display_field ?? undefined, owned: o.owned, hidden: o.hidden || undefined,
-    standard: o.is_system || undefined, module: o.module ?? undefined, fields: o.fields.map(docField),
-  }));
+  const objects: DocObject[] = [];
+  for (const o of [...schema.objects.values()].filter((x) => isModuleOn(schema, x)).sort(objectOrder)) {
+    // An object with the default page has no layout entry, so applying the document elsewhere leaves that page alone.
+    const layout = await exportLayout(tx, schema, o);
+    objects.push({
+      id: encodeId("obj", o.id), name: o.api_name, label: o.label, plural_label: o.plural_label, description: o.description || undefined,
+      id_prefix: o.id_prefix, display_field: o.display_field ?? undefined, owned: o.owned, hidden: o.hidden || undefined,
+      standard: o.is_system || undefined, module: o.module ?? undefined, fields: o.fields.map(docField), ...(layout ? { layout } : {}),
+    });
+  }
   const pipelines: DocPipeline[] = (await listPipelines(tx)).map((p) => ({
     id: p.id, name: p.name, is_default: p.is_default,
     stages: p.stages.map((s) => ({ id: s.id, name: s.name, category: s.category as DocStage["category"], probability: s.default_probability ?? undefined })),
@@ -264,7 +275,7 @@ const pushAll = (run: Run, changes: Change[], dataAffecting = false) => {
 };
 
 /** Makes the workspace match `doc`, recording what it did. Plan runs this inside a savepoint and rolls it back. */
-async function runDocument(tx: Tx, ctx: Ctx, doc: SchemaDoc, opts: { prune: boolean; check: () => void }): Promise<Run> {
+async function runDocument(tx: Tx, ctx: Ctx, doc: SchemaDoc, opts: { prune: boolean; check: () => void; layouts?: boolean }): Promise<Run> {
   const run: Run = { changes: [], unsupported: [], notes: [], matched_by_name: [], touched: new Set(), added: new Set(), check: opts.check };
   const unsupported = (path: string, message: string) => run.unsupported.push({ path, message });
   let schema = await loadSchema(tx);
@@ -339,6 +350,25 @@ async function runDocument(tx: Tx, ctx: Ctx, doc: SchemaDoc, opts: { prune: bool
   }
 
   await runPipelines(tx, ctx, run, doc, opts);
+  // Layouts last: they name fields and objects the steps above may have just made.
+  for (const o of doc.objects ?? []) {
+    if (o.layout === undefined) continue;
+    const path = `objects.${o.name}.layout`;
+    if (opts.layouts === false) {
+      run.notes.push(`${path}: record page layouts in a pack are not applied yet; set it with crm schema apply or the layout tools`);
+      continue;
+    }
+    if (o.layout === null) {
+      const before = await exportLayout(tx, await loadSchema(tx), getObject(await loadSchema(tx), o.name));
+      if (before) {
+        await at(path, () => resetLayout(tx, ctx, o.name));
+        pushAll(run, [{ change: "layout_reset", object: o.name, after: "the default page" }]);
+      }
+      continue;
+    }
+    const out = await at(path, () => setLayout(tx, ctx, o.name, { layout: o.layout, note: "Applied from a schema document" }));
+    if (out.published) pushAll(run, [{ change: "layout_published", object: o.name, after: out.changes.length ? out.changes : ["Set the layout"], ...(out.warnings.length ? { warning: out.warnings.join(" ") } : {}) }]);
+  }
   return run;
 }
 
@@ -481,7 +511,7 @@ async function runPipelines(tx: Tx, ctx: Ctx, run: Run, doc: SchemaDoc, opts: { 
  */
 export async function runSchemaDocument(tx: Tx, ctx: Ctx, doc: SchemaDoc, check: () => void): Promise<Pick<Run, "changes" | "unsupported" | "notes">> {
   checkNames(doc);
-  const run = await runDocument(tx, ctx, doc, { prune: false, check });
+  const run = await runDocument(tx, ctx, doc, { prune: false, check, layouts: false });
   return { changes: run.changes, unsupported: run.unsupported, notes: run.notes };
 }
 

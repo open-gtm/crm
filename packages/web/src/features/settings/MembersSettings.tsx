@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { LogOut, MoreHorizontal, Plug, Plus, ShieldPlus, UserCheck, UserX } from "lucide-react";
-import { useState } from "react";
+import { LogOut, MoreHorizontal, Plug, Plus, Search, UserCheck, UserX } from "lucide-react";
+import { useMemo, useState } from "react";
 import { ProblemView } from "@/components/feedback";
 import { Avatar } from "@/components/pickers";
 import { Button } from "@/components/ui/button";
@@ -11,9 +11,11 @@ import { useToast } from "@/components/ui/toast";
 import { useApi } from "@/lib/api/context";
 import { asProblem } from "@/lib/api/problem";
 import type { MemberUser, Members, Role, ServiceAccount, SessionRow } from "@/lib/api/types";
-import { formatDateTime, formatRelative } from "@/lib/format";
+import { formatDateTime, formatRelative, pluralize } from "@/lib/format";
 import { useSession } from "@/lib/session";
 import { describeAgent } from "./AccountSettings";
+import { filterMembers, type MemberFilter } from "./people/memberFilter";
+import { PeopleTabs } from "./people/PeopleTabs";
 import { AppsList } from "./ConnectedApps";
 import { Section, SimpleTable, useAdmin } from "./SettingsLayout";
 
@@ -38,6 +40,7 @@ export function MembersSettings() {
   const [sessionsOf, setSessionsOf] = useState<MemberUser | null>(null);
   const [appsOf, setAppsOf] = useState<MemberUser | null>(null);
   const [disabling, setDisabling] = useState<MemberUser | null>(null);
+  const [filter, setFilter] = useState<MemberFilter>({ search: "", role: "", status: "" });
   const refresh = () => qc.invalidateQueries({ queryKey: ["admin", "members"] });
   const update = useMutation({
     mutationFn: ({ id, body }: { id: string; body: { role?: string; active?: boolean } }) => api.patch(`/v1/members/${encodeURIComponent(id)}`, body),
@@ -51,57 +54,87 @@ export function MembersSettings() {
   const roleOptions = (roles.data?.data ?? []).filter((r) => !r.archived_at);
   const setOptions = (sets.data?.data ?? []).filter((r) => !r.archived_at);
   const setName = (key: string) => setOptions.find((x) => x.key === key)?.name ?? key;
-  /** The sets a member holds, as a button that opens the dialog to change them (plain text for yourself: nobody changes their own). */
+  /** The sets a member holds as pills, inside a button that opens the dialog to change them (plain pills for yourself: nobody changes their own). */
   const setsCell = (m: MemberUser | ServiceAccount, kind: SetsTarget["kind"], locked: boolean) => {
     const held = m.permission_sets ?? [];
     const text = held.length ? held.map(setName).join(", ") : "None";
-    return locked ? <span className="text-sm text-muted">{text}</span> : (
-      <Button size="sm" variant="ghost" aria-label={`Permission sets of ${m.name}: ${text}`} onClick={() => setSetsOf({ id: m.id, name: m.name, permission_sets: held, kind })}>
-        <ShieldPlus /> <span className="max-w-48 truncate">{text}</span>
-      </Button>
+    const pills = held.length ? <span className="flex flex-wrap gap-1">{held.map((k) => <Badge key={k}>{setName(k)}</Badge>)}</span> : <span className="text-sm text-muted">None</span>;
+    return locked ? <div aria-label={`Permission sets: ${text}`} role="group">{pills}</div> : (
+      <button type="button" aria-label={`Permission sets of ${m.name}: ${text}`} onClick={() => setSetsOf({ id: m.id, name: m.name, permission_sets: held, kind })}
+        className="-mx-1.5 rounded-md px-1.5 py-1 text-left hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-focus">
+        {pills}
+      </button>
     );
   };
+  const users = useMemo(() => members.data?.data.users ?? [], [members.data]);
+  const shown = useMemo(() => filterMembers(users, filter), [users, filter]);
+  // The role filter offers the roles members actually hold, so it never lists a role nobody has.
+  const heldRoles = useMemo(() => [...new Map(users.map((m) => [m.role, m.role_name])).entries()], [users]);
+  const filtered = filter.search.trim() !== "" || filter.role !== "" || filter.status !== "";
   return (
     <>
+      <PeopleTabs current="members" />
       <Section title="Members" description="People who can sign in to this workspace. Service accounts (for integrations) are listed below."
         actions={<Button size="sm" variant="primary" onClick={() => setAdding(true)}><Plus /> Add member</Button>}>
         {members.isPending ? <Skeleton className="h-24" /> : members.error ? <ProblemView error={members.error} onRetry={() => members.refetch()} compact /> : (
-          <SimpleTable label="Members" head={["Member", "Role", "Permission sets", "Sign-in", "Status", ""]}>
-            {members.data.data.users.map((m) => {
-              const self = m.id === s.member.id;
-              return (
-                <tr key={m.id}>
-                  <td className="px-4 py-2"><div className="flex items-center gap-2"><Avatar name={m.name} className="size-7 text-xs" /><div className="min-w-0"><p className="truncate font-medium">{m.name}{self ? <span className="text-subtle"> (you)</span> : null}</p><p className="truncate text-sm text-muted">{m.email}</p></div></div></td>
-                  <td className="px-4 py-2">
-                    <NativeSelect aria-label={`Role of ${m.name}`} className="h-7 w-40" value={m.role} disabled={self || !m.active || update.isPending}
-                      onChange={(e) => update.mutate({ id: m.id, body: { role: e.target.value } })}>
-                      {roleOptions.some((r) => r.key === m.role) ? null : <option value={m.role}>{m.role_name}</option>}
-                      {roleOptions.map((r) => <option key={r.id} value={r.key}>{r.name}</option>)}
-                    </NativeSelect>
-                  </td>
-                  <td className="px-4 py-2">{setsCell(m, "members", self || !m.active)}</td>
-                  <td className="px-4 py-2 text-sm text-muted">
-                    {m.sign_in?.last_sign_in_at ? `Last ${formatRelative(m.sign_in.last_sign_in_at)}` : "Never signed in"}
-                    {m.sign_in ? <span className="block">{[m.sign_in.has_password && "password", m.sign_in.sso_linked && "SSO", `${m.sign_in.active_sessions} session${m.sign_in.active_sessions === 1 ? "" : "s"}`].filter(Boolean).join(" · ")}</span> : null}
-                  </td>
-                  <td className="px-4 py-2">{m.active ? <Badge tone="success">Active</Badge> : <Badge>Disabled</Badge>}</td>
-                  <td className="px-4 py-2 text-right">
-                    {self ? null : (
-                      <Menu>
-                        <MenuTrigger asChild><Button size="icon-sm" variant="subtle" aria-label={`Actions for ${m.name}`}><MoreHorizontal /></Button></MenuTrigger>
-                        <MenuContent align="end">
-                          <MenuItem onSelect={() => setSessionsOf(m)}><LogOut /> Sessions…</MenuItem>
-                          <MenuItem onSelect={() => setAppsOf(m)}><Plug /> Connected apps…</MenuItem>
-                          {m.active ? <MenuItem danger onSelect={() => setDisabling(m)}><UserX /> Disable…</MenuItem>
-                            : <MenuItem onSelect={() => update.mutate({ id: m.id, body: { active: true } })}><UserCheck /> Re-enable</MenuItem>}
-                        </MenuContent>
-                      </Menu>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-          </SimpleTable>
+          <>
+            {/* mb-7, not mb-3: the table below pulls itself up by the section padding (-my-4). */}
+            <div className="mb-7 flex flex-wrap items-center gap-3">
+              <div className="relative min-w-48 flex-1 sm:max-w-xs">
+                <Search aria-hidden className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-subtle" />
+                <Input aria-label="Search members" type="search" placeholder="Search name or email" className="pl-8" value={filter.search} onChange={(e) => setFilter({ ...filter, search: e.target.value })} />
+              </div>
+              <NativeSelect aria-label="Filter by role" className="w-44" value={filter.role} onChange={(e) => setFilter({ ...filter, role: e.target.value })}>
+                <option value="">All roles</option>
+                {heldRoles.map(([key, name]) => <option key={key} value={key}>{name}</option>)}
+              </NativeSelect>
+              <NativeSelect aria-label="Filter by status" className="w-36" value={filter.status} onChange={(e) => setFilter({ ...filter, status: e.target.value as MemberFilter["status"] })}>
+                <option value="">Any status</option>
+                <option value="active">Active</option>
+                <option value="disabled">Disabled</option>
+              </NativeSelect>
+              <p className="ml-auto text-sm text-muted" aria-live="polite">{pluralize(shown.length, "member", "members")}{filtered ? ` of ${users.length}` : ""}</p>
+            </div>
+            <SimpleTable label="Members" head={["Member", "Role", "Permission sets", "Sign-in", "Last signed in", "Status", ""]}>
+              {shown.length === 0 ? <tr><td colSpan={7} className="px-4 py-6 text-center text-base text-muted">No members match.</td></tr> : null}
+              {shown.map((m) => {
+                const self = m.id === s.member.id;
+                return (
+                  <tr key={m.id}>
+                    <td className="px-4 py-2"><div className="flex items-center gap-2"><Avatar name={m.name} className="size-7 text-xs" /><div className="min-w-0"><p className="truncate font-medium">{m.name}{self ? <span className="text-subtle"> (you)</span> : null}</p><p className="truncate text-sm text-muted">{m.email}</p></div></div></td>
+                    <td className="px-4 py-2">
+                      <NativeSelect aria-label={`Role of ${m.name}`} className="h-7 w-40" value={m.role} disabled={self || !m.active || update.isPending}
+                        onChange={(e) => update.mutate({ id: m.id, body: { role: e.target.value } })}>
+                        {roleOptions.some((r) => r.key === m.role) ? null : <option value={m.role}>{m.role_name}</option>}
+                        {roleOptions.map((r) => <option key={r.id} value={r.key}>{r.name}</option>)}
+                      </NativeSelect>
+                    </td>
+                    <td className="px-4 py-2">{setsCell(m, "members", self || !m.active)}</td>
+                    <td className="px-4 py-2 text-sm text-muted">
+                      {m.sign_in ? [m.sign_in.has_password && "Password", m.sign_in.sso_linked && "SSO", pluralize(m.sign_in.active_sessions, "session", "sessions")].filter(Boolean).join(" · ") : ""}
+                    </td>
+                    <td className="px-4 py-2 text-sm text-muted">
+                      {m.sign_in?.last_sign_in_at ? <span title={formatDateTime(m.sign_in.last_sign_in_at)}>{formatRelative(m.sign_in.last_sign_in_at)}</span> : "Never"}
+                    </td>
+                    <td className="px-4 py-2">{m.active ? <Badge tone="success">Active</Badge> : <Badge>Disabled</Badge>}</td>
+                    <td className="px-4 py-2 text-right">
+                      {self ? null : (
+                        <Menu>
+                          <MenuTrigger asChild><Button size="icon-sm" variant="subtle" aria-label={`Actions for ${m.name}`}><MoreHorizontal /></Button></MenuTrigger>
+                          <MenuContent align="end">
+                            <MenuItem onSelect={() => setSessionsOf(m)}><LogOut /> Sessions…</MenuItem>
+                            <MenuItem onSelect={() => setAppsOf(m)}><Plug /> Connected apps…</MenuItem>
+                            {m.active ? <MenuItem danger onSelect={() => setDisabling(m)}><UserX /> Disable…</MenuItem>
+                              : <MenuItem onSelect={() => update.mutate({ id: m.id, body: { active: true } })}><UserCheck /> Re-enable</MenuItem>}
+                          </MenuContent>
+                        </Menu>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </SimpleTable>
+          </>
         )}
       </Section>
       {members.data?.data.service_accounts.length ? (

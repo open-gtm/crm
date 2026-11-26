@@ -1,9 +1,11 @@
+import { Link } from "@tanstack/react-router";
 import { ArrowDown, ArrowDownUp, ArrowUp, CalendarDays, Columns3, Kanban, Plus, RotateCcw, Table2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { NativeSelect } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/misc";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/overlays";
 import type { FieldMeta, ObjectMeta, Sort } from "@/lib/api/types";
+import { cn } from "@/lib/cn";
 import { plainLabel } from "@/lib/text";
 import { canSort, sortableParts, visibleFields } from "@/meta/fields";
 
@@ -94,28 +96,45 @@ export function SortMenu({ meta, sort, onChange }: { meta: ObjectMeta; sort: Sor
 
 export type ListLayout = "table" | "board" | "calendar";
 
+const segment = "press inline-flex h-7 items-center gap-1.5 rounded-sm px-2.5 text-sm font-medium focus-visible:outline-2 focus-visible:outline-focus [&_svg]:size-3.5";
+const segmentOn = "bg-surface text-fg shadow-sm";
+const segmentOff = "text-muted hover:text-fg";
+
 /**
- * How the list is shown: a table (optionally grouped by a field), a board with a column per value of a
- * select or status field, or a calendar by a date field. A layout the object has no field for isn't offered.
+ * Table, Board and Calendar as one segmented control in the list's header. A layout the object has no
+ * field for isn't offered. Deals have their own board page (pipeline stages, totals, drag to move), so
+ * their Board choice is a link to it, carrying the list's filter.
  */
-export function LayoutMenu({ layout, onLayout, boardBy, boardFields, onBoardBy, dateBy, dateFields, onDateBy, groupBy, groupFields, onGroupBy }: {
-  layout: ListLayout; onLayout: (l: ListLayout) => void;
+export function LayoutSwitch({ layout, onLayout, hasBoard, hasCalendar, boardLink }: {
+  layout: ListLayout; onLayout: (l: ListLayout) => void; hasBoard: boolean; hasCalendar: boolean;
+  /** Where the Board choice goes instead of switching this list's layout (the deals board). */
+  boardLink?: { filter?: unknown };
+}) {
+  const options: { key: ListLayout; label: string; icon: React.ReactNode; show: boolean }[] = [
+    { key: "table", label: "Table", icon: <Table2 />, show: true },
+    { key: "board", label: "Board", icon: <Kanban />, show: hasBoard || Boolean(boardLink) },
+    { key: "calendar", label: "Calendar", icon: <CalendarDays />, show: hasCalendar },
+  ];
+  return (
+    <div role="group" aria-label="Show as" className="inline-flex gap-0.5 rounded-md bg-surface-3 p-0.5">
+      {options.filter((o) => o.show).map((o) => o.key === "board" && boardLink ? (
+        <Link key={o.key} to="/board" search={(boardLink.filter !== undefined ? { filter: boardLink.filter } : {}) as never} className={cn(segment, segmentOff)}>{o.icon} {o.label}</Link>
+      ) : (
+        <button key={o.key} type="button" aria-pressed={layout === o.key} onClick={() => onLayout(o.key)} className={cn(segment, layout === o.key ? segmentOn : segmentOff)}>{o.icon} {o.label}</button>
+      ))}
+    </div>
+  );
+}
+
+/** What goes with the layout: the field a board's columns or a calendar's days come from, or a table's grouping. */
+export function LayoutOptions({ layout, boardBy, boardFields, onBoardBy, dateBy, dateFields, onDateBy, groupBy, groupFields, onGroupBy }: {
+  layout: ListLayout;
   boardBy: FieldMeta | undefined; boardFields: FieldMeta[]; onBoardBy: (name: string) => void;
   dateBy: FieldMeta | undefined; dateFields: FieldMeta[]; onDateBy: (name: string) => void;
   groupBy: FieldMeta | undefined; groupFields: FieldMeta[]; onGroupBy: (name: string | null) => void;
 }) {
-  const options: { key: ListLayout; label: string; icon: React.ReactNode; show: boolean }[] = [
-    { key: "table", label: "Table", icon: <Table2 />, show: true },
-    { key: "board", label: "Board", icon: <Kanban />, show: boardFields.length > 0 },
-    { key: "calendar", label: "Calendar", icon: <CalendarDays />, show: dateFields.length > 0 },
-  ];
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <div role="group" aria-label="Show as" className="flex items-center">
-        {options.filter((o) => o.show).map((o) => (
-          <Button key={o.key} size="sm" variant={layout === o.key ? undefined : "ghost"} aria-pressed={layout === o.key} onClick={() => onLayout(o.key)}>{o.icon} {o.label}</Button>
-        ))}
-      </div>
+    <>
       {layout === "board" && boardFields.length > 1 ? (
         <NativeSelect aria-label="Board columns" className="h-7 w-40 text-sm" value={boardBy?.name ?? ""} onChange={(e) => onBoardBy(e.target.value)}>
           {boardFields.map((f) => <option key={f.name} value={f.name}>By {plainLabel(f.label).toLowerCase()}</option>)}
@@ -132,6 +151,18 @@ export function LayoutMenu({ layout, onLayout, boardBy, boardFields, onBoardBy, 
           {groupFields.map((f) => <option key={f.name} value={f.name}>Group by {plainLabel(f.label).toLowerCase()}</option>)}
         </NativeSelect>
       ) : null}
+    </>
+  );
+}
+
+/** The same Table, Board and Calendar choices on the deals board page, where Board is this page and the others are links back to the deals list. */
+export function DealsLayoutLinks({ filter }: { filter?: unknown }) {
+  const search = (extra: Record<string, unknown>) => ({ ...(filter !== undefined ? { filter } : {}), ...extra }) as never;
+  return (
+    <div role="group" aria-label="Show as" className="inline-flex gap-0.5 rounded-md bg-surface-3 p-0.5">
+      <Link to="/o/$object" params={{ object: "deal" }} search={search({})} className={cn(segment, segmentOff)}><Table2 /> Table</Link>
+      <span aria-current="page" className={cn(segment, segmentOn)}><Kanban /> Board</span>
+      <Link to="/o/$object" params={{ object: "deal" }} search={search({ layout: "calendar" })} className={cn(segment, segmentOff)}><CalendarDays /> Calendar</Link>
     </div>
   );
 }

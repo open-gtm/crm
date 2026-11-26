@@ -27,11 +27,14 @@ export interface Automation {
   paused_at?: string | null; paused_reason?: string | null; consecutive_failures?: number;
   trigger: { type: "event" | "schedule" | "manual" | (string & {}); event?: string; object?: string; [k: string]: unknown };
   hourly_cap: number; run_roles: string[]; next_run_at?: string | null; version: number; updated_at?: string;
+  /** The filter in the query language, or null; and the steps (secret header values are always null). */
+  condition?: unknown; actions?: Record<string, unknown>[];
 }
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "skipped";
 export interface AutomationRun {
   id: string; trigger: string; status: RunStatus; reason: string | null; cap?: string | null; failure?: "data" | "target" | "config" | null;
   started_at: string; finished_at?: string | null;
+  record_id?: string | null; event_id?: string | null; scheduled_for?: string | null; requested_by?: string | null; results?: Record<string, unknown>[];
 }
 
 export interface InstalledPack {
@@ -118,6 +121,24 @@ export interface FieldMeta {
   min?: number;
   /** percent: "percent"; duration: "seconds". */
   unit?: string;
+  /** Where the field comes from: built in, made in this workspace, or made by an installed schema pack. */
+  origin?: SchemaOrigin;
+  pack?: string;
+  /** The field's latest schema change. Only for callers with audit:read, and only once the field has been changed. */
+  last_change?: SchemaLastChange;
+}
+
+export type SchemaOrigin = "standard" | "custom" | "pack";
+
+/** Describe's `last_change`: what last changed a field or object, through which surface, app or key, and by whom. */
+export interface SchemaLastChange {
+  change: string;
+  changed_at: string;
+  surface: string;
+  via: string | null;
+  pack: string | null;
+  actor: string;
+  version: number;
 }
 
 export interface ObjectAccess { read: boolean; write: boolean; archive: boolean }
@@ -125,6 +146,7 @@ export interface ObjectAccess { read: boolean; write: boolean; archive: boolean 
 export interface ObjectSummary {
   name: string; label: string; plural_label: string; description?: string; id_prefix: string; standard: boolean;
   module?: string; owned: boolean; display_field?: string; hidden?: boolean; field_count: number; access: ObjectAccess;
+  origin?: SchemaOrigin; pack?: string;
 }
 
 export interface Stage { id: string; name: string; category: "open" | "won" | "lost"; default_probability: number | null }
@@ -140,6 +162,22 @@ export interface ObjectMeta extends Omit<ObjectSummary, "field_count" | "hidden"
   pipelines?: Pipeline[];
   activity_types?: ActivityType[];
   virtual_fields?: { name: string; type: string; description: string }[];
+  last_change?: SchemaLastChange;
+}
+
+/** One row of GET /v1/schema/changes (audit:read): a change to the schema, newest first. before/after are open JSON. */
+export interface SchemaChangeRow {
+  version: number; changed_at: string; change: string; object: string | null; field: string | null; surface: string;
+  via: string | null; pack: string | null; actor: string; before?: unknown; after?: unknown;
+}
+
+/** One object of GET /v1/schema: its record count (capped at 10,000; null when the caller can't read the object). */
+export interface SchemaSummaryObject { name: string; records: number | null; records_capped?: boolean }
+
+/** The answer to a schema write: with dry_run true nothing was written. A change's `warning` says what to know first. */
+export interface SchemaChangeResult {
+  dry_run: boolean; schema_version: number;
+  changes: { change: string; object: string; field?: string; before?: unknown; after?: unknown; warning?: string }[];
 }
 
 export interface RelatedRef { id: string; object: string | null; display_name: string | null }
@@ -236,4 +274,27 @@ export interface Delivery {
 export interface AuditEntry {
   seq: number; at: string; action: string; surface: string; actor: string; key: string | null; object: string | null;
   record_id: string | null; request_id: string | null; details: unknown; sealed: boolean;
+}
+
+/** One event of GET /v1/events (the part Home reads). `via` is the connected app or key by name, when the API says. */
+export interface EventRow {
+  id: string; type: string; occurred_at: string; object: string | null; record_id: string | null;
+  actor: { type: string; id: string | null; surface: string; via?: string | null };
+  data: Record<string, unknown>;
+}
+/** GET /v1/events/summary (needs audit:read): changes made through API keys, the CLI and MCP, per source. */
+export interface EventsSummary {
+  since: string;
+  sources: { actor: string | null; surface: string; via: string | null; changes: number; records: number; last_at: string }[];
+}
+/** GET /v1/automations/runs/summary: runs in the last hours, by status and per automation. */
+export interface RunsSummary {
+  since: string;
+  totals: { succeeded: number; failed: number; skipped: number; queued: number; running: number };
+  automations: { id: string; name: string; succeeded: number; failed: number; skipped: number; open: number; last_failed_at: string | null; last_failure: string | null }[];
+}
+/** One row of GET /v1/schema/changes (needs audit:read). */
+export interface SchemaChange {
+  version: number; changed_at: string; change: string; object: string | null; field: string | null; surface: string;
+  via: string | null; pack: string | null; actor: string;
 }
