@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { assertRoom } from "./limits.js";
 import { db, type Tx } from "../db/pool.js";
 import { forbidden, notFound, unprocessable } from "../lib/errors.js";
 import { safeEqual, sha256 } from "../lib/crypto.js";
@@ -137,7 +138,7 @@ export interface CreateKeyInput {
  * and, except at bootstrap, must be scopes the calling key itself has: a key can't mint a broader one.
  * `test` keys are labelled as such but reach the same live data; there is no sandbox.
  */
-export async function createApiKey(tx: Tx, ctx: Ctx, input: CreateKeyInput, opts: { bootstrap?: boolean } = {}) {
+export async function createApiKey(tx: Tx, ctx: Ctx, input: CreateKeyInput, opts: { bootstrap?: boolean; replacing?: boolean } = {}) {
   if (!input.name?.trim()) throw unprocessable("name is required");
   const scopes = [...new Set(input.scopes)];
   if (scopes.length === 0 || scopes.some((s) => !ALL_SCOPES.includes(s))) throw unprocessable(`scopes must be a non-empty subset of: ${ALL_SCOPES.join(", ")}`);
@@ -168,6 +169,8 @@ export async function createApiKey(tx: Tx, ctx: Ctx, input: CreateKeyInput, opts
   const usable = await usablePermissions(tx, ctx, owner);
   const over = scopes.filter((s) => !roleCanUseScope(usable, s));
   if (over.length) throw forbidden(`The owner's role (${owner.role}) does not allow: ${over.join(", ")}`);
+  // The two keys a new workspace starts with are part of it; a rotation's replacement stands in for the key it retires.
+  if (!opts.bootstrap && !opts.replacing) await assertRoom(tx, ctx.tenantId, "api_keys");
   const env = input.environment ?? "live";
   const lookup = base62(12);
   const secret = `hlcrm_${env}_${lookup}${base62(40)}`;
@@ -217,7 +220,7 @@ export async function rotateApiKey(tx: Tx, ctx: Ctx, publicId: string, overlapHo
   const created = await createApiKey(tx, ctx, {
     name: old.name, scopes: old.scopes, environment: old.environment,
     owner: encodeId(old.owner_type === "user" ? "usr" : "svc", old.owner_id),
-  });
+  }, { replacing: true });
   const hours = Math.min(Math.max(overlapHours, 0), 168);
   await expireKeyWithin(tx, old.id, hours);
   // The replacement keeps the old key's expiry: rotating must not extend a key's intended lifetime.

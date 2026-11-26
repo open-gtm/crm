@@ -2,8 +2,8 @@
 @import "./tokens.css";
 
 @custom-variant dark (&:where(.dark, .dark *));
-
-/* Utilities point at the tokens (tokens.css), and Tailwind's own palette is turned off so nothing drifts from them. */
+/* Hover styles apply only where the device can hover: Tailwind wraps every hover: utility in
+   @media (hover: hover), so a touch screen doesn't leave them stuck on after a tap. */
 @theme inline {
   --color-*: initial;
   --color-transparent: transparent;
@@ -103,6 +103,13 @@
 }
 
 @layer components {
+  /* A press gives way a little: feedback that the button took it. A link-styled or disabled button doesn't. */
+  .press {
+    transition: transform 120ms var(--hl-ease-out), background-color 120ms var(--hl-ease-out), color 120ms var(--hl-ease-out), opacity 120ms var(--hl-ease-out);
+  }
+  .press:active:not(:disabled) {
+    transform: scale(0.97);
+  }
   .tabular {
     font-variant-numeric: tabular-nums;
   }
@@ -144,8 +151,8 @@
 }
 
 .animate-fade-in {
-  animation: hl-fade-in 120ms ease-out;
+  animation: hl-fade-in 120ms var(--hl-ease-out);
 }
 .animate-pop-in {
-  animation: hl-pop-in 140ms ease-out;
+  animation: hl-pop-in 140ms var(--hl-ease-out);
 }

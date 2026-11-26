@@ -59,6 +59,8 @@ const FindRecords = z.object({
 const UpsertRecord = z.object({ ...Base, type: z.literal("upsert_record"), object: z.string(), key: z.string(), values: TemplateValues }).strict();
 const HttpRequest = z.object({
   ...Base, type: z.literal("http_request"), method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]), url: z.string().min(1).max(2000),
+  /** The key of a connection (ADR 0016): `url` is then a path under its base URL, and the connection adds the credential header. */
+  connection: z.string().max(40).optional(),
   headers: z.record(z.string(), z.string().max(2000)).optional(),
   /** Write-only: values are encrypted with the workspace key and returned as null; null on update keeps the stored value. */
   secret_headers: z.record(z.string(), z.string().max(4000).nullable()).optional(),
@@ -81,6 +83,8 @@ const ForEach = z.object({
   ...Base, type: z.literal("for_each"),
   over: StepId.optional().describe("id of an earlier find_records step"),
   query: Query.optional().describe("Or a query to iterate over directly"),
+  /** Or a list from an HTTP reply: one placeholder, such as "{{steps.fetch.json.results}}". The body then sees each element as {{item.…}}, and has no current record. */
+  items: z.string().max(300).optional(),
   steps: z.array(Inner).min(1).max(LIMITS.innerSteps),
 }).strict();
 export const StepSchema = z.discriminatedUnion("type", [SendWebhook, UpdateRecord, CreateRecord, Notify, FindRecords, UpsertRecord, HttpRequest, SendEmail, Stop, ForEach]);
@@ -192,3 +196,8 @@ export async function conditionMatches(tx: Tx, schema: Schema, obj: ObjectMeta, 
 
 export type { Schedule };
 export const isHeaderName = (s: string) => HEADER_NAME.test(s);
+
+const FORBIDDEN_HEADERS = new Set(["host", "content-length", "content-type", "transfer-encoding", "connection", "keep-alive", "upgrade", "te", "trailer",
+  "expect", "proxy-authorization", "proxy-connection"]);
+/** Headers an http_request step, or a connection, may set: not the ones the request itself decides, nor hlcrm-… ones. */
+export const headerAllowed = (name: string) => !FORBIDDEN_HEADERS.has(name.toLowerCase()) && !name.toLowerCase().startsWith("hlcrm-");

@@ -1,4 +1,5 @@
-import { createHmac, randomBytes } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { assertRoom } from "./limits.js";
 import { config } from "../config.js";
 import type { Tx } from "../db/pool.js";
 import { badRequest, conflict, forbidden, notFound, unprocessable } from "../lib/errors.js";
@@ -10,7 +11,7 @@ import { can, withRestricted as grantRestricted, without, type Ctx } from "./con
 import { decryptValue, encryptValue } from "./encryption.js";
 import type { EventRow } from "./queries/events.js";
 import {
-  abandonDeliveriesOf, archiveWebhookRow, countLiveWebhooks, countWebhookFailure, deliveriesOf, deliveryById, insertDelivery, insertReplayDelivery,
+  abandonDeliveriesOf, archiveWebhookRow, countWebhookFailure, deliveriesOf, deliveryById, insertDelivery, insertReplayDelivery,
   insertTestDelivery, insertWebhook, liveWebhooks, markDeliveryFailed, markDeliverySucceeded, pendingTestDeliveries, resetWebhookFailures,
   setWebhookSecret, updateWebhookSettings, webhookById, type DeliveryRow, type WebhookRow,
 } from "./queries/webhooks.js";
@@ -43,8 +44,12 @@ export function sign(secret: string, msgId: string, timestamp: number, body: str
 export function verify(secret: string, headers: { id: string; timestamp: string; signature: string }, body: string, toleranceS = 300): boolean {
   const ts = Number(headers.timestamp);
   if (!Number.isFinite(ts) || Math.abs(Date.now() / 1000 - ts) > toleranceS) return false;
-  const expected = sign(secret, headers.id, ts, body);
-  return headers.signature.split(" ").some((s) => s === expected);
+  const expected = Buffer.from(sign(secret, headers.id, ts, body));
+  // Constant-time, so how much of a guessed signature matched can't be measured.
+  return headers.signature.split(" ").some((s) => {
+    const given = Buffer.from(s);
+    return given.length === expected.length && timingSafeEqual(given, expected);
+  });
 }
 
 function publicWebhook(w: WebhookRow) {
@@ -107,8 +112,7 @@ export async function createWebhook(tx: Tx, ctx: Ctx, input: WebhookInput) {
   const url = validateUrl(input.url);
   const events = validateEvents(input.events ?? []);
   if (input.include_restricted) assertMayGrantRestricted(ctx);
-  const count = await countLiveWebhooks(tx);
-  if ((count ?? 0) >= 50) throw conflict("A workspace can have at most 50 webhooks");
+  await assertRoom(tx, ctx.tenantId, "webhooks");
   const id = uuidv7();
   const secret = newSecret();
   await insertWebhook(tx, { tenantId: ctx.tenantId, id, url, description: input.description ?? null, events, includeRestricted: input.include_restricted ?? false,
@@ -214,13 +218,24 @@ function visibleData(ctx: Ctx | undefined, schema: Awaited<ReturnType<typeof loa
   return out;
 }
 
+/**
+ * The app or key an event came through is a name its owner chose. It is shown to the member the key or app
+ * acts for and to those who read the audit log (where the key itself is named); to others the surface is enough.
+ * Never part of a webhook payload (no caller).
+ */
+function viaFor(ctx: Ctx | undefined, e: EventRow): { via?: string | null } {
+  if (!ctx || e.via === undefined) return {};
+  const own = e.actor_id !== null && ctx.actor.id === e.actor_id;
+  return own || can(ctx, "audit:read") ? { via: e.via } : {};
+}
+
 export async function publicEvent(tx: Tx, e: EventRow, ctx?: Ctx) {
   const schema = await loadSchema(tx);
   const prefix = e.object_type ? schema.objects.get(e.object_type)?.id_prefix : undefined;
   return {
     id: encodeId("evt", e.id), type: e.type, occurred_at: e.occurred_at.toISOString(),
     object: e.object_type, record_id: e.record_id && prefix ? encodeId(prefix, e.record_id) : null,
-    actor: { type: e.actor_type, id: actorRef(e.actor_type, e.actor_id), surface: e.surface },
+    actor: { type: e.actor_type, id: actorRef(e.actor_type, e.actor_id), surface: e.surface, ...viaFor(ctx, e) },
     causation_depth: e.causation_depth,
     automation_id: e.automation_id ? encodeId("auto", e.automation_id) : null,
     data: visibleData(ctx, schema, e),

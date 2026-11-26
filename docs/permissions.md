@@ -24,7 +24,7 @@ Permissions are in two areas. **Objects and fields** (`records:read`, `records:w
 | `records:write` | Create and update records and run sales operations (default for every object) |
 | `records:archive` | Archive and restore records, merge duplicates, bulk archive (default for every object) |
 | `restricted:read` | See the values of restricted fields |
-| `schema:manage` | Change objects, fields, pipelines and modules |
+| `schema:manage` | Change objects, fields, pipelines and modules. Also erase a person's records for good ([data-model.md](data-model.md#erasing-a-persons-records)): there is no separate permission for that yet |
 | `members:manage` | Add, change and disable members and service accounts; list and end their browser sessions and unlink their single sign-on (an owner's only by an owner) |
 | `roles:manage` | Create and change roles and permission sets |
 | `keys:manage` | Create, rotate and revoke API keys for other members, and list all keys |
@@ -33,6 +33,7 @@ Permissions are in two areas. **Objects and fields** (`records:read`, `records:w
 | `alerts:manage` | Manage workspace alert rules |
 | `audit:read` | Read the audit log, schema history and access review |
 | `views:manage` | Create, change and delete views shared with the workspace (personal views need only read access to their object) |
+| `connections:manage` | Create, change, test and archive [connections](connections.md): stored credentials that automations use to call other systems. Using one in a step needs `automations:manage`, not this |
 
 Anyone can manage their own keys without `keys:manage`, within the limits below.
 
@@ -57,7 +58,7 @@ These rules are about roles, because roles are the boundary between people. Key 
 | `ops:read` | `records:read` |
 | `ops:write` | `records:read`, `records:write`, `records:archive`, `views:manage` |
 | `restricted:read` | `restricted:read` |
-| `admin` | `schema:manage`, `members:manage`, `roles:manage`, `keys:manage`, `webhooks:manage`, `automations:manage`, `alerts:manage`, `audit:read`, `views:manage` |
+| `admin` | `schema:manage`, `members:manage`, `roles:manage`, `keys:manage`, `webhooks:manage`, `automations:manage`, `alerts:manage`, `audit:read`, `views:manage`, `connections:manage` |
 
 Example: a member with the `member` role and a key with scopes `["ops:read"]` can read records but not write them. The same member with an `admin`-scoped key still cannot change the schema, because the role lacks `schema:manage`.
 
@@ -221,7 +222,7 @@ Route checks admit a key that has the needed access on at least one object; the 
   - `log_activity`: write on activity, read on every record in `related_to`.
   Bookkeeping the platform does after a change is not checked as the caller's write: a contact's lifecycle stage moving forward, history activities (`lead_converted`, `task_completed`), deal stage history, `last_activity_at`, account-contact links and a deal's probability from its stage.
 - **Copies.** When the platform copies a value from one record into another on a caller's behalf (a contact's account into a new lead, a lead's account into a deal, names into a default deal name), it copies only what the caller can read on the source; otherwise the copy is left empty. Platform-written activity subjects carry no record values (see History activities).
-- **Events.** `GET /v1/events` returns record events only for objects the key can read (filtered in SQL, so paging stays exact). Fields the key can't read are removed from `before` and `after`, a `deal.stage_changed` event loses its stage details when `deal.stage` is hidden, and an `alert.fired` event loses its title. Schema events (no record) are metadata and stay.
+- **Events.** `GET /v1/events` returns record events only for objects the key can read (filtered in SQL, so paging stays exact). Fields the key can't read are removed from `before` and `after`, a `deal.stage_changed` event loses its stage details when `deal.stage` is hidden, and an `alert.fired` event loses its title. Schema events (no record) are metadata and stay. The app or key an event came through (`actor.via`) is given on the caller's own events and to callers with `audit:read`.
 - **Schema.** Objects and fields are listed to anyone who can use the schema, with the caller's access: names are not data. Record counts in `GET /v1/schema` are given only for readable objects. The schema document (`GET /v1/schema/export`, `crm schema pull`) lists every object and field too, and adds `access` (as in `GET /v1/me/access`) when the key can't read, write and archive everything; plan and apply ignore it. Plan and apply need `schema:manage`, so they always run with unrestricted record access. Objects of a module that is turned off are left out of the document, as from `GET /v1/objects`.
 - **Export.** `GET /v1/objects/{object}/export` (CSV or NDJSON) refuses an object the key can't read with 403 before doing anything (no audit entry is written for a refusal). A field the key can't read has no column, rather than an empty one, and its values are in no row. Filters, sorts and relation paths go through the same check as listing. Relations to records on an object the key can't read are IDs only, and `related` names in NDJSON follow the reader's access. Every export that returns rows is audited as `<object>.exported`.
 - **Import.** `POST /v1/objects/{object}/import` checks everything before it reads a record, and refuses the whole request with 403, naming every column at once: write on the object (and read with an upsert key); write on every mapped field, so a column the key can't write must be mapped to `""`; read on the upsert key (matching on a field you can't read would show which values exist; a key you can read but not write still matches, and such rows can only update); read on a relation's target object, and on the field a relation is looked up by (`account.domain`). Owner lookups by member email need write on `owner`, like `assign_owner`. A lookup compares values as the field does (emails and domains ignore case, other unique fields are exact). Rows then go through the normal create and update, so every rule above applies to them, and their errors quote only the file's values. A cell holding `[restricted]` in a restricted field is left alone, so a redacted export imports back without overwriting values. For a key without `restricted:read`, a value in a restricted field always counts as a change (comparing it would confirm or refute a guess), so a dry run says "update" whatever the stored value is.

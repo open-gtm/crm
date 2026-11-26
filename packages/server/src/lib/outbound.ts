@@ -240,3 +240,16 @@ export async function safeRequest(rawUrl: string, opts: { method: "GET" | "POST"
     req.end(opts.body);
   });
 }
+
+/**
+ * The key a caller's address is counted under: an IPv6 address by its /64 (one subscriber's
+ * allocation, so a host can't rotate through it), an IPv4-mapped one as IPv4, anything else as is.
+ * `bits` 48 gives the IPv6 /48 a site gets; IPv4 stays per address.
+ */
+export function addressKey(addr: string, bits: 64 | 48 = 64): string {
+  if (isIP(addr) !== 6) return addr;
+  const h = hextets(addr);
+  if (!h) return addr;
+  if (h.slice(0, 5).every((n) => n === 0) && h[5] === 0xffff) return `${h[6]! >> 8}.${h[6]! & 255}.${h[7]! >> 8}.${h[7]! & 255}`;
+  return `${h.slice(0, bits / 16).map((n) => n.toString(16)).join(":")}::/${bits}`;
+}

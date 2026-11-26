@@ -828,7 +828,8 @@ describe("no route returns a hidden value", () => {
         resetRateLimiter();
         const res = await call(route.method, path, { key: m.key, body });
         // The write-side routes really ran (restored, previewed and grouped the sentinel-bearing records), rather than failing early.
-        if (o === "contact" && ["/restore", "/duplicates", "/merge_records", "/bulk_update", "/bulk_archive"].some((s) => route.path.endsWith(s))) {
+        // (A layout's own restore route is configuration, refused here for lack of schema:manage.)
+        if (o === "contact" && !route.path.includes("/layout/") && ["/restore", "/duplicates", "/merge_records", "/bulk_update", "/bulk_archive"].some((s) => route.path.endsWith(s))) {
           expect(res.status, `${key}: ${JSON.stringify(res.json).slice(0, 300)}`).toBe(200);
         }
         checked++;

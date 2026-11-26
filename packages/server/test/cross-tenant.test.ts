@@ -22,7 +22,7 @@ const bIds: Record<string, string> = {};
 
 /** Routes that take no record IDs anywhere: they can only ever see the caller's own workspace. */
 const NO_ID_ROUTES = new Set([
-  "GET /v1/me", "GET /v1/me/access", "GET /v1/workspace", "PATCH /v1/workspace/modules", "GET /v1/schema", "GET /v1/schema/changes",
+  "GET /v1/me", "GET /v1/me/access", "GET /v1/workspace", "GET /v1/workspace/usage", "PATCH /v1/workspace/modules", "GET /v1/schema", "GET /v1/schema/changes",
   "GET /v1/objects", "GET /v1/objects/:object", "POST /v1/objects", "PATCH /v1/objects/:object",
   "POST /v1/objects/:object/fields", "PATCH /v1/objects/:object/fields/:field", "POST /v1/objects/:object/fields/:field/archive",
   "GET /v1/pipelines", "POST /v1/pipelines", "GET /v1/objects/:object/records", "GET /v1/search", "GET /v1/me/tasks",
@@ -31,12 +31,17 @@ const NO_ID_ROUTES = new Set([
   "GET /v1/commerce-settings", "PATCH /v1/commerce-settings",
   // A record page's layout names an object and its fields, never an ID.
   "GET /v1/objects/:object/layout", "PUT /v1/objects/:object/layout", "DELETE /v1/objects/:object/layout",
-  "GET /v1/webhooks", "POST /v1/webhooks", "GET /v1/automations",
+  "GET /v1/objects/:object/layout/draft", "PUT /v1/objects/:object/layout/draft", "DELETE /v1/objects/:object/layout/draft",
+  "POST /v1/objects/:object/layout/publish", "GET /v1/objects/:object/layout/versions", "GET /v1/objects/:object/layout/versions/:version",
+  "POST /v1/objects/:object/layout/restore",
+  "GET /v1/webhooks", "POST /v1/webhooks", "GET /v1/automations", "GET /v1/events/summary", "GET /v1/automations/runs/summary", "GET /v1/connections", "POST /v1/connections",
   "GET /v1/me/notifications", "GET /v1/me/attention", "GET /v1/me/notification-preferences", "PATCH /v1/me/notification-preferences",
   "GET /v1/me/alerts", "GET /v1/alerts", "GET /v1/schema/export", "GET /v1/objects/:object/export",
   // The caller's own session and password, and this workspace's sign-in setting.
   "GET /v1/auth/session", "POST /v1/auth/sign-out", "GET /v1/auth/sessions", "POST /v1/auth/sessions/revoke-others",
   "POST /v1/auth/password", "DELETE /v1/auth/password", "DELETE /v1/auth/sso", "PATCH /v1/workspace/sign-in",
+  // Deleting the caller's own workspace (ADR 0020): it names the workspace by its name, never an ID.
+  "POST /v1/workspace/deletion", "DELETE /v1/workspace/deletion",
   // Views and preferences listed for the caller, and the caller's own workspace directory.
   "GET /v1/views", "GET /v1/objects/:object/views", "GET /v1/users", "GET /v1/me/preferences", "PUT /v1/me/preferences",
   "POST /v1/objects/:object/duplicates",
@@ -51,12 +56,14 @@ const NO_ID_ROUTES = new Set([
 
 /** Routes whose request bodies carry IDs; each has explicit cases below. */
 const BODY_ID_ROUTES = new Set([
-  "POST /v1/objects/:object/records", "POST /v1/objects/:object/records/batch", "POST /v1/query",
+  "POST /v1/objects/:object/layout/draft/undo", "POST /v1/objects/:object/layout/draft/review",
+  "POST /v1/objects/:object/records", "POST /v1/objects/:object/records/batch", "POST /v1/objects/:object/records/upsert", "POST /v1/query",
   "POST /v1/ops/capture_interest", "POST /v1/ops/convert_lead", "POST /v1/ops/move_deal_stage", "POST /v1/ops/assign_owner",
   "POST /v1/ops/log_activity", "POST /v1/ops/create_quote", "POST /v1/ops/send_quote", "POST /v1/ops/accept_quote", "POST /v1/ops/revise_quote", "POST /v1/api-keys", "POST /v1/members", "POST /v1/service-accounts", "POST /v1/roles", "POST /v1/permission-sets", "POST /v1/automations", "POST /v1/automations/test", "GET /v1/events",
   "POST /v1/me/alerts", "POST /v1/me/alerts/backtest", "POST /v1/alerts", "POST /v1/alerts/backtest",
   "POST /v1/schema/plan", "POST /v1/schema/apply", "POST /v1/objects/:object/import", "POST /v1/aggregate", "POST /v1/views",
   "POST /v1/ops/merge_records", "POST /v1/objects/:object/records/bulk_update", "POST /v1/objects/:object/records/bulk_archive",
+  "POST /v1/ops/erase_contact",
   // Takes a member ID in its query (?member=usr_…); its case is below.
   "GET /v1/apps",
 ]);
@@ -97,6 +104,13 @@ beforeAll(async () => {
   if (!role.json.data?.id || !svc.json.data?.id || !auto.json.automation?.id || !deliveries.json.data?.[0]?.id || !alert.json.alert?.id || !inbox.json.data?.[0]?.id) {
     throw new Error("setup: tenant B needs an automation, a delivery, an alert and a notification");
   }
+  const conn = await call("POST", "/v1/connections", { key: b.keys.admin, body: { key: "b_secret_api", name: "B Secret connection", type: "static_token",
+    base_url: "https://b-secret.example/api", secret: "b-secret-token" } });
+  if (conn.status !== 201) throw new Error(`setup: connection ${JSON.stringify(conn.json)}`);
+  bIds.connection = conn.json.data.id;
+  const draft = await call("PUT", "/v1/objects/contact/layout/draft", { key: b.keys.admin, body: { layout: { columns: { left: [{ type: "fields", name: "B Secret section", fields: ["email"] }] } } } });
+  if (draft.status !== 200) throw new Error(`setup: layout draft ${JSON.stringify(draft.json)}`);
+  bIds.layoutChange = (await call("GET", "/v1/objects/contact/layout/draft", { key: b.keys.admin })).json.data.changes[0].id;
   bBrowser = await signedIn(b.ownerEmail);
   bIds.session = (await bBrowser.request("GET", "/v1/auth/session")).json.session.id;
   const view = await call("POST", "/v1/views", { key: b.keys.ops, body: { object: "contact", name: "B Secret view", shared: true,
@@ -140,11 +154,14 @@ describe("cross-tenant isolation", () => {
   it("path IDs from another tenant are not found, on every route that takes one", async () => {
     let checked = 0;
     for (const r of routes.filter((x) => x.idParams)) {
+      // A full bucket for every route: together the routes now ask for more than one burst, and on a fast
+      // machine the bucket does not refill in time.
+      resetRateLimiter();
       for (const [object, id] of Object.entries({ contact: bIds.contact, account: bIds.account, deal: bIds.deal })) {
         const kind = Object.values(r.idParams!)[0];
         const byKind: Record<string, string | undefined> = { key: bIds.key, webhook: bIds.webhook, automation: bIds.automation, delivery: bIds.delivery,
           alert: bIds.alert, notification: bIds.notification, member: bIds.user, service_account: bIds.service_account, role: bIds.role,
-          permission_set: bIds.permission_set, file: bIds.file, session: bIds.session, view: bIds.view, grant: bIds.grant };
+          permission_set: bIds.permission_set, file: bIds.file, session: bIds.session, view: bIds.view, grant: bIds.grant, connection: bIds.connection };
         const path = r.path.replace(":object", object).replace(":id", byKind[kind!] ?? id!);
         const body = r.method === "GET" || r.method === "DELETE" ? undefined : r.path.endsWith("/records/:id") ? { name: "x" }
           : r.path.endsWith("/test") && r.path.includes("automations") ? { record: bIds.contact }
@@ -162,6 +179,7 @@ describe("cross-tenant isolation", () => {
     const cases: [string, string, unknown][] = [
       ["POST", "/v1/objects/contact/records", { email: "x@a.example", account: bIds.account }],
       ["POST", "/v1/objects/deal/records/batch", { records: [{ name: "x", primary_contact: bIds.contact }] }],
+      ["POST", "/v1/objects/contact/records/upsert", { key: "email", values: { email: "x-upsert@a.example", first_name: "x", account: bIds.account } }],
       ["POST", "/v1/objects/lead/records", { contact: bIds.contact }],
       ["POST", "/v1/query", { object: "contact", where: { field: "account", op: "eq", value: bIds.account } }],
       ["POST", "/v1/query", { object: "contact", where: { field: "id", op: "eq", value: bIds.contact } }],
@@ -178,12 +196,19 @@ describe("cross-tenant isolation", () => {
       ["POST", "/v1/ops/send_quote", { quote: bIds.quote }],
       ["POST", "/v1/ops/accept_quote", { quote: bIds.quote }],
       ["POST", "/v1/ops/revise_quote", { quote: bIds.quote }],
+      ["POST", "/v1/ops/erase_contact", { contact: bIds.contact }],
+      ["POST", "/v1/ops/erase_contact", { contact: bIds.contact, dry_run: false }],
       ["POST", "/v1/objects/quote_line_item/records", { quote: bIds.quote, description: "x", unit_price: 1 }],
+      // A change to B's layout draft, named in A's workspace.
+      ["POST", "/v1/objects/contact/layout/draft/undo", { change: bIds.layoutChange }],
+      ["POST", "/v1/objects/contact/layout/draft/review", { change: bIds.layoutChange }],
       ["POST", "/v1/roles", { key: "copied", name: "x", copy_from: bIds.role }],
       ["POST", "/v1/permission-sets", { key: "copied_set", name: "x", copy_from: bIds.permission_set }],
       ["POST", "/v1/members", { email: "y@a.example", name: "y", role: "member", permission_sets: [bIds.permission_set] }],
       ["POST", "/v1/service-accounts", { name: "y", role: "member", permission_sets: [bIds.permission_set] }],
       ["POST", "/v1/automations", { name: "x", trigger: { event: "contact.created" }, actions: [{ type: "send_webhook", webhook: bIds.webhook }] }],
+      // A connection is named by key, and a key is looked up in the caller's own workspace only.
+      ["POST", "/v1/automations", { name: "x", trigger: { event: "contact.created" }, actions: [{ type: "http_request", method: "GET", connection: "b_secret_api", url: "/x" }] }],
       ["POST", "/v1/automations", { name: "x", trigger: { event: "contact.created" }, condition: { field: "account", op: "eq", value: bIds.account },
         actions: [{ type: "update_record", values: { first_name: "x" } }] }],
       ["POST", "/v1/automations/test", { record: bIds.contact, automation: { name: "x", trigger: { event: "contact.created" }, actions: [{ type: "update_record", values: { first_name: "x" } }] } }],

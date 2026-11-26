@@ -102,7 +102,7 @@ export function dependencies(schema: Schema, a: Pick<AutomationRow, "trigger" | 
       if (of) read(cur, of);
     }
     let usesOutputs = false;
-    for (const text of strings(s.type === "for_each" ? { if: s.if, query: s.query } : s)) {
+    for (const text of strings(s.type === "for_each" ? { if: s.if, query: s.query, items: s.items } : s)) {
       for (const p of safePlaceholders(text)) {
         if (p.date) continue;
         const [root, a1, a2, a3, a4] = p.path;
@@ -140,7 +140,7 @@ export function stepIdsUsed(actions: Step[]): Set<string> {
   const out = new Set<string>();
   for (const s of allTop(actions)) {
     if (s.type === "for_each" && s.over) out.add(s.over);
-    for (const t of strings(s.type === "for_each" ? { if: s.if, query: s.query } : s)) for (const m of t.matchAll(/\{\{\s*steps\.([a-z][a-z0-9_]*)/g)) out.add(m[1]!);
+    for (const t of strings(s.type === "for_each" ? { if: s.if, query: s.query, items: s.items } : s)) for (const m of t.matchAll(/\{\{\s*steps\.([a-z][a-z0-9_]*)/g)) out.add(m[1]!);
   }
   return out;
 }

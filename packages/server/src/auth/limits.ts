@@ -1,6 +1,5 @@
-import { isIP } from "node:net";
 import { sha256 } from "../lib/crypto.js";
-import { hextets } from "../lib/outbound.js";
+import { addressKey } from "../lib/outbound.js";
 import { canonicalEmail } from "./identity.js";
 
 /**
@@ -42,6 +41,14 @@ export const LIMITS = {
   workspaceEmail: { name: "mailws", max: 60, windowMs: MIN },
   /** Sign-in emails the whole server sends: a last resort far above any one workspace's share. Past it, sends are skipped and logged as errors. */
   globalEmail: { name: "mail", max: 600, windowMs: MIN },
+  /**
+   * Sign-up (ADR 0018). Codes go to addresses nobody has vouched for, so one client address may ask for
+   * few of them (10 an hour, besides the per-email limits above, which sign-up shares with sign-in:
+   * an inbox gets the same few messages whichever form asked). The server-wide ceiling on sign-up email
+   * is a setting (SIGN_UP_EMAILS_PER_HOUR) and so is every cap on workspaces created; those are counted
+   * in the database (workspace_sign_ups), not here.
+   */
+  signUpAddress: { name: "su", max: 10, windowMs: 60 * MIN },
   /** Invitations, a budget of their own (they never use the sign-in one): per workspace and per inviting member, answered with 429. */
   inviteWorkspace: { name: "invws", max: 50, windowMs: 60 * MIN },
   inviteMember: { name: "invby", max: 20, windowMs: 60 * MIN },
@@ -79,18 +86,8 @@ export const LIMITS = {
   automationEmail: { name: "automail", max: 600, windowMs: MIN, store: "automail" },
 } satisfies Record<string, Limit>;
 
-/**
- * The key a caller's address is counted under: an IPv6 address by its /64 (one subscriber's
- * allocation, so a host can't rotate through it), an IPv4-mapped one as IPv4, anything else as is.
- * `bits` 48 gives the IPv6 /48 a site gets; IPv4 stays per address.
- */
-export function addressKey(addr: string, bits: 64 | 48 = 64): string {
-  if (isIP(addr) !== 6) return addr;
-  const h = hextets(addr);
-  if (!h) return addr;
-  if (h.slice(0, 5).every((n) => n === 0) && h[5] === 0xffff) return `${h[6]! >> 8}.${h[6]! & 255}.${h[7]! >> 8}.${h[7]! & 255}`;
-  return `${h.slice(0, bits / 16).map((n) => n.toString(16)).join(":")}::/${bits}`;
-}
+/** The key a caller's address is counted under (lib/outbound.ts): every limiter that counts per address uses it. */
+export { addressKey };
 
 /** A stable, non-reversible key for an email (in its canonical form), so the limiter never holds addresses. */
 export const emailKey = (email: string) => sha256(`limit:${canonicalEmail(email)}`).toString("base64url").slice(0, 22);

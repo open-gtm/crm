@@ -52,11 +52,11 @@ git pull
 docker compose up -d --build    # with a published image: docker compose pull && docker compose up -d
 ```
 
-Keep your `.env` (it holds `HLCRM_MASTER_KEY`, which the database backup does not).
+Keep your `.env` (it holds `HLCRM_MASTER_KEY`, which the database backup does not). [`docs/backup-restore.md`](docs/backup-restore.md) covers what else to back up, how to restore and how to check a restore.
 
 ### Running it for real
 
-Compose binds every port to 127.0.0.1, and terminating TLS in front of the API and MCP ports is your job. If a reverse proxy sits in front of the API, set `TRUST_PROXY=true` so failed-login limits use the real client address, and only then. Back up Postgres, and keep a copy of `HLCRM_MASTER_KEY` outside the database backups: without it, restricted fields can't be decrypted. The software enforces workspace isolation, roles and permissions, scoped keys, field encryption and a tamper-evident audit log. Running it securely (hosts, network, backups, access, monitoring) is your responsibility, and the software itself makes no compliance claims such as "SOC 2 compliant".
+Compose binds every port to 127.0.0.1, and terminating TLS in front of the API and MCP ports is your job. If a reverse proxy sits in front of the API, set `TRUST_PROXY=true` so failed-login limits use the real client address, and only then. Back up Postgres and the audit anchors, and keep a copy of `HLCRM_MASTER_KEY` outside the database backups: without it, restricted fields can't be decrypted ([`docs/backup-restore.md`](docs/backup-restore.md)). The software enforces workspace isolation, roles and permissions, scoped keys, field encryption and a tamper-evident audit log. Running it securely (hosts, network, backups, access, monitoring) is your responsibility, and the software itself makes no compliance claims such as "SOC 2 compliant".
 
 ## Use it from Claude
 
@@ -102,6 +102,10 @@ curl -s -X POST localhost:8787/v1/objects/account/records -H "Authorization: Bea
   -H "Content-Type: application/json" -H "Idempotency-Key: acme-1" \
   -d '{"name": "Acme", "domain": "acme.com"}'
 
+# Create, or update the record that already has this value in a unique field (here a contact's email)
+curl -s -X POST localhost:8787/v1/objects/contact/records/upsert -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"key": "email", "values": {"email": "jane@acme.com", "job_title": "CTO"}}'
+
 curl -s -X POST localhost:8787/v1/objects/contact/records/batch -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
   -d '{"records": [{"first_name": "Jane", "email": "jane@acme.com", "account": "acct_…"}]}'
@@ -137,6 +141,10 @@ The API serves a web app at `PUBLIC_URL` (the Docker image includes it): lists w
 ## Use it from the command line
 
 The `crm` CLI keeps the workspace schema in a file you review and apply (`crm schema pull`, `plan`, `apply`), imports and exports CSV, and manages keys, members and roles. It isn't on npm yet: build it from source. See [`docs/cli.md`](docs/cli.md).
+
+## Use it beside the CRM you already have
+
+A connection stores a credential for another system (a token, or an OAuth client that fetches its own access tokens) once per workspace, encrypted, and an automation's HTTP step names it: `{"type": "http_request", "connection": "salesforce", "method": "PATCH", "url": "/services/data/…"}`. Connections are managed in Settings → Connections or under `/v1/connections`, never through MCP. For the other direction, a scheduled automation can fetch a list from the other system and go through it, or the other system can call `POST /v1/objects/{object}/records/upsert`. There is no built-in integration with any vendor: the guides show how to set one up yourself for [HubSpot](docs/integrations/hubspot.md) and [Salesforce](docs/integrations/salesforce.md). See [`docs/connections.md`](docs/connections.md).
 
 ## Quotes and orders
 
@@ -201,6 +209,7 @@ crm CLI         MCP: /mcp/admin, /mcp/ops    your code / curl
 - **The API is the only enforcement point.** The MCP servers and the `crm` CLI are thin clients that call the API with the caller's own key.
 - **Standard objects** (Contact, Account, Lead, Deal, Activity, Task, …) are typed tables. **Custom fields and objects** are JSONB validated against metadata, so schema changes never run DDL.
 - **Events, automations and webhooks:** every change is an event; automations and signed webhooks act on them. See [`docs/webhooks.md`](docs/webhooks.md) and [`docs/alerts.md`](docs/alerts.md).
+- **Limits per workspace** (records, members, keys, requests and more), for a server that holds many: see [`docs/limits.md`](docs/limits.md).
 - **Isolation, keys, encryption and audit:** see [`docs/security/threat-model.md`](docs/security/threat-model.md).
 - **Full design:** [`docs/data-model.md`](docs/data-model.md), the decision records in [`docs/decisions/`](docs/decisions) and [`ROADMAP.md`](ROADMAP.md).
 

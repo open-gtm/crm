@@ -26,7 +26,8 @@ export type Target = "value" | "text" | "url" | "header" | "subject" | "email";
 
 export const ROOTS = ["record", "event", "item", "steps", "run", "automation"] as const;
 const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
-const SEGMENT = /^(?:[a-z_][a-z0-9_]{0,63}|\d{1,3})$/;
+// Capitals are allowed for the keys of another system's JSON (an HTTP reply: {{steps.fetch.json.records.0.Id}}); field names are lowercase.
+const SEGMENT = /^(?:[A-Za-z_][A-Za-z0-9_]{0,63}|\d{1,3})$/;
 const DATE_EXPR = /^(today|now)(?:([+-])(\d{1,4})([mhd]))?$/;
 const PLACEHOLDER = /\{\{([^{}]{1,300})\}\}/g;
 const WHOLE = /^\{\{([^{}]{1,300})\}\}$/;
@@ -90,6 +91,8 @@ const FILTERS: Record<string, { args: "none" | "int" | "str" | "int?"; fn: (v: u
   } },
   date: { args: "none", fn: (v) => toDate(v)?.toISOString().slice(0, 10) ?? null },
   datetime: { args: "none", fn: (v) => toDate(v)?.toISOString() ?? null },
+  // Milliseconds since 1970, the form some APIs take dates in: {{now-1h | epoch_ms}}.
+  epoch_ms: { args: "none", fn: (v) => toDate(v)?.getTime() ?? null },
   add_days: { args: "int", fn: (v, a) => {
     const d = toDate(v);
     if (!d) return null;
@@ -149,7 +152,7 @@ export function parsePlaceholder(inner: string): Parsed {
       throw unprocessable(`Unknown placeholder {{${head}}}. Use {{record.<field>}}, {{item.<field>}}, {{steps.<id>.<output>}}, {{event.type}}, {{run.id}}, {{automation.name}}, {{today}}, {{today+3d}} or {{now}}`);
     }
     if (path.length < 2 || path.length > 6 || path.some((p) => !SEGMENT.test(p) || FORBIDDEN_KEYS.has(p))) {
-      throw unprocessable(`Placeholder {{${head}}} is not a valid path: use lowercase names and numbers separated by dots`);
+      throw unprocessable(`Placeholder {{${head}}} is not a valid path: use names and numbers separated by dots`);
     }
   }
   if (rest.length > 5) throw unprocessable(`Placeholder {{${inner}}} has more than 5 filters`);

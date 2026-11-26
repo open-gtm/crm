@@ -1,9 +1,10 @@
 import { z } from "zod";
-import { EXPORT_ROW_CAP, exportRecords, IMPORT_ROW_CAP, importRecords } from "../core/transfer.js";
+import { EXPORT_ROW_CAP, exportRecords, IMPORT_ROW_CAP, importRecords, upsertRecord } from "../core/transfer.js";
 import { loadSchema } from "../core/schema.js";
 import { resolveView } from "../core/views.js";
 import { unprocessable } from "../lib/errors.js";
 import { route } from "./registry.js";
+import { enumOf, object, ref } from "./responses.js";
 import { R } from "./responses.js";
 import { filtersFromQuery, sortFromQuery } from "./routes.js";
 
@@ -38,6 +39,18 @@ route({
         ...(out.nextCursor ? { "X-Next-Cursor": out.nextCursor } : {}),
       },
     };
+  },
+});
+
+route({
+  method: "POST", path: "/v1/objects/:object/records/upsert", scope: "ops:write", tag: "records",
+  summary: "Create a record, or update the one whose unique field `key` has the value given in `values` (a contact's email, an account's domain, a unique custom field such as an ID from another system). "
+    + "Answers 201 when it created one, 200 otherwise, with action: created, updated or unchanged",
+  response: { schema: object({ action: enumOf("created", "updated", "unchanged"), data: ref("Record") }), alsoStatus: 201 },
+  body: z.object({ key: z.string().min(1).max(100), values: z.record(z.string(), z.unknown()) }).strict(),
+  handler: async ({ tx, ctx, params, body }) => {
+    const out = await upsertRecord(tx, ctx, params.object!, body.key, body.values);
+    return { status: out.action === "created" ? 201 : 200, body: out };
   },
 });
 

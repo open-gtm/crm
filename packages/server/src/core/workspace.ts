@@ -1,4 +1,5 @@
 import type { Tx } from "../db/pool.js";
+import { assertRoom } from "./limits.js";
 import { db } from "../db/pool.js";
 import { conflict, forbidden, notFound, unprocessable } from "../lib/errors.js";
 import { decodeId, encodeId, uuidv7 } from "../lib/ids.js";
@@ -24,45 +25,71 @@ import { listGrants, revokeUserGrants } from "../oauth/grants.js";
 export interface CreateWorkspaceInput { name: string; ownerEmail: string; ownerName: string; currency?: string }
 
 /**
- * Creates a workspace: tenant, system roles, owner, standard objects, default pipeline, data key,
- * and two keys for the owner (admin and ops). The key secrets are returned once and never stored.
+ * How a workspace comes to be: `bootstrap` (the operator's command, the default) mints the owner's two
+ * keys and returns their secrets once, for a terminal; `sign_up` (a person on the sign-in page, ADR 0018)
+ * mints none, since a browser page is no place to show a secret: the owner makes keys later, signed in.
  */
-export async function createWorkspace(input: CreateWorkspaceInput) {
+export interface CreateWorkspaceOptions { via?: "bootstrap" | "sign_up"; requestId?: string }
+
+function checkedWorkspaceInput(input: CreateWorkspaceInput) {
   if (!input.name?.trim()) throw unprocessable("Workspace name is required");
   const emailProblem = memberEmailProblem(input.ownerEmail);
   if (emailProblem) throw unprocessable(`Owner email: ${emailProblem}`);
   const currency = (input.currency ?? "USD").toUpperCase();
   if (!/^[A-Z]{3}$/.test(currency)) throw unprocessable("currency must be an ISO 4217 code");
+  return { currency };
+}
+
+/**
+ * Creates a workspace in the caller's transaction, which it leaves inside the new workspace: tenant,
+ * system roles, owner, standard objects, default pipeline and data key, and (at bootstrap only) two keys
+ * for the owner, admin and ops, whose secrets are returned once and never stored.
+ */
+export async function createWorkspaceIn(tx: Tx, input: CreateWorkspaceInput, opts: CreateWorkspaceOptions = {}) {
+  const { currency } = checkedWorkspaceInput(input);
+  const via = opts.via ?? "bootstrap";
   const tenantId = uuidv7();
   const ownerId = uuidv7();
-  return db().begin(async (tx) => {
-    await registerTenant(tx, tenantId);
-    await enterWorkspace(tx, tenantId);
-    await insertTenant(tx, tenantId, input.name, currency);
-    await seedSystemRoles(tx);
-    const owner = await resolveRole(tx, OWNER_ROLE);
-    await insertUser(tx, { tenantId, id: ownerId, email: input.ownerEmail, name: input.ownerName, roleId: owner.id });
-    const ctx: Ctx = { ...systemCtx(tenantId, "bootstrap") };
-    await seedStandardObjects(tx, tenantId);
-    for (const t of ACTIVITY_TYPES) {
-      await insertSystemActivityType(tx, { tenantId, key: t.key, label: t.label, editable: "editable" in t ? Boolean(t.editable) : false });
-    }
-    const pipelineId = uuidv7();
-    await insertDefaultPipeline(tx, tenantId, pipelineId, DEFAULT_PIPELINE.name);
-    let position = 0;
-    for (const s of DEFAULT_PIPELINE.stages) {
-      await insertStage(tx, { tenantId, id: uuidv7(), pipelineId, name: s.name, position: position++, category: s.category, probability: s.probability });
-    }
-    await createTenantKey(tx, tenantId);
-    await audit(tx, ctx, { action: "workspace.created", details: { name: input.name } });
+  await registerTenant(tx, tenantId);
+  await enterWorkspace(tx, tenantId);
+  await insertTenant(tx, tenantId, input.name, currency);
+  await seedSystemRoles(tx);
+  const owner = await resolveRole(tx, OWNER_ROLE);
+  await insertUser(tx, { tenantId, id: ownerId, email: input.ownerEmail, name: input.ownerName, roleId: owner.id });
+  const ctx: Ctx = { ...systemCtx(tenantId, opts.requestId ?? "bootstrap"), ...(via === "sign_up" ? { surface: "web" as const } : {}) };
+  await seedStandardObjects(tx, tenantId);
+  for (const t of ACTIVITY_TYPES) {
+    await insertSystemActivityType(tx, { tenantId, key: t.key, label: t.label, editable: "editable" in t ? Boolean(t.editable) : false });
+  }
+  const pipelineId = uuidv7();
+  await insertDefaultPipeline(tx, tenantId, pipelineId, DEFAULT_PIPELINE.name);
+  let position = 0;
+  for (const s of DEFAULT_PIPELINE.stages) {
+    await insertStage(tx, { tenantId, id: uuidv7(), pipelineId, name: s.name, position: position++, category: s.category, probability: s.probability });
+  }
+  await createTenantKey(tx, tenantId);
+  await audit(tx, ctx, { action: "workspace.created", details: { name: input.name, via } });
+  let keys: { admin: string; ops: string } | null = null;
+  if (via === "bootstrap") {
     const ownerCtx: Ctx = { ...ctx, actor: { type: "user", id: ownerId, role: OWNER_ROLE } };
     const adminKey = await createApiKey(tx, ownerCtx, { name: "Owner admin key", scopes: ["admin", "ops:write", "ops:read", "restricted:read"] }, { bootstrap: true });
     const opsKey = await createApiKey(tx, ownerCtx, { name: "Owner ops key", scopes: ["ops:write", "ops:read"] }, { bootstrap: true });
-    return {
-      workspace: { id: encodeId("ws", tenantId), name: input.name, currency },
-      owner: { id: encodeId("usr", ownerId), email: input.ownerEmail },
-      keys: { admin: adminKey.secret, ops: opsKey.secret },
-    };
+    keys = { admin: adminKey.secret, ops: opsKey.secret };
+  }
+  return {
+    tenantId, ownerId,
+    workspace: { id: encodeId("ws", tenantId), name: input.name, currency },
+    owner: { id: encodeId("usr", ownerId), email: input.ownerEmail },
+    keys,
+  };
+}
+
+/** Creates a workspace as the operator does (`bootstrap`, the demo seed, tests): in its own transaction, with the owner's two keys. */
+export async function createWorkspace(input: CreateWorkspaceInput) {
+  checkedWorkspaceInput(input);
+  return db().begin(async (tx) => {
+    const ws = await createWorkspaceIn(tx, input);
+    return { workspace: ws.workspace, owner: ws.owner, keys: ws.keys! };
   });
 }
 
@@ -184,6 +211,7 @@ export async function addMember(tx: Tx, ctx: Ctx, input: { email: string; name: 
   const role = await resolveRole(tx, input.role, "share");
   await assertCanAssign(tx, ctx, role, "user");
   const sets = input.permission_sets !== undefined ? await setsToAssign(tx, ctx, input.permission_sets) : [];
+  await assertRoom(tx, ctx.tenantId, "members");
   const id = uuidv7();
   try {
     await insertUser(tx, { tenantId: ctx.tenantId, id, email: input.email, name: input.name ?? input.email, roleId: role.id });
@@ -205,6 +233,7 @@ export async function addServiceAccount(tx: Tx, ctx: Ctx, input: { name: string;
   const role = await resolveRole(tx, input.role, "share");
   await assertCanAssign(tx, ctx, role, "service_account");
   const sets = input.permission_sets !== undefined ? await setsToAssign(tx, ctx, input.permission_sets) : [];
+  await assertRoom(tx, ctx.tenantId, "service_accounts");
   const id = uuidv7();
   try {
     await insertServiceAccount(tx, { tenantId: ctx.tenantId, id, name: input.name, roleId: role.id, createdBy: ctx.actor.id });
@@ -293,6 +322,8 @@ export async function updateMember(tx: Tx, ctx: Ctx, publicId: string, patch: Up
       details: { added: setsAdded.map((x) => x.key), removed: setsRemoved.map((x) => x.key), permissions_in_added_sets: gained } });
   }
   if (active !== wasActive) {
+    // Re-enabling someone takes a place, like adding them.
+    if (active) await assertRoom(tx, ctx.tenantId, ref.type === "user" ? "members" : "service_accounts");
     await setMemberActive(tx, ref.type, ref.id, active);
     if (!active) {
       keysRevoked = await revokeKeysOf(tx, ref.type, ref.id);

@@ -345,8 +345,8 @@ test.describe("as the owner", () => {
     const row = grid.getByRole("row").filter({ has: page.getByRole("link", { name, exact: true }) });
     await expect(row).toContainText("Negotiation");
     await row.getByRole("link", { name, exact: true }).click();
-    await expect(page.getByRole("combobox", { name: "Stage" })).toHaveValue(/.+/);
-    await expect(page.getByRole("combobox", { name: "Stage" }).locator("option:checked")).toHaveText("Negotiation");
+    // A deal's page shows its stage on the stage path (the default layout has one), with the current stage marked.
+    await expect(page.locator('button[aria-current="step"]')).toHaveText(/Negotiation/);
   });
 
   test("complete a task, and the inbox count changes", async () => {
@@ -475,17 +475,20 @@ test.describe("as the owner", () => {
     await expect(page.getByRole("switch", { name: "Connecting apps" })).toBeChecked();
     await expect(page.getByRole("checkbox", { name: /change the setup/i })).toBeVisible();
 
-    // Automations: the fixture's one, paused and resumed.
+    // Automations: the fixture's one in the list, then paused and resumed on its page.
     await page.goto("/settings/automations");
     const table = page.getByRole("table", { name: "Automations" });
     const row = table.getByRole("row").filter({ hasText: "Flag big deals" });
     await expect(row).toContainText("When a deal is created (deal.created)");
-    await expect(row).toContainText("Enabled");
-    await row.getByRole("button", { name: "Pause Flag big deals" }).click();
-    await expect(row).toContainText("Paused");
     await shot(page, "settings-automations");
-    await row.getByRole("button", { name: "Resume Flag big deals" }).click();
-    await expect(row).toContainText("Enabled");
+    await row.getByRole("link", { name: "Flag big deals" }).click();
+    const active = page.getByRole("switch", { name: /active/i });
+    await expect(active).toBeChecked();
+    await active.click();
+    await expect(page.getByText("Paused").first()).toBeVisible();
+    await expect(active).not.toBeChecked();
+    await active.click();
+    await expect(active).toBeChecked();
 
     // Installed packs: none in this workspace, said plainly, with the pointer to the CLI.
     await page.getByRole("link", { name: "Installed packs" }).click();

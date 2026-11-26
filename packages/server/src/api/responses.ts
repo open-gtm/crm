@@ -65,6 +65,22 @@ const webhook = {
   created_at: time, updated_at: time,
 };
 
+/** A connection (core/connections.ts publicConnection). Its secrets are write-only: only whether each is set. */
+const connection = {
+  id: str, key: { type: "string", description: "The name http_request steps use: \"connection\": \"<key>\"" }, name: str, description: nullable(str),
+  type: enumOf("static_token", "oauth_client_credentials", "oauth_refresh_token"),
+  base_url: { type: "string", description: "The only place the credential is sent: steps give a path under it" },
+  header_name: str, header_prefix: str, token_url: nullable(str), client_id: nullable(str), scope: nullable(str),
+  token_params: { type: "object", additionalProperties: { type: "string" }, description: "Extra form parameters of the token request" },
+  token_lifetime_minutes: { type: "integer", description: "How long an access token is kept when the token reply gives no expires_in" },
+  test_path: nullable(str), enabled: bool,
+  status: { ...enumOf("active", "failing", "disabled", "archived"), description: "failing: the last token request failed (see last_error)" },
+  has_secret: bool, secret_set_at: nullable(time), has_refresh_token: bool, refresh_token_set_at: nullable(time),
+  token_expires_at: { ...nullable(time), description: "When the cached access token runs out; null with none cached" },
+  last_used_at: nullable(time), last_error: nullable(str), last_error_at: nullable(time), created_at: time, updated_at: time,
+};
+const connectionCheck = (extra: Record<string, JsonSchema>) => nullable(object({ ok: bool, error: nullable(str), ...extra }));
+
 /** A record an alert would have fired for, and when. */
 const alertSample = object({ record: str, display_name: { ...nullable(str), description: "null when the caller can't read the record" }, at: time });
 
@@ -143,6 +159,12 @@ export const BASE_SCHEMAS: Record<string, JsonSchema> = {
     groups: list(object({ reason: anyObject, count: int, records: list(ref("Record")) })),
     more_groups: bool, skipped_rules: list({}),
   }, ["object", "scanned", "window_full", "groups", "more_groups"]),
+  UsageLine: strict({
+    key: { type: "string", description: "The limit: records, members, service_accounts, api_keys, custom_objects, custom_fields, webhooks, automations, file_storage_mb, requests_per_minute, automation_actions_per_hour, automation_http_per_hour, automation_emails_per_hour" },
+    description: str, kind: { type: "string", enum: ["count", "rate"], description: "count: what exists now. rate: what is done in a window of time" },
+    used: { ...nullable({ type: "number" }), description: "What is in use now (hourly limits: in the current clock hour). null when the server doesn't keep one figure for it (requests_per_minute)" },
+    limit: { ...nullable({ type: "number" }), description: "The ceiling; null is unlimited" },
+    source: { type: "string", enum: ["server", "workspace"], description: "server: the server's default. workspace: set for this workspace by whoever runs the server" } }),
   SignInSettings: strict({ password: bool, sso: bool, sso_allowed_domains: list(str),
     oauth_apps: { type: "boolean", description: "Members may connect apps to the MCP servers over OAuth (ADR 0010)" },
     oauth_scopes: { type: "array", items: { type: "string", enum: ["ops:read", "ops:write", "restricted:read", "admin"] }, description: "The scopes connected apps may be granted" } }),
@@ -235,6 +257,14 @@ export const BASE_SCHEMAS: Record<string, JsonSchema> = {
     dry_run: bool, summary: str, warnings: list(str), backtest: ref("AlertBacktest"),
     alert: { ...ref("Alert"), description: "The alert as saved; absent on a dry run" },
   }, ["dry_run", "summary", "warnings", "backtest"]),
+  Connection: object(connection),
+  ConnectionDetail: object({ ...connection, used_by: { ...list(object({ id: str, name: str })), description: "Live automations with a step that names it" } }),
+  ConnectionTest: object({
+    ok: bool,
+    token: { ...connectionCheck({}), description: "The token request (OAuth types); null for a static token" },
+    request: { ...connectionCheck({ status: nullable(int) }), description: "The GET to test_path; null with no test_path, or when no token was had" },
+    note: str,
+  }, ["ok", "token", "request"]),
   Webhook: object(webhook),
   WebhookWithSecret: object({
     ...webhook,
@@ -357,6 +387,9 @@ export const R = {
   alerts: dataList(ref("Alert")),
   alertBacktest: data(object({ summary: str, warnings: list(str), backtest: ref("AlertBacktest") })),
   alertWrite: plain(ref("AlertWrite")),
+  connection: data(ref("ConnectionDetail")),
+  connections: dataList(ref("Connection")),
+  connectionTest: data(ref("ConnectionTest")),
   webhook: data(ref("Webhook")),
   webhooks: dataList(ref("Webhook")),
   webhookWithSecret: data(ref("WebhookWithSecret")),

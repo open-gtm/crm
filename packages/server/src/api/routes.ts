@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { getUsage } from "../core/limits.js";
 import { describeAccess } from "../core/access.js";
 import { auditLogPage } from "../core/queries/audit.js";
 import { verifyInTx } from "../core/auditchain.js";
@@ -17,12 +18,13 @@ import { FIELD_TYPES } from "../core/fieldtypes.js";
 import type { JsonShape } from "../core/catalog.js";
 import { actorRef } from "../core/webhooks.js";
 import { archiveRole, createRole, getRole, listRoles, permissionCatalog, roleAccess, updateRole } from "../core/roles.js";
+import { pendingDeletion } from "../core/disposal.js";
 import { accessReview, addMember, addServiceAccount, getWorkspace, listMembers, updateMember } from "../core/workspace.js";
 import { badRequest, unprocessable } from "../lib/errors.js";
 import { memberName } from "../auth/queries.js";
 import { requireRecentSignIn } from "../auth/sessions.js";
 import { invitationUnavailable, reserveInvitation, sendInvitation } from "../auth/signin.js";
-import { encodeId } from "../lib/ids.js";
+import { decodeId, encodeId } from "../lib/ids.js";
 import { TEXT_MAX } from "../lib/limits.js";
 import { SERVER_VERSION } from "../lib/version.js";
 import { route } from "./registry.js";
@@ -137,8 +139,19 @@ route({
 
 route({
   method: "GET", path: "/v1/workspace", scope: "ops:read", tag: "workspace", summary: "Workspace settings",
-  response: data(object({ id: S.str, name: S.str, currency: S.str, modules: S.strs, sign_in: ref("SignInSettings") })),
-  handler: async ({ tx }) => ({ body: { data: await getWorkspace(tx) } }),
+  response: data(object({ id: S.str, name: S.str, currency: S.str, modules: S.strs, sign_in: ref("SignInSettings"),
+    deletion: { ...nullable(object({ requested_at: S.time, requested_by: S.str, scheduled_for: S.time })),
+      description: "Set while the workspace is scheduled for deletion (POST /v1/workspace/deletion): who asked, when, and when it is due. null otherwise" } })),
+  handler: async ({ tx }) => ({ body: { data: { ...(await getWorkspace(tx)), deletion: await pendingDeletion(tx) } } }),
+});
+
+route({
+  method: "GET", path: "/v1/workspace/usage", scope: "admin", tag: "workspace",
+  // Anyone who configures the workspace can run into a limit, so any configuration permission reads them.
+  permission: ["members:manage", "schema:manage", "keys:manage", "webhooks:manage", "automations:manage", "audit:read"],
+  summary: "What the workspace uses against each of its limits. The limits are set by whoever runs the server; nothing in the API changes them",
+  response: data(object({ limits: list(ref("UsageLine")) })),
+  handler: async ({ tx }) => ({ body: { data: await getUsage(tx, await loadSchema(tx)) } }),
 });
 
 route({
@@ -157,15 +170,17 @@ route({
 });
 
 route({
-  method: "GET", path: "/v1/schema/changes", scope: "admin", permission: "audit:read", tag: "schema", summary: "Schema change history, newest first",
+  method: "GET", path: "/v1/schema/changes", scope: "admin", permission: "audit:read", tag: "schema", summary: "Schema change history, newest first: what changed, who changed it, through which surface, app or key, and for which pack",
   response: dataList(object({
     version: S.int, changed_at: S.time, change: S.str, object: nullable(S.str), field: nullable(S.str), surface: S.str,
+    via: { ...nullable(S.str), description: "The connected app or API key the change came through, by name; null for changes from before this was recorded" },
+    pack: { ...nullable(S.str), description: "The schema pack that made the change, when one did" },
     actor: { type: "string", description: "The member or service account (usr_…, svc_…), or the actor type (system)" },
     before: { description: "The changed definition before, as stored: open by design, its shape depends on the change" },
     after: { description: "The changed definition after, as stored: open by design, its shape depends on the change" },
   })),
-  query: z.object({ limit: z.coerce.number().int().optional() }),
-  handler: async ({ tx, query }) => ({ body: { data: await schemaChanges(tx, query.limit) } }),
+  query: z.object({ limit: z.coerce.number().int().optional(), object: z.string().max(100).optional().describe("Only this object's changes, its fields' included") }),
+  handler: async ({ tx, query }) => ({ body: { data: await schemaChanges(tx, query.limit, query.object) } }),
 });
 
 route({
@@ -678,7 +693,10 @@ route({
   query: z.object({ limit: z.coerce.number().int().optional(), before: z.coerce.number().int().optional(), record: z.string().optional(), action: z.string().optional() }),
   handler: async ({ tx, query }) => {
     const limit = Math.min(Math.max(query.limit ?? 50, 1), 500);
-    const rows = await auditLogPage(tx, { before: query.before ?? null, action: query.action ?? null, limit });
+    // `record` is any ID the log holds in record_id: a record, member, key, role, webhook and so on.
+    const record = query.record === undefined ? null : decodeId(query.record)?.uuid ?? null;
+    if (query.record !== undefined && !record) throw unprocessable("record must be an ID such as con_… or usr_…");
+    const rows = await auditLogPage(tx, { before: query.before ?? null, action: query.action ?? null, record, limit });
     return {
       body: {
         data: rows.map((r) => ({

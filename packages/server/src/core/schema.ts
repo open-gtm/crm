@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { assertSchemaRoom } from "./limits.js";
 import type { Tx } from "../db/pool.js";
 import { txState } from "../db/tx.js";
 import { badRequest, conflict, forbidden, notFound, unprocessable } from "../lib/errors.js";
@@ -7,6 +8,7 @@ import { ID_PREFIX_PATTERN, uuidv7 } from "../lib/ids.js";
 import { pluralize } from "../lib/plural.js";
 import { masterKey } from "../config.js";
 import { audit } from "./audit.js";
+import { viaOf } from "./source.js";
 import {
   CATALOG, ENTITIES, isEntity, OWNER_FIELD,
   type CatalogObject, type FieldOptions, type FieldType, type JsonShape, type Sensitivity,
@@ -81,8 +83,7 @@ const RESERVED_NAMES = new Set([
 ]);
 const RESERVED_FIELD_NAMES = new Set(["id", "object", "created_at", "updated_at", "created_by", "updated_by", "version",
   "archived_at", "external_ids", "related_to", "display_name", "included", "merged_into", "merge_chain", ...PROTOTYPE_NAMES]);
-/** Self-hosted builds have no per-tenant quotas, but every custom object adds work to search and the schema summary. */
-export const MAX_CUSTOM_OBJECTS = 100;
+/** One object's fields. How many custom objects and custom fields a workspace may have in all is a workspace limit (core/limits.ts). */
 export const MAX_FIELDS = 300;
 /** The types an object's display_field can be: a record's name is one line of text. */
 const DISPLAY_TYPES: readonly FieldType[] = ["text", "email", "phone", "url"];
@@ -90,7 +91,7 @@ const DISPLAY_TYPES: readonly FieldType[] = ["text", "email", "phone", "url"];
 const MAX_FIELDS_EVER = 500;
 const RESERVED_PREFIXES = new Set([...CATALOG.map((o) => o.id_prefix), ...Object.values(ENTITIES).map((e) => e.prefix),
   "prod", "price", "quote", "ord", "ctr", "ent", "psch", "inv", "pay", "qli", "oli", "cli", "sitm", "ili", "palloc", "fld", "obj",
-  "evt", "whk", "dlv", "auto", "run", "key", "usr", "svc", "alr", "ntf", "ws", "file", "role", "pset"]);
+  "evt", "whk", "dlv", "auto", "run", "key", "usr", "svc", "alr", "ntf", "ws", "file", "role", "pset", "conn"]);
 
 /** Per-process cache, one schema per workspace, keyed by schema_token (migration 009): a value never reused, even after a rollback. */
 const cache = new Map<string, Schema>();
@@ -300,8 +301,10 @@ export async function recordChange(tx: Tx, ctx: Ctx, change: Change & { object_i
   const row = await bumpSchemaVersion(tx);
   const version = Number(row.schema_version);
   txState()?.ownSchemas.set(row.schema_token, undefined);
+  // The connected app or key by name, as layout changes record it (ADR 0017): a label for people; the audit log has the IDs.
+  const via = await viaOf(tx, ctx);
   await insertSchemaChange(tx, { tenantId: ctx.tenantId, version, actorType: ctx.actor.type, actorId: ctx.actor.id, surface: ctx.surface, change: change.change,
-    objectId: change.object_id ?? null, fieldId: change.field_id ?? null, before: change.before, after: change.after });
+    objectId: change.object_id ?? null, fieldId: change.field_id ?? null, before: change.before, after: change.after, via, pack: ctx.pack ?? null });
   await audit(tx, ctx, { action: `schema.${change.change}`, objectType: change.object, details: { field: change.field, version } });
   await emit(tx, ctx, { type: `schema.${change.change}`, objectType: change.object, data: { field: change.field, version } });
   return version;
@@ -336,9 +339,7 @@ export async function createObject(tx: Tx, ctx: Ctx, input: ObjectInput, dryRun:
   const archived = await archivedObjectNames(tx);
   if (archived.some((a) => a.api_name === input.api_name)) throw conflict(`Object "${input.api_name}" exists, archived (an uninstalled pack's object); choose another name`);
   checkText({ label: input.label, plural_label: input.plural_label, description: input.description });
-  if ([...schema.objects.values()].filter((o) => !o.is_system).length >= MAX_CUSTOM_OBJECTS) {
-    throw unprocessable(`A workspace can have at most ${MAX_CUSTOM_OBJECTS} custom objects`);
-  }
+  await assertSchemaRoom(tx, schema, { objects: 1, fields: (input.fields ?? []).length });
   const prefix = newPrefix(schema, input.api_name, input.id_prefix, new Set(archived.map((a) => a.id_prefix)));
   const draft: ObjectMeta = {
     id: "", api_name: input.api_name, label: input.label ?? titleCase(input.api_name),
@@ -405,6 +406,7 @@ export async function addField(tx: Tx, ctx: Ctx, objectName: string, input: Fiel
   const obj = getObject(schema, objectName);
   validateFieldInput(schema, input, obj);
   if (obj.fields.length >= MAX_FIELDS) throw unprocessable(`An object can have at most ${MAX_FIELDS} fields`);
+  await assertSchemaRoom(tx, schema, { fields: 1 });
   if ((await countFieldsEver(tx, obj.id)) >= MAX_FIELDS_EVER) throw unprocessable(`This object has reached ${MAX_FIELDS_EVER} fields, archived ones included`);
   const change: Change = { change: "field_added", object: obj.api_name, field: input.api_name, after: fieldSummary(input) };
   if (input.required) change.warning = "Existing records have no value for this field; it is enforced on new and updated records.";
@@ -567,7 +569,7 @@ export async function archiveField(tx: Tx, ctx: Ctx, objectName: string, fieldNa
   const count = await countValues(tx, obj, field);
   const change: Change = {
     change: "field_archived", object: obj.api_name, field: field.api_name, before: fieldSummary(field),
-    warning: `${count} record(s) have a value. Values are kept but hidden and unwritable; they can be purged later.`,
+    warning: `${count} record(s) have a value. Values are kept but hidden and unwritable. Nothing removes them, short of erasing a record.`,
   };
   const token = confirmToken(ctx, schema.version, "archive_field", obj.api_name, field.api_name);
   if (opts.dryRun) return { dry_run: true, schema_version: schema.version, changes: [change], confirm_token: token };

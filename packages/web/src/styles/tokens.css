@@ -44,6 +44,9 @@
   --hl-text-xl: 1.25rem;   /* 20 */
   --hl-text-2xl: 1.5rem;   /* 24 */
 
+  /* Motion: one ease-out curve for everything that moves. Only transform and opacity animate, briefly, and
+     never on a keyboard action or a view, tab or theme switch. */
+  --hl-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --hl-radius-sm: 4px;
   --hl-radius: 6px;
   --hl-radius-lg: 10px;

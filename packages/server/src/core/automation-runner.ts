@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { limitOf } from "./limits.js";
 import { canonicalEmail } from "../auth/identity.js";
 import { hit, LIMITS as RATE_LIMITS, type Limit } from "../auth/limits.js";
 import { config } from "../config.js";
@@ -12,9 +13,10 @@ import { BlockedTargetError, checkUrl, safeRequest } from "../lib/outbound.js";
 import { getMailer } from "../providers/mailer.js";
 import { ownerField } from "./alerts.js";
 import { audit } from "./audit.js";
+import { checkConnectionPath, ConnectionError, connectionCredential, connectionForStep, connectionUrl, markConnectionUsed, type Credential } from "./connections.js";
 import { actorCtx, dependencies, depsHiddenFrom, stepIdsUsed, usesOutputsBefore, type Deps } from "./automation-access.js";
 import {
-  automationCtx, conditionMatches, LIMITS, recordObject, triggerOf,
+  automationCtx, conditionMatches, headerAllowed, LIMITS, recordObject, triggerOf,
   type AutomationRow, type InnerStep, type Step, type Trigger,
 } from "./automation-defs.js";
 import { systemCtx, type Ctx } from "./context.js";
@@ -88,7 +90,7 @@ interface RunState {
   /** The last step that finished, by path in run order ("3.2.1"): every step up to it is done. */
   cursor: string | null;
   /** The for_each being gone through: its items, so a run picked up again goes on with the same list. */
-  loop: { path: string; object: string; ids: string[] } | null;
+  loop: { path: string; object: string; ids: string[]; /** A loop over an HTTP reply's list: its elements, in place of record ids. */ items?: unknown[] } | null;
   /** Outputs of the steps a later step uses, by step id. */
   vars: Record<string, unknown>;
   results: StepResult[];
@@ -123,6 +125,8 @@ interface Env {
   /** Who caused the run (the event's actor, or who asked for it): an email to an address they set is checked against their role. */
   actor: { type: string; id: string } | null;
   deps: Deps | null;
+  /** Inside a for_each over an HTTP reply's list: the element being gone through, which {{item…}} reads. */
+  dataItem?: { value: unknown };
   /** Step ids whose output a later step uses: the only outputs kept. */
   used: Set<string>;
 }
@@ -171,13 +175,16 @@ export async function loadSettings(tx: Tx): Promise<Settings> {
  * Counts one unit against a fixed-window cap, in the caller's transaction (so a rolled-back step
  * gives it back). Throws CapReached once the window is full.
  */
-export async function consume(tx: Tx, tenantId: string, bucket: string, cap: number, windowMs: number, what: string): Promise<void> {
+export async function consume(tx: Tx, tenantId: string, bucket: string, cap: number | null, windowMs: number, what: string): Promise<void> {
   const start = new Date(Math.floor(Date.now() / windowMs) * windowMs);
-  const counted = cap <= 0 ? false : await countUsage(tx, tenantId, bucket, start, cap);
+  // null: no cap (a workspace limit set to unlimited). The unit is still counted, so usage can be reported.
+  const counted = cap !== null && cap <= 0 ? false : await countUsage(tx, tenantId, bucket, start, Math.min(cap ?? NO_CAP, NO_CAP));
   if (!counted) throw new CapReached(`${what} (${cap}) reached`, bucket, start);
 }
 
 const HOUR = 3_600_000;
+/** The counter is an int column. */
+const NO_CAP = 2_147_483_647;
 
 /** A keyed hash of an address, so suppressions, caps, logs and the audit never hold the address itself. */
 export const addressHash = (tenantId: string, email: string): Buffer => sha256(`hlcrm-email:${tenantId}:${canonicalEmail(email)}`);
@@ -286,7 +293,8 @@ const isItem = (env: Env, cur: Cur | null) => Boolean(cur && (!env.start || cur.
 
 async function scopeFor(tx: Tx, env: Env, cur: Cur | null): Promise<TemplateScope> {
   return {
-    record: await readOwn(tx, env, env.start), item: isItem(env, cur) ? await readOwn(tx, env, cur) : null,
+    record: await readOwn(tx, env, env.start),
+    item: env.dataItem ? (env.dataItem.value as TemplateScope["item"]) : isItem(env, cur) ? await readOwn(tx, env, cur) : null,
     event: env.event ? { type: env.event.type, id: encodeId("evt", env.event.id) } : null,
     steps: env.state.vars, run: { id: encodeId("run", env.runId) }, automation: { id: encodeId("auto", env.a.id), name: env.a.name },
   };
@@ -340,6 +348,20 @@ async function runForEach(env: Env, step: Extract<Step, { type: "for_each" }>, p
       pushResult(env, { step: path, id: step.id, action: "for_each", ok: true, skipped: skip, detail: {} }, { count: 0, ids: [] });
       return null;
     }
+    if (step.items !== undefined) {
+      // The list is another system's reply: whatever it holds is data, each element bounded where it is used.
+      const v = fillString(step.items, scope, { budget: cap(HTTP_MAX_BYTES, "The for_each list") });
+      if (!Array.isArray(v)) {
+        throw new DataError(`for_each: ${step.items} is not a list${policy().allowInsecure ? " (with private targets allowed, an HTTP reply is not kept)" : ""}`);
+      }
+      const items = v.slice(0, LIMITS.forEachMax);
+      const truncated = v.length > items.length;
+      env.state.loop = { path, object: "", ids: [], items };
+      pushResult(env, { step: path, id: step.id, action: "for_each", ok: true,
+        detail: { count: items.length, cap: LIMITS.forEachMax, ...(truncated ? { truncated: true, note: `The list was longer; only the first ${LIMITS.forEachMax} were processed (the cap per run)` } : {}) } },
+        { count: items.length, truncated });
+      return env.state.loop;
+    }
     let object: string;
     let ids: string[];
     let truncated: boolean;
@@ -364,6 +386,19 @@ async function runForEach(env: Env, step: Extract<Step, { type: "for_each" }>, p
     pushResult(env, { step: path, id: step.id, action: "for_each", ok: true, detail }, { object, ids, count: ids.length, truncated });
     return env.state.loop;
   });
+  if (list?.items) {
+    try {
+      for (const [k, value] of list.items.entries()) {
+        if (env.state.stopped) return;
+        deadline(env);
+        env.dataItem = { value };
+        await runSteps(env, step.steps, `${path}.${k + 1}`, null);
+      }
+    } finally {
+      env.dataItem = undefined;
+    }
+    return;
+  }
   if (!list || !list.object) return;
   const obj = getObject(await env.unit((tx) => loadSchema(tx)), list.object);
   for (const [k, publicId] of list.ids.entries()) {
@@ -527,7 +562,7 @@ function syntheticEvent(env: Env, cur: Cur | null, path: string): EventRow {
 
 async function countAction(tx: Tx, env: Env): Promise<void> {
   if (env.mode === "simulate") return;
-  await consume(tx, env.tenantId, "actions", config().AUTOMATION_ACTIONS_PER_HOUR, HOUR, "the workspace's hourly cap on automation actions");
+  await consume(tx, env.tenantId, "actions", await limitOf(tx, "automation_actions_per_hour"), HOUR, "the workspace's hourly cap on automation actions");
 }
 
 /** The run's dependencies (automation-access.ts), worked out once per run. */
@@ -584,12 +619,14 @@ async function asSeenBy(tx: Tx, env: Env, uctx: Ctx, cur: Cur | null): Promise<P
 // ----------------------------------------------------------------------------------------------
 // HTTP requests
 
-const FORBIDDEN_HEADERS = new Set(["host", "content-length", "content-type", "transfer-encoding", "connection", "keep-alive", "upgrade", "te", "trailer",
-  "expect", "proxy-authorization", "proxy-connection"]);
-export const headerAllowed = (name: string) => !FORBIDDEN_HEADERS.has(name.toLowerCase()) && !name.toLowerCase().startsWith("hlcrm-");
+export { headerAllowed };
 
 type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
-interface HttpPlan { method: HttpMethod; url: string; headers: Record<string, string>; secretNames: string[]; body: string | undefined }
+interface HttpPlan {
+  method: HttpMethod; url: string; headers: Record<string, string>; secretNames: string[]; body: string | undefined;
+  /** The connection the step names: its credential header is fetched when the request is sent, never while it is planned. */
+  connection: { id: string; key: string; header: string } | null;
+}
 
 async function secretsFor(tx: Tx, env: Env): Promise<Record<string, Record<string, string>>> {
   if (env.secrets) return env.secrets;
@@ -603,8 +640,15 @@ async function secretsFor(tx: Tx, env: Env): Promise<Record<string, Record<strin
  * Every part is bounded while it is filled.
  */
 async function prepareHttp(tx: Tx, env: Env, step: Extract<InnerStep, { type: "http_request" }>, scope: TemplateScope): Promise<HttpPlan> {
-  const url = fillUrl(step.url, scope, { budget: cap(FILL.url, "The request URL") });
-  const fixed = new URL(step.url.replace(/\{\{[^{}]*\}\}/g, "x"));
+  const conn = step.connection ? await connectionForStep(tx, step.connection) : null;
+  if (conn) {
+    if (!conn.enabled) throw unprocessable(`Connection ${conn.key} is turned off`);
+    checkConnectionPath(step.url, "The request URL");
+  }
+  // With a connection the step's url is a path: the host, and any path prefix, are the connection's.
+  const template = conn ? connectionUrl(conn, step.url) : step.url;
+  const url = fillUrl(template, scope, { budget: cap(FILL.url, "The request URL") });
+  const fixed = new URL(template.replace(/\{\{[^{}]*\}\}/g, "x"));
   let parsed: URL;
   try {
     parsed = checkUrl(url, policy());
@@ -614,7 +658,7 @@ async function prepareHttp(tx: Tx, env: Env, step: Extract<InnerStep, { type: "h
     throw e;
   }
   if (parsed.origin !== fixed.origin) throw unprocessable("The request URL's host changed after filling placeholders"); // encodeURIComponent makes this unreachable
-  if (!samePath(step.url, parsed.pathname)) throw new DataError("The request URL's path changed once its placeholders were filled");
+  if (!samePath(template, parsed.pathname)) throw new DataError("The request URL's path changed once its placeholders were filled");
   const headers: Record<string, string> = {};
   for (const [k, v] of Object.entries(step.headers ?? {})) headers[k] = fillString(v, scope, { target: "header", budget: cap(FILL.header, `Header ${k}`) }) as string;
   const secretNames = Object.keys(step.secret_headers ?? {});
@@ -624,9 +668,15 @@ async function prepareHttp(tx: Tx, env: Env, step: Extract<InnerStep, { type: "h
     if (v === undefined) throw unprocessable(`Secret header ${k} has no stored value; set it again`);
     headers[k] = v;
   }
+  if (conn) {
+    const clash = Object.keys(headers).find((k) => k.toLowerCase() === conn.header_name.toLowerCase());
+    if (clash) throw unprocessable(`Header ${clash} is set by connection ${conn.key}; remove it from the step`);
+    headers[conn.header_name] = "";
+    secretNames.push(conn.header_name);
+  }
   const body = step.body === undefined ? undefined : JSON.stringify(fillDeep(step.body, scope, { budget: cap(FILL.httpBody, "The request body") }));
   if (body !== undefined && Buffer.byteLength(body) > HTTP_MAX_BYTES) throw new DataError(`The request body is larger than ${HTTP_MAX_BYTES / 1024} KB`);
-  return { method: step.method, url: parsed.toString(), headers, secretNames, body };
+  return { method: step.method, url: parsed.toString(), headers, secretNames, body, connection: conn ? { id: conn.id, key: conn.key, header: conn.header_name } : null };
 }
 
 /** Fields of the current record a URL template fills its path or query from. */
@@ -769,7 +819,7 @@ const emailText = (step: Extract<InnerStep, { type: "send_email" }>, scope: Temp
 async function emailCaps(tx: Tx, env: Env, plan: EmailPlan): Promise<string | null> {
   const cfg = config();
   if (++env.state.emails > LIMITS.emailsPerRun) throw new CapReached(`more than ${LIMITS.emailsPerRun} emails in one run`);
-  await consume(tx, env.tenantId, "email", cfg.AUTOMATION_EMAILS_PER_HOUR, HOUR, "the workspace's hourly cap on automation emails");
+  await consume(tx, env.tenantId, "email", await limitOf(tx, "automation_emails_per_hour"), HOUR, "the workspace's hourly cap on automation emails");
   await consume(tx, env.tenantId, `email:${env.a.id}`, cfg.AUTOMATION_EMAILS_PER_AUTOMATION_HOUR, HOUR, "this automation's hourly cap on emails");
   try {
     await consume(tx, env.tenantId, `rcpt:${mailboxHash(env.tenantId, plan.to).toString("hex").slice(0, 40)}`, cfg.AUTOMATION_EMAILS_PER_RECIPIENT_DAY, 24 * HOUR, "per-recipient daily cap");
@@ -801,7 +851,7 @@ async function outbound(env: Env, step: Extract<InnerStep, { type: "http_request
         return null;
       }
       if (++env.state.http > LIMITS.httpPerRun) throw new CapReached(`more than ${LIMITS.httpPerRun} HTTP requests in one run`);
-      await consume(tx, env.tenantId, "http", config().AUTOMATION_HTTP_PER_HOUR, HOUR, "the workspace's hourly cap on automation HTTP requests");
+      await consume(tx, env.tenantId, "http", await limitOf(tx, "automation_http_per_hour"), HOUR, "the workspace's hourly cap on automation HTTP requests");
       return { kind: "http", plan: await prepareHttp(tx, env, step, scope) };
     }
     const plan = await prepareEmail(tx, env, step, path, cur, scope);
@@ -818,12 +868,23 @@ async function outbound(env: Env, step: Extract<InnerStep, { type: "http_request
     const started = Date.now();
     let res: { status: number; body: string; truncated?: boolean } | null = null;
     let error: string | null = null;
+    let errorKind: FailureKind = "target";
+    const send = (cred: Credential | null) => safeRequest(p.url, { method: p.method, headers: { "user-agent": "hl-crm-db-automations/1", ...p.headers,
+      ...(cred ? { [cred.header]: cred.value } : {}),
+      "hlcrm-automation": encodeId("auto", env.a.id), "hlcrm-run": encodeId("run", env.runId),
+      ...(p.body !== undefined ? { "content-type": "application/json" } : {}) }, body: p.body, maxBytes: HTTP_MAX_BYTES, timeoutMs: HTTP_TIMEOUT_MS, truncate: true }, policy());
     try {
-      res = await safeRequest(p.url, { method: p.method, headers: { "user-agent": "hl-crm-db-automations/1", ...p.headers,
-        "hlcrm-automation": encodeId("auto", env.a.id), "hlcrm-run": encodeId("run", env.runId),
-        ...(p.body !== undefined ? { "content-type": "application/json" } : {}) }, body: p.body, maxBytes: HTTP_MAX_BYTES, timeoutMs: HTTP_TIMEOUT_MS, truncate: true }, policy());
+      let cred = p.connection ? await connectionCredential(env.tenantId, p.connection.id) : null;
+      res = await send(cred);
+      // A 401 through an OAuth connection usually means the token ran out early: one new token, one more try.
+      if (res.status === 401 && cred?.refreshable) {
+        cred = await connectionCredential(env.tenantId, p.connection!.id, { force: true });
+        res = await send(cred);
+      }
     } catch (e) {
-      error = e instanceof BlockedTargetError ? e.message.replace(/^Webhook URL/, "The request URL").slice(0, 300)
+      if (e instanceof ConnectionError) errorKind = "config";
+      error = e instanceof ConnectionError ? e.message.slice(0, 300)
+        : e instanceof BlockedTargetError ? e.message.replace(/^Webhook URL/, "The request URL").slice(0, 300)
         : (e as Error).message?.startsWith("timed out") ? (e as Error).message.slice(0, 100)
         : `network error${typeof (e as NodeJS.ErrnoException).code === "string" && /^[A-Z0-9_]{2,40}$/.test((e as NodeJS.ErrnoException).code!) ? ` (${(e as NodeJS.ErrnoException).code})` : ""}`;
     }
@@ -834,12 +895,14 @@ async function outbound(env: Env, step: Extract<InnerStep, { type: "http_request
       const view = res && !policy().allowInsecure ? snippet(res.body) : { json: null, snippet: "" };
       const ok = Boolean(res && res.status < 400);
       await audit(tx, env.actx, { action: "automation.http_request", details: { automation: encodeId("auto", env.a.id), run: encodeId("run", env.runId),
-        step: path, method: p.method, host: new URL(p.url).host, status: res?.status ?? null } });
+        step: path, method: p.method, host: new URL(p.url).host, status: res?.status ?? null,
+        ...(p.connection ? { connection: encodeId("conn", p.connection.id) } : {}) } });
+      if (p.connection && res) await markConnectionUsed(tx, p.connection.id);
       const detail = { method: p.method, url: logUrl(p.url), headers: Object.keys(p.headers), status: res?.status ?? null, duration_ms: durationMs,
         ...(error ? { error } : { snippet: view.snippet, ...(res?.truncated ? { truncated: true } : {}) }) };
       pushResult(env, { ...base, ok, detail }, { status: res?.status ?? null, ok, json: view.json, snippet: view.snippet });
     });
-    if (error) throw new StepFailed(`step ${path} (http_request): ${error}`, "target");
+    if (error) throw new StepFailed(`step ${path} (http_request): ${error}`, errorKind);
     if (res && res.status >= 400) throw new StepFailed(`step ${path} (http_request): the server answered HTTP ${res.status}`, httpKind(res.status));
     return;
   }

@@ -10,13 +10,18 @@ Version: **0.2 (Phase 1, MVP).** The software has had automated testing (unit, i
 - **Schema engine.** Standard objects (contacts, accounts, leads, deals, activities, tasks) plus custom objects and fields in one call; 19 field types including address, json, rating, percent and duration; relations; pipelines; schema history.
 - **Records API.** REST `/v1` with an OpenAPI document, idempotency keys, `If-Match`, filters across relations, sorting, counts, aggregates, saved views, search, merges, duplicate finder, bulk changes, restore and timelines.
 - **MCP servers.** Ops and admin servers over HTTP and stdio, dry-run by default for changes, confirmation tokens, OAuth for remote clients (not yet verified against the hosted clients themselves; see below).
-- **People and sign-in.** Browser sessions: email code or link, password, single sign-on (OpenID Connect) and a server-printed link; invite-only.
+- **People and sign-in.** Browser sessions: email code or link, password, single sign-on (OpenID Connect) and a server-printed link; invite-only unless the operator turns sign-up on.
 - **Events and automations.** Outbox, signed webhooks with retries and replay, alerts and notifications, automations with schedules, HTTP requests, email, loops and caps.
 - **`crm` CLI.** Schema-as-code (`pull`, `plan`, `apply`), CSV and NDJSON import and export, keys, members, roles, webhooks, automations, audit, and schema packs. Build it from source for now.
 - **Schema packs.** Shareable workspace setups (objects, fields, pipelines, roles, shared views), with two MIT example packs (recruiting, support desk).
+- **Connections.** Stored credentials for calling other systems from automations (a token, OAuth client credentials or an OAuth refresh token), bound to one base URL, with guides for using hl-crm-db beside HubSpot and Salesforce. Not yet in a release.
+- **Record page layouts for agents and people.** A layout arranges components (field sections, related lists, timeline, notes, files, quotes, tasks, stage path, changes by agents) as well as fields. One shared draft per object, changed over the admin MCP server or the API with a dry run first, published as versions that are kept with where each change came from, and included in `crm schema pull` and `apply`. Not yet in a release; the web editor for it is next.
 - **Quotes and orders.** A quote is made for a deal, priced by its lines, sent (then fixed), revised, and accepted, which makes an order and marks the deal won. Both behaviours are workspace settings.
 - **Files and notes.** Files attached to any record (Postgres by default, S3-compatible as an option, sealed with the workspace's key there), always served as downloads; notes in Markdown, shown formatted, that can carry files.
-- **Web UI.** Lists with filters, sorting and saved views, as a table, a board for any object, a calendar or a grouped table with totals; record pages with timelines, notes and files, with sections that can be arranged per object; a deals board; tasks and inbox; command palette; settings for members, roles, API keys, webhooks, audit log, schema, and read-only automations and installed packs.
+- **Sign-up, off by default** (unreleased, after 0.2). With `SIGN_UP=true` a person proves an email address with a code and creates a workspace they own, from the sign-in page or in the middle of connecting an MCP client. Caps per address, per email and server-wide ([ADR 0018](docs/decisions/0018-self-sign-up.md)).
+- **Workspace limits** (unreleased). Ceilings per workspace on records, members, keys, custom objects and fields, webhooks, automations, file storage and request rate, with server defaults and per-workspace values only the operator can set; usage at `GET /v1/workspace/usage` ([`docs/limits.md`](docs/limits.md)).
+- **Deleting a workspace and erasing a person** (unreleased). An owner or the operator deletes a workspace and everything in it, leaving a tombstone with no customer content; a contact, lead or custom-object record is erased in place along with the copies of its values ([ADR 0020](docs/decisions/0020-data-disposal.md)).
+- **Web UI.** Lists with filters, sorting and saved views, as a table, a board for any object, a calendar or a grouped table with totals; record pages with timelines, notes and files, with sections that can be arranged per object; a deals board; tasks and inbox; command palette; settings for members, roles, API keys, webhooks, audit log, schema, and read-only automations and installed packs. Also, not yet in a release: record pages drawn from a layout and the layout editor people share with agents; Objects & fields with a dry run before each change and the source of every change; Home by team and an admin Home; an automations editor with dry run, test and run history; and data health (duplicate review with a field-by-field merge, and on-demand checks).
 
 ## Next
 
@@ -26,10 +31,10 @@ Roughly in this order; the order can change with what testers ask for.
 2. **Real-client verification of OAuth for MCP** with Claude, ChatGPT and Cursor, and fixes from what that shows.
 3. **A `file` field type**, and a virus-scanner hook for uploads ([ADR 0011](docs/decisions/0011-files-and-attachments.md)). Files attached to records are built.
 4. **Multi-factor authentication or passkeys** for people sign-in.
-5. **Browser editing for automations and packs** (today: CLI and API; the UI lists them read-only).
+5. **Browser editing for packs** (today: CLI and API; the UI lists installed packs read-only). Automations can be made, changed, tested and run in the browser.
 6. **Sandbox workspaces and promoting a schema** from one workspace to another as a reviewed step.
-7. **Records housekeeping:** unmerge, erase, per-workspace quotas, data-key rotation.
-8. **A hosted version** is planned. Self-hosting stays a first-class way to run it.
+7. **Records housekeeping:** unmerge and data-key rotation. Erasure and per-workspace limits are built.
+8. **A hosted version** is planned. Self-hosting stays a first-class way to run it. What it needed from this repository first is built: sign-up, workspace limits, deleting a workspace, and a written [backup and restore](docs/backup-restore.md) procedure. Still to do before it holds anyone's data: items 2 and 4 above, data-key rotation, limits shared between API processes (today each process counts its own), and monitoring and incident-response runbooks.
 
 ## Designed, not built
 
@@ -44,7 +49,7 @@ Roughly in this order; the order can change with what testers ask for.
 - **Extra infrastructure.** No Redis, message broker or search service: Postgres does the queues, search and scheduling.
 - **Dedicated database per workspace, table partitioning, and per-field indexes for custom fields.** Shared tables with row-level security are sized for about a million rows per large workspace; these come when a workload needs them.
 - **Record-level sharing** ("only records I own"). Access rules are per object and per field.
-- **SCIM, self sign-up, and creating workspaces from the browser.** Workspaces are created by the operator (`bootstrap`); only existing members can sign in.
+- **SCIM.** Members are added by an admin, or create their own workspace when the operator turned sign-up on.
 - **Compliance claims.** The project makes none (for example "SOC 2 compliant"). The software provides isolation, roles, encryption and an audit log; running it securely is the operator's job.
 
 ## How decisions are made

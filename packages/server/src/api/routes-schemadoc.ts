@@ -34,6 +34,8 @@ const Document = z.object({
     id: Id, name: Name, label: z.string().optional(), plural_label: z.string().optional(), description: z.string().max(TEXT_MAX.description).optional(),
     id_prefix: z.string().optional(), display_field: z.string().optional(), owned: z.boolean().optional(), hidden: z.boolean().optional(),
     standard: z.boolean().optional(), module: z.string().optional(), fields: z.array(DocField).max(300).optional(),
+    // The record page layout, checked by core/layouts.ts when the document runs. null: the default page.
+    layout: z.unknown().optional(),
   }).strict()).max(150).optional(),
   pipelines: z.array(z.object({
     id: Id, name: Name, is_default: z.boolean().optional(),

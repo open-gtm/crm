@@ -2,12 +2,12 @@ import type { Tx } from "../db/pool.js";
 import { encodeId } from "../lib/ids.js";
 import { canObject, fieldAccess } from "./access.js";
 import { own, STATUS_MACHINES } from "./catalog.js";
-import type { Ctx } from "./context.js";
+import { can, type Ctx } from "./context.js";
 import { ADDRESS_PART_NAMES, PERCENT, ratingMax } from "./fieldtypes.js";
 import { listPipelines } from "./pipelines.js";
 import { getObject, isModuleOn, loadSchema, quoteIdent, type FieldMeta, type ObjectMeta } from "./schema.js";
 import { countLiveCustomRecordsCapped } from "./queries/records.js";
-import { activeMembersForPicking, activityTypeList, schemaChangeLog } from "./queries/schema.js";
+import { activeMembersForPicking, activityTypeList, lastChangesOf, packOwnership, schemaChangeLog, type LastChangeRow } from "./queries/schema.js";
 
 /**
  * Field metadata as agents and clients see it. Names are not data, so every field is listed to
@@ -56,6 +56,23 @@ function typeDetails(f: FieldMeta): Record<string, unknown> {
 /** What the caller can do with an object's records. */
 const objectAccess = (ctx: Ctx, o: ObjectMeta) => ({ read: canObject(ctx, o, "read"), write: canObject(ctx, o, "write"), archive: canObject(ctx, o, "archive") });
 
+/** Which installed pack made an object or a field, by ID. */
+async function packOwners(tx: Tx): Promise<Map<string, string>> {
+  const owners = new Map<string, string>();
+  for (const p of await packOwnership(tx)) {
+    for (const id of [...Object.values(p.owned.objects ?? {}), ...Object.values(p.owned.fields ?? {})]) if (typeof id === "string") owners.set(id, p.name);
+  }
+  return owners;
+}
+
+/** Where something in the schema comes from: built in, made in this workspace, or made by an installed pack. */
+const originOf = (isSystem: boolean, pack: string | undefined) =>
+  (pack ? { origin: "pack" as const, pack } : { origin: isSystem ? "standard" as const : "custom" as const });
+
+const actorOf = (r: { actor_type: string; actor_id: string | null }) => (r.actor_id ? encodeId(r.actor_type === "user" ? "usr" : "svc", r.actor_id) : r.actor_type);
+const lastChange = (r: LastChangeRow) => ({
+  change: r.change_type, changed_at: r.changed_at.toISOString(), surface: r.surface, via: r.via, pack: r.pack, actor: actorOf(r), version: Number(r.version) });
+
 function describeObjectMeta(o: ObjectMeta) {
   return {
     name: o.api_name,
@@ -73,8 +90,15 @@ function describeObjectMeta(o: ObjectMeta) {
 export async function describeObject(tx: Tx, ctx: Ctx, name: string, opts: { includeHidden?: boolean } = {}) {
   const schema = await loadSchema(tx);
   const obj = getObject(schema, name);
-  const fields = obj.fields.filter((f) => opts.includeHidden || !f.hidden).map((f) => describeField(f, fieldAccess(ctx, obj, f), obj.api_name));
+  const owners = await packOwners(tx);
+  // Who last changed each field, and through what, is the schema's history: for those who may read the audit log.
+  const last = can(ctx, "audit:read") ? new Map((await lastChangesOf(tx, obj.id)).map((r) => [r.field_id ?? "", r])) : null;
+  const fields = obj.fields.filter((f) => opts.includeHidden || !f.hidden).map((f) => ({
+    ...describeField(f, fieldAccess(ctx, obj, f), obj.api_name), ...originOf(f.is_system, owners.get(f.id)),
+    ...(last?.has(f.id) ? { last_change: lastChange(last.get(f.id)!) } : {}),
+  }));
   const extra: Record<string, unknown> = {};
+  if (last?.has("")) extra.last_change = lastChange(last.get("")!);
   if (obj.api_name === "deal") extra.pipelines = await listPipelines(tx);
   if (obj.api_name === "activity") {
     extra.activity_types = await activityTypeList(tx);
@@ -89,6 +113,7 @@ export async function describeObject(tx: Tx, ctx: Ctx, name: string, opts: { inc
   }
   return {
     ...describeObjectMeta(obj),
+    ...originOf(obj.is_system, owners.get(obj.id)),
     access: objectAccess(ctx, obj),
     currency: schema.currency,
     system_fields: ["id", "display_name", "created_at", "updated_at", "version", "archived_at"],
@@ -99,8 +124,9 @@ export async function describeObject(tx: Tx, ctx: Ctx, name: string, opts: { inc
 
 export async function listObjects(tx: Tx, ctx: Ctx) {
   const schema = await loadSchema(tx);
+  const owners = await packOwners(tx);
   return [...schema.objects.values()].filter((o) => isModuleOn(schema, o)).map((o) => ({
-    ...describeObjectMeta(o), hidden: o.hidden || undefined, field_count: o.fields.length, access: objectAccess(ctx, o),
+    ...describeObjectMeta(o), ...originOf(o.is_system, owners.get(o.id)), hidden: o.hidden || undefined, field_count: o.fields.length, access: objectAccess(ctx, o),
   }));
 }
 
@@ -151,11 +177,12 @@ export async function schemaSummary(tx: Tx, ctx: Ctx) {
   };
 }
 
-export async function schemaChanges(tx: Tx, limit = 50) {
-  const rows = await schemaChangeLog(tx, Math.min(Math.max(limit, 1), 500));
+export async function schemaChanges(tx: Tx, limit = 50, objectName?: string) {
+  const objectId = objectName === undefined ? null : getObject(await loadSchema(tx), objectName).id;
+  const rows = await schemaChangeLog(tx, Math.min(Math.max(limit, 1), 500), objectId);
   return rows.map((r) => ({
     version: Number(r.version), changed_at: r.changed_at.toISOString(), change: r.change_type, object: r.object_name,
-    field: r.field_name, surface: r.surface, actor: r.actor_id ? encodeId(r.actor_type === "user" ? "usr" : "svc", r.actor_id) : r.actor_type,
+    field: r.field_name, surface: r.surface, via: r.via, pack: r.pack, actor: actorOf(r),
     before: r.before, after: r.after,
   }));
 }
