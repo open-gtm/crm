@@ -1,4 +1,5 @@
 import type { Tx } from "../db/pool.js";
+import { assertSchemaRoom, assertSchemaWithin } from "./limits.js";
 import { sha256 } from "../lib/crypto.js";
 import { ApiError, conflict, deadline, forbidden, notFound, unprocessable, WORK_BUDGET_MS } from "../lib/errors.js";
 import { decodeId, encodeId, VIEW_ID_PREFIX } from "../lib/ids.js";
@@ -19,7 +20,7 @@ import {
 } from "./queries/packs.js";
 import { archiveRole, createRole, publicRules, resolveRole, updateRole } from "./roles.js";
 import {
-  archiveField, confirmToken, countValues, loadSchema, lockSchema, MAX_CUSTOM_OBJECTS, MAX_FIELDS, recordChange, type FieldMeta, type ObjectMeta, type Schema,
+  archiveField, confirmToken, countValues, loadSchema, lockSchema, MAX_FIELDS, recordChange, type FieldMeta, type ObjectMeta, type Schema,
 } from "./schema.js";
 import { runSchemaDocument, type DocObject, type DocPipeline, type PlannedChange, type Problem } from "./schemadoc.js";
 import { createView, deleteView, updateView } from "./views.js";
@@ -419,7 +420,6 @@ function toDocument(schema: Schema, pack: Pack, owned: Owned, pipelines: { id: s
 async function restore(tx: Tx, ctx: Ctx, pack: Pack, owned: Owned, run: PackRun): Promise<void> {
   const listed = new Set((pack.schema?.objects ?? []).map((o) => o.name));
   const listedFields = new Set((pack.schema?.objects ?? []).flatMap((o) => (o.fields ?? []).map((f) => `${o.name}.${f.name}`)));
-  let live = [...(await loadSchema(tx)).objects.values()].filter((o) => !o.is_system).length;
   for (const [name, id] of Object.entries(owned.objects)) {
     const o = await objectArchivedAt(tx, id);
     if (!o) {
@@ -431,12 +431,13 @@ async function restore(tx: Tx, ctx: Ctx, pack: Pack, owned: Owned, run: PackRun)
       run.notes.push(`objects.${name}: archived when the pack was uninstalled, and not in this version of it; left archived`);
       continue;
     }
-    if (live >= MAX_CUSTOM_OBJECTS) throw unprocessable(`objects.${name}: restoring it would pass the limit of ${MAX_CUSTOM_OBJECTS} custom objects`);
-    live++;
+    await assertSchemaRoom(tx, await loadSchema(tx), { objects: 1 });
     const held = await liveRecordCount(tx, id);
     await restoreObject(tx, id);
     const change = { change: "object_restored", object: name };
     await recordChange(tx, ctx, { ...change, object_id: id });
+    // Its fields come back with it, and they count too.
+    await assertSchemaWithin(tx, await loadSchema(tx));
     run.changes.push({ ...change, ...(held ? { warning: `${held} record(s) come back with it`, data_affecting: true } : {}) });
   }
   for (const [key, id] of Object.entries(owned.fields)) {
@@ -458,6 +459,7 @@ async function restore(tx: Tx, ctx: Ctx, pack: Pack, owned: Owned, run: PackRun)
     const obj = (await loadSchema(tx)).byId.get(f.object_id);
     if (!obj) continue; // its object is archived: the field comes back with it
     if (obj.fields.length >= MAX_FIELDS) throw unprocessable(`fields.${key}: restoring it would pass the limit of ${MAX_FIELDS} fields on ${obj.api_name}`);
+    await assertSchemaRoom(tx, await loadSchema(tx), { fields: 1 });
     const values = await countValues(tx, obj, f);
     await restoreField(tx, id);
     const [object, field] = key.split(".");

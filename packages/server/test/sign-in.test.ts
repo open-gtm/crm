@@ -325,7 +325,7 @@ describe("sessions", () => {
     expect([...PUBLIC_AUTH_ROUTES].sort()).toEqual(["GET /.well-known/oauth-authorization-server", "GET /.well-known/oauth-protected-resource/mcp/admin",
       "GET /.well-known/oauth-protected-resource/mcp/ops", "GET /.well-known/openid-configuration", "GET /auth/capabilities", "GET /auth/sso/callback",
       "GET /oauth/authorize", "OPTIONS /oauth/*", "POST /auth/choose", "POST /auth/email", "POST /auth/email/link", "POST /auth/email/verify", "POST /auth/password",
-      "POST /auth/server-link", "POST /auth/sso", "POST /oauth/authorize", "POST /oauth/register", "POST /oauth/revoke", "POST /oauth/token"]);
+      "POST /auth/server-link", "POST /auth/sign-up", "POST /auth/sign-up/verify", "POST /auth/sign-up/workspace", "POST /auth/sso", "POST /oauth/authorize", "POST /oauth/register", "POST /oauth/revoke", "POST /oauth/token"]);
     expect(routes.every((r) => r.path.startsWith("/v1/") && requiredPermission(r) !== null)).toBe(true);
     const own = routes.filter((r) => requiredPermission(r) === "own_credential").map((r) => `${r.method} ${r.path}`).sort();
     expect(own).toEqual(["DELETE /v1/apps/:id", "DELETE /v1/auth/apps/:id", "DELETE /v1/auth/password", "DELETE /v1/auth/sso", "DELETE /v1/sessions/:id",
@@ -348,7 +348,7 @@ describe("email code and link", () => {
       setMailer(mail);
     }
     const cap = await (await app.request("/auth/capabilities")).json();
-    expect(cap).toEqual({ enabled: true, methods: { email_code: true, password: true, sso: null }, code_length: 8 });
+    expect(cap).toEqual({ enabled: true, methods: { email_code: true, password: true, sso: null }, code_length: 8, sign_up: false });
   });
 
   it("signs in with the emailed code, to the return_to path, with the code typed in the same browser", async () => {

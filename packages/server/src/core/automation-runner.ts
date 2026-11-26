@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { limitOf } from "./limits.js";
 import { canonicalEmail } from "../auth/identity.js";
 import { hit, LIMITS as RATE_LIMITS, type Limit } from "../auth/limits.js";
 import { config } from "../config.js";
@@ -174,13 +175,16 @@ export async function loadSettings(tx: Tx): Promise<Settings> {
  * Counts one unit against a fixed-window cap, in the caller's transaction (so a rolled-back step
  * gives it back). Throws CapReached once the window is full.
  */
-export async function consume(tx: Tx, tenantId: string, bucket: string, cap: number, windowMs: number, what: string): Promise<void> {
+export async function consume(tx: Tx, tenantId: string, bucket: string, cap: number | null, windowMs: number, what: string): Promise<void> {
   const start = new Date(Math.floor(Date.now() / windowMs) * windowMs);
-  const counted = cap <= 0 ? false : await countUsage(tx, tenantId, bucket, start, cap);
+  // null: no cap (a workspace limit set to unlimited). The unit is still counted, so usage can be reported.
+  const counted = cap !== null && cap <= 0 ? false : await countUsage(tx, tenantId, bucket, start, Math.min(cap ?? NO_CAP, NO_CAP));
   if (!counted) throw new CapReached(`${what} (${cap}) reached`, bucket, start);
 }
 
 const HOUR = 3_600_000;
+/** The counter is an int column. */
+const NO_CAP = 2_147_483_647;
 
 /** A keyed hash of an address, so suppressions, caps, logs and the audit never hold the address itself. */
 export const addressHash = (tenantId: string, email: string): Buffer => sha256(`hlcrm-email:${tenantId}:${canonicalEmail(email)}`);
@@ -558,7 +562,7 @@ function syntheticEvent(env: Env, cur: Cur | null, path: string): EventRow {
 
 async function countAction(tx: Tx, env: Env): Promise<void> {
   if (env.mode === "simulate") return;
-  await consume(tx, env.tenantId, "actions", config().AUTOMATION_ACTIONS_PER_HOUR, HOUR, "the workspace's hourly cap on automation actions");
+  await consume(tx, env.tenantId, "actions", await limitOf(tx, "automation_actions_per_hour"), HOUR, "the workspace's hourly cap on automation actions");
 }
 
 /** The run's dependencies (automation-access.ts), worked out once per run. */
@@ -815,7 +819,7 @@ const emailText = (step: Extract<InnerStep, { type: "send_email" }>, scope: Temp
 async function emailCaps(tx: Tx, env: Env, plan: EmailPlan): Promise<string | null> {
   const cfg = config();
   if (++env.state.emails > LIMITS.emailsPerRun) throw new CapReached(`more than ${LIMITS.emailsPerRun} emails in one run`);
-  await consume(tx, env.tenantId, "email", cfg.AUTOMATION_EMAILS_PER_HOUR, HOUR, "the workspace's hourly cap on automation emails");
+  await consume(tx, env.tenantId, "email", await limitOf(tx, "automation_emails_per_hour"), HOUR, "the workspace's hourly cap on automation emails");
   await consume(tx, env.tenantId, `email:${env.a.id}`, cfg.AUTOMATION_EMAILS_PER_AUTOMATION_HOUR, HOUR, "this automation's hourly cap on emails");
   try {
     await consume(tx, env.tenantId, `rcpt:${mailboxHash(env.tenantId, plan.to).toString("hex").slice(0, 40)}`, cfg.AUTOMATION_EMAILS_PER_RECIPIENT_DAY, 24 * HOUR, "per-recipient daily cap");
@@ -847,7 +851,7 @@ async function outbound(env: Env, step: Extract<InnerStep, { type: "http_request
         return null;
       }
       if (++env.state.http > LIMITS.httpPerRun) throw new CapReached(`more than ${LIMITS.httpPerRun} HTTP requests in one run`);
-      await consume(tx, env.tenantId, "http", config().AUTOMATION_HTTP_PER_HOUR, HOUR, "the workspace's hourly cap on automation HTTP requests");
+      await consume(tx, env.tenantId, "http", await limitOf(tx, "automation_http_per_hour"), HOUR, "the workspace's hourly cap on automation HTTP requests");
       return { kind: "http", plan: await prepareHttp(tx, env, step, scope) };
     }
     const plan = await prepareEmail(tx, env, step, path, cur, scope);

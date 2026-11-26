@@ -344,11 +344,13 @@ crm data merge con_01JD… con_01JE… con_01JF…         # survivor first; sho
 crm data merge con_01JD… con_01JE… --field email=con_01JE…
 crm data list contact --archived --filter email=ana@example.com
 crm data restore con_01JE…
+crm data erase contact con_01JD…                     # for good: shows what goes, then asks. Needs an admin key
 ```
 
 - `duplicates` lists groups with the reason each was grouped (the fields, and `exact`, `normalized` or `similar`). Rules use only fields the key can read; a default rule on a field it can't read is skipped with a note. Only the 10,000 newest records are examined (1,000 for `--fuzzy`, comparing the first 48 characters of each name; if that takes over 1.5 s it is refused with a hint to raise `--min-similarity`). Names are printed on one line: a newline in a name is shown as a space.
 - `merge` keeps the survivor's values, fills its empty fields from the duplicates in the order given, and takes a field from a chosen record with `--field name=id`. Every reference to the duplicates moves to the survivor, and the duplicates are archived with a pointer to it (`crm data get` on a merged ID shows `merged_into`). It prints the field changes, the references it would move and any field it can't fill (with why), then asks (`--yes` to skip), and applies with the preview's token: if one of the records changed in between, the server refuses (409, exit 4) and nothing is merged. A merge moves at most 1,000 references; above that it is refused before anything changes (merge fewer duplicates at a time). On a merged ID, `crm data get` shows `merged_into` (the final survivor, through later merges) and `merge_chain`. There is no unmerge.
-- `restore` un-archives a record. It is refused when another record now has one of its unique values (an email, a domain) or when it was merged.
+- `restore` un-archives a record. It is refused when another record now has one of its unique values (an email, a domain), when it was merged, or when it was erased.
+- `erase` removes a person's values for good: a contact (with its leads), a lead, or a record of a custom object. The row stays, blank and archived. It prints the records it would blank, counts of what goes with them (activities, tasks, files, copies), and other records that seem to mention the person, which it does not change; then it asks (`--yes` to skip) and applies with the preview's token, so anything added in between is refused (409, exit 4). It needs a key with the `admin` scope whose member holds `schema:manage`. `--keep-emailable` leaves a contact's address off the list automations never email. See [`docs/data-model.md`](data-model.md#erasing-a-persons-records).
 
 See [`docs/data-model.md`](data-model.md#merge-restore-and-duplicates) for the rules.
 
@@ -359,6 +361,8 @@ crm keys list
 crm keys create --name ci --scopes ops:read > ci-key.txt     # the secret alone goes to stdout
 crm keys rotate key_01JD… --overlap-hours 24
 crm keys revoke key_01JD…
+
+crm usage                                    # what the workspace uses against each of its limits (docs/limits.md)
 
 crm members list
 crm members add --email ana@example.com --name "Ana" --role member
@@ -409,6 +413,7 @@ crm automations run auto_01JD… --record con_01JD… --record con_01JE…   # d
 crm automations runs auto_01JD… --status failed --steps    # "skipped (cap)" and "failed (data)" mark cap skips and record-data failures
 
 crm audit log --action schema. --limit 20
+crm audit log --record con_01JD…               # everything logged about one record, member or key
 crm audit verify
 crm audit review --json > access-review.json   # every member, role, rule and key
 crm events list --status dead                   # events whose automations and webhooks never ran

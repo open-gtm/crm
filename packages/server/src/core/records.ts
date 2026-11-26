@@ -1,4 +1,5 @@
 import type { Tx } from "../db/pool.js";
+import { claimRecords } from "./limits.js";
 import { txState } from "../db/tx.js";
 import { ApiError, conflict, forbidden, notFound, unprocessable } from "../lib/errors.js";
 import { decodeId, encodeId, uuidv7 } from "../lib/ids.js";
@@ -135,6 +136,8 @@ export async function serialize(tx: Tx, ctx: Ctx, schema: Schema, obj: ObjectMet
     rec.updated_at = fromStorage("datetime", row.updated_at);
     rec.version = row.version;
     if (row.archived_at) rec.archived_at = fromStorage("datetime", row.archived_at);
+    // Erased for good (core/erasure.ts): the row stays so references to it hold, its values are gone.
+    if (row.anonymized_at) rec.erased_at = fromStorage("datetime", row.anonymized_at);
     const chain = mergedInto.get(row.id);
     if (chain) {
       rec.merged_into = encodeId(obj.id_prefix, chain[chain.length - 1]!);
@@ -385,6 +388,7 @@ export async function createRecord(tx: Tx, ctx: Ctx, objectName: string, input: 
   cols.set("created_by", ctx.actor.id);
   cols.set("updated_by", ctx.actor.id);
 
+  await claimRecords(tx, ctx.tenantId);
   try {
     if (!obj.is_system) {
       await registerRecord(tx, ctx.tenantId, id, obj.id);
@@ -568,6 +572,7 @@ export async function restoreRecord(tx: Tx, ctx: Ctx, objectName: string, public
   const [current] = await fetchRows(tx, obj, [id], true);
   if (!current) throw notFound(`${obj.label} ${publicId}`);
   if (!current.archived_at) throw conflict(`${obj.label} ${publicId} is not archived`);
+  if (current.anonymized_at) throw conflict(`${obj.label} ${publicId} was erased, so there is nothing to restore`);
   const chain = (await mergeChains(tx, [id])).get(id);
   if (chain) {
     const into = encodeId(obj.id_prefix, chain[chain.length - 1]!);

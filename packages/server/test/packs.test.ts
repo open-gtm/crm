@@ -416,7 +416,8 @@ describe("versions across an uninstall", () => {
     }
     resetRateLimiter();
     const p = await plan(ws.keys.admin, pack);
-    expect(p.status).toBe(422);
+    expect(p.status).toBe(409);
+    expect(p.json.code).toBe("limit_reached");
     expect(p.json.detail).toContain("100 custom objects");
   });
 });

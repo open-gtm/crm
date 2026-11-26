@@ -235,6 +235,11 @@ export function SignInPage() {
           No password yet? Whoever runs this server can print you a one-time sign-in link (if that's you: <code className="font-mono">docker compose run --rm api sign-in-link --email you@example.com</code>). Once you're in, set a password when the app offers it.
         </p>
       ) : null}
+      {!confirming && c.sign_up ? (
+        <p className="mt-4 text-sm text-subtle">
+          New here? <a href={`/auth/sign-up?return_to=${encodeURIComponent(returnTo)}`} className="text-fg underline underline-offset-2 hover:no-underline">Create a workspace</a>
+        </p>
+      ) : null}
       {confirming ? <a href={returnTo} className="mt-4 inline-block text-sm text-muted hover:text-fg"><ArrowLeft className="mr-1 inline size-3.5" />Not now: go back</a> : null}
     </Card>
   );

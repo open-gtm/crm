@@ -189,9 +189,9 @@ Rules: a path is names and list positions only (field names are lowercase; the k
 | Runs per automation per hour | `hourly_cap`, default 100 (requests over it get 429; event and schedule runs past it are skipped) |
 | Runs per automation per record in 10 minutes | 5; more are skipped as a loop |
 | Causation depth (automations triggering automations) | 5 |
-| Action steps per workspace per hour | `AUTOMATION_ACTIONS_PER_HOUR`, default 5,000 |
-| HTTP requests per workspace per hour | `AUTOMATION_HTTP_PER_HOUR`, default 500; 20 per run |
-| Emails per workspace / per automation per hour | `AUTOMATION_EMAILS_PER_HOUR` 200, `AUTOMATION_EMAILS_PER_AUTOMATION_HOUR` 50; 50 per run |
+| Action steps per workspace per hour | `AUTOMATION_ACTIONS_PER_HOUR`, default 5,000; the operator can set another value for one workspace ([limits.md](limits.md)) |
+| HTTP requests per workspace per hour | `AUTOMATION_HTTP_PER_HOUR`, default 500, or the workspace's own value; 20 per run |
+| Emails per workspace / per automation per hour | `AUTOMATION_EMAILS_PER_HOUR` 200 (or the workspace's own value), `AUTOMATION_EMAILS_PER_AUTOMATION_HOUR` 50; 50 per run |
 | Emails per recipient per day | `AUTOMATION_EMAILS_PER_RECIPIENT_DAY`, default 5 |
 | Steps executed per run | 1,000 (each `for_each` iteration's steps count) |
 | Run time | 10 s inside event processing, 60 s for a queued run, 20 s for a test; checked between steps and inside long ones (each `for_each` item, each recipient, before each query) |

@@ -6,6 +6,7 @@ import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { secureHeaders } from "hono/secure-headers";
 import { logger } from "../lib/logger.js";
+import { addressKey } from "../lib/outbound.js";
 import { protectedResourceMetadata, resourceMetadataUrl } from "../oauth/metadata.js";
 import { DEFAULT_SCOPES, REQUIRED_SCOPES, RESOURCES, SERVICE_HEADER, isAccessToken, looksLikeApiKey, satisfies, type ResourceName } from "../oauth/scopes.js";
 import { SERVER_INFO, buildAdminServer, buildOpsServer } from "./tools.js";
@@ -138,7 +139,7 @@ export function buildMcpApp(opts: McpAppOptions): Hono {
         return unauthorized(c, oauth ? "Sign in: connect this server with OAuth, or send an hl-crm-db API key (Authorization: Bearer hlcrm_…)"
           : "Send an hl-crm-db API key: Authorization: Bearer hlcrm_…", false);
       }
-      const addr = clientAddress(c);
+      const addr = addressKey(clientAddress(c));
       const bearer = m[1]!;
       const isKey = looksLikeApiKey(bearer);
       const blocked = isKey || isKnownGood(bearer) ? null : blockedFor(addr);

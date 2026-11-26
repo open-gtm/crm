@@ -52,11 +52,11 @@ git pull
 docker compose up -d --build    # with a published image: docker compose pull && docker compose up -d
 ```
 
-Keep your `.env` (it holds `HLCRM_MASTER_KEY`, which the database backup does not).
+Keep your `.env` (it holds `HLCRM_MASTER_KEY`, which the database backup does not). [`docs/backup-restore.md`](docs/backup-restore.md) covers what else to back up, how to restore and how to check a restore.
 
 ### Running it for real
 
-Compose binds every port to 127.0.0.1, and terminating TLS in front of the API and MCP ports is your job. If a reverse proxy sits in front of the API, set `TRUST_PROXY=true` so failed-login limits use the real client address, and only then. Back up Postgres, and keep a copy of `HLCRM_MASTER_KEY` outside the database backups: without it, restricted fields can't be decrypted. The software enforces workspace isolation, roles and permissions, scoped keys, field encryption and a tamper-evident audit log. Running it securely (hosts, network, backups, access, monitoring) is your responsibility, and the software itself makes no compliance claims such as "SOC 2 compliant".
+Compose binds every port to 127.0.0.1, and terminating TLS in front of the API and MCP ports is your job. If a reverse proxy sits in front of the API, set `TRUST_PROXY=true` so failed-login limits use the real client address, and only then. Back up Postgres and the audit anchors, and keep a copy of `HLCRM_MASTER_KEY` outside the database backups: without it, restricted fields can't be decrypted ([`docs/backup-restore.md`](docs/backup-restore.md)). The software enforces workspace isolation, roles and permissions, scoped keys, field encryption and a tamper-evident audit log. Running it securely (hosts, network, backups, access, monitoring) is your responsibility, and the software itself makes no compliance claims such as "SOC 2 compliant".
 
 ## Use it from Claude
 
@@ -209,6 +209,7 @@ crm CLI         MCP: /mcp/admin, /mcp/ops    your code / curl
 - **The API is the only enforcement point.** The MCP servers and the `crm` CLI are thin clients that call the API with the caller's own key.
 - **Standard objects** (Contact, Account, Lead, Deal, Activity, Task, …) are typed tables. **Custom fields and objects** are JSONB validated against metadata, so schema changes never run DDL.
 - **Events, automations and webhooks:** every change is an event; automations and signed webhooks act on them. See [`docs/webhooks.md`](docs/webhooks.md) and [`docs/alerts.md`](docs/alerts.md).
+- **Limits per workspace** (records, members, keys, requests and more), for a server that holds many: see [`docs/limits.md`](docs/limits.md).
 - **Isolation, keys, encryption and audit:** see [`docs/security/threat-model.md`](docs/security/threat-model.md).
 - **Full design:** [`docs/data-model.md`](docs/data-model.md), the decision records in [`docs/decisions/`](docs/decisions) and [`ROADMAP.md`](ROADMAP.md).
 

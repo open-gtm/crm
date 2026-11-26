@@ -22,7 +22,7 @@ const bIds: Record<string, string> = {};
 
 /** Routes that take no record IDs anywhere: they can only ever see the caller's own workspace. */
 const NO_ID_ROUTES = new Set([
-  "GET /v1/me", "GET /v1/me/access", "GET /v1/workspace", "PATCH /v1/workspace/modules", "GET /v1/schema", "GET /v1/schema/changes",
+  "GET /v1/me", "GET /v1/me/access", "GET /v1/workspace", "GET /v1/workspace/usage", "PATCH /v1/workspace/modules", "GET /v1/schema", "GET /v1/schema/changes",
   "GET /v1/objects", "GET /v1/objects/:object", "POST /v1/objects", "PATCH /v1/objects/:object",
   "POST /v1/objects/:object/fields", "PATCH /v1/objects/:object/fields/:field", "POST /v1/objects/:object/fields/:field/archive",
   "GET /v1/pipelines", "POST /v1/pipelines", "GET /v1/objects/:object/records", "GET /v1/search", "GET /v1/me/tasks",
@@ -40,6 +40,8 @@ const NO_ID_ROUTES = new Set([
   // The caller's own session and password, and this workspace's sign-in setting.
   "GET /v1/auth/session", "POST /v1/auth/sign-out", "GET /v1/auth/sessions", "POST /v1/auth/sessions/revoke-others",
   "POST /v1/auth/password", "DELETE /v1/auth/password", "DELETE /v1/auth/sso", "PATCH /v1/workspace/sign-in",
+  // Deleting the caller's own workspace (ADR 0020): it names the workspace by its name, never an ID.
+  "POST /v1/workspace/deletion", "DELETE /v1/workspace/deletion",
   // Views and preferences listed for the caller, and the caller's own workspace directory.
   "GET /v1/views", "GET /v1/objects/:object/views", "GET /v1/users", "GET /v1/me/preferences", "PUT /v1/me/preferences",
   "POST /v1/objects/:object/duplicates",
@@ -61,6 +63,7 @@ const BODY_ID_ROUTES = new Set([
   "POST /v1/me/alerts", "POST /v1/me/alerts/backtest", "POST /v1/alerts", "POST /v1/alerts/backtest",
   "POST /v1/schema/plan", "POST /v1/schema/apply", "POST /v1/objects/:object/import", "POST /v1/aggregate", "POST /v1/views",
   "POST /v1/ops/merge_records", "POST /v1/objects/:object/records/bulk_update", "POST /v1/objects/:object/records/bulk_archive",
+  "POST /v1/ops/erase_contact",
   // Takes a member ID in its query (?member=usr_…); its case is below.
   "GET /v1/apps",
 ]);
@@ -151,6 +154,9 @@ describe("cross-tenant isolation", () => {
   it("path IDs from another tenant are not found, on every route that takes one", async () => {
     let checked = 0;
     for (const r of routes.filter((x) => x.idParams)) {
+      // A full bucket for every route: together the routes now ask for more than one burst, and on a fast
+      // machine the bucket does not refill in time.
+      resetRateLimiter();
       for (const [object, id] of Object.entries({ contact: bIds.contact, account: bIds.account, deal: bIds.deal })) {
         const kind = Object.values(r.idParams!)[0];
         const byKind: Record<string, string | undefined> = { key: bIds.key, webhook: bIds.webhook, automation: bIds.automation, delivery: bIds.delivery,
@@ -190,6 +196,8 @@ describe("cross-tenant isolation", () => {
       ["POST", "/v1/ops/send_quote", { quote: bIds.quote }],
       ["POST", "/v1/ops/accept_quote", { quote: bIds.quote }],
       ["POST", "/v1/ops/revise_quote", { quote: bIds.quote }],
+      ["POST", "/v1/ops/erase_contact", { contact: bIds.contact }],
+      ["POST", "/v1/ops/erase_contact", { contact: bIds.contact, dry_run: false }],
       ["POST", "/v1/objects/quote_line_item/records", { quote: bIds.quote, description: "x", unit_price: 1 }],
       // A change to B's layout draft, named in A's workspace.
       ["POST", "/v1/objects/contact/layout/draft/undo", { change: bIds.layoutChange }],

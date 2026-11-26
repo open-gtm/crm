@@ -13,7 +13,7 @@ import type { FileInfo } from "@/lib/api/types";
 import { formatBytes, formatRelative } from "@/lib/format";
 import { qk } from "@/lib/keys";
 
-interface Limits { max_bytes: number; quota_bytes: number; max_files_per_record: number }
+interface Limits { max_bytes: number; quota_bytes: number | null; max_files_per_record: number }
 
 /** The files attached to one record, with attaching and removing for those who can change the record. */
 export function useFiles(recordId: string, enabled = true) {

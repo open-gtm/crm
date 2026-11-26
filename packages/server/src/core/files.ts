@@ -1,4 +1,5 @@
 import { config } from "../config.js";
+import { limitOf, limitReached } from "./limits.js";
 import type { Tx } from "../db/pool.js";
 import { sha256 } from "../lib/crypto.js";
 import { conflict, notFound, unprocessable } from "../lib/errors.js";
@@ -25,7 +26,13 @@ import { getObject, loadSchema, type ObjectMeta } from "./schema.js";
 
 /** A record holds at most this many files. */
 export const MAX_FILES_PER_RECORD = 100;
-export const fileLimits = () => ({ max_bytes: config().FILE_MAX_MB * 1024 * 1024, quota_bytes: config().FILE_QUOTA_MB * 1024 * 1024 });
+const MB = 1024 * 1024;
+/** The largest file, the same for every workspace, and what this workspace's files may hold in all (null: unlimited; a workspace limit, core/limits.ts). */
+export const fileLimits = () => ({ max_bytes: config().FILE_MAX_MB * MB });
+export async function workspaceFileLimits(tx: Tx) {
+  const quotaMb = await limitOf(tx, "file_storage_mb");
+  return { ...fileLimits(), quota_bytes: quotaMb === null ? null : quotaMb * MB };
+}
 
 const publicFile = (f: FileRow, record: string) => ({
   id: encodeId("file", f.id), record, name: f.name, size: Number(f.size), content_type: f.content_type, sha256: f.sha256,
@@ -100,8 +107,9 @@ export async function uploadFile(tx: Tx, ctx: Ctx, recordPublicId: string, input
   if (input.data.length > limits.max_bytes) throw unprocessable(`The file is larger than ${config().FILE_MAX_MB} MB`);
   const usage = await fileUsageForUpdate(tx, ctx.tenantId, record.uuid);
   if (usage.on_record >= MAX_FILES_PER_RECORD) throw conflict(`A record holds at most ${MAX_FILES_PER_RECORD} files`);
-  if (Number(usage.bytes) + input.data.length > limits.quota_bytes) {
-    throw conflict(`This workspace's files would pass its limit of ${config().FILE_QUOTA_MB} MB; remove files, or ask whoever runs the server to raise FILE_QUOTA_MB`);
+  const quotaMb = await limitOf(tx, "file_storage_mb");
+  if (quotaMb !== null && Number(usage.bytes) + input.data.length > quotaMb * MB) {
+    throw limitReached("file_storage_mb", Math.ceil((Number(usage.bytes) / MB) * 100) / 100, quotaMb, Math.ceil((input.data.length / MB) * 100) / 100);
   }
   const store = fileStore();
   const id = uuidv7();

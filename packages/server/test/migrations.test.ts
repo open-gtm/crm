@@ -28,9 +28,11 @@ afterAll(() => sql.end());
  * members that existed before it, has its own test, set up in SQL.
  */
 async function applyPermissionSetsEarly(upTo: string) {
-  // 025 and 026 too: today's server records the app, key and pack behind every schema change and event, in
-  // columns added to schema_changes (a table of 002) and outbox_events (004); 026 also indexes automation_runs (004).
-  for (const file of ["019_permission_sets.sql", "025_schema_change_source.sql", "026_event_source.sql"]) {
+  // Likewise 025, 026 and 029. 025 and 026: today's server records the app, key and pack behind every schema change
+  // and event, in columns added to schema_changes (a table of 002) and outbox_events (004); 026 also indexes
+  // automation_runs (004). 029 (workspace limits, ADR 0019): today's server reads a workspace's limits before it
+  // adds a field or a record; it touches only tables of 001 and 002. Its own upgrade has its own test below.
+  for (const file of ["019_permission_sets.sql", "025_schema_change_source.sql", "026_event_source.sql", "029_workspace_limits.sql"]) {
     const text = readFileSync(new URL(`../migrations/${file}`, import.meta.url), "utf8");
     await sql.begin(async (tx) => {
       await tx.unsafe(text);
@@ -51,7 +53,7 @@ describe("migrations", () => {
     expect(applied).toEqual(["001_platform.sql", "002_schema_engine.sql", "003_core_sales.sql", "004_events_webhooks_automations.sql",
       "005_alerts_notifications.sql", "006_roles.sql", "007_chain_order_event_retries.sql", "008_object_field_permissions.sql", "009_schema_token.sql",
       "010_people_sign_in.sql", "012_views_preferences.sql", "013_merges.sql", "014_oauth_for_mcp.sql", "016_automation_engine.sql",
-      "017_field_types_packs.sql", "018_custom_object_owner.sql", "019_permission_sets.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql", "023_connections.sql", "024_page_layout_drafts.sql", "025_schema_change_source.sql", "026_event_source.sql"]);
+      "017_field_types_packs.sql", "018_custom_object_owner.sql", "019_permission_sets.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql", "023_connections.sql", "024_page_layout_drafts.sql", "025_schema_change_source.sql", "026_event_source.sql", "027_data_disposal.sql", "028_sign_up.sql", "029_workspace_limits.sql"]);
     expect(await migrate(url)).toEqual([]);
   });
 
@@ -87,7 +89,7 @@ describe("migrations", () => {
 
     const later = await migrate(url);
     expect(later).toEqual(["010_people_sign_in.sql", "012_views_preferences.sql", "013_merges.sql", "014_oauth_for_mcp.sql", "016_automation_engine.sql",
-      "017_field_types_packs.sql", "018_custom_object_owner.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql", "023_connections.sql", "024_page_layout_drafts.sql"]);
+      "017_field_types_packs.sql", "018_custom_object_owner.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql", "023_connections.sql", "024_page_layout_drafts.sql", "027_data_disposal.sql", "028_sign_up.sql"]);
 
     // 017 replaced the type CHECK on fields by its own definition, which the old fields pass and the new types too.
     const checks = await sql<{ conname: string; def: string }[]>`
@@ -172,7 +174,7 @@ describe("migrations", () => {
       return tx<{ v: string }[]>`SELECT schema_version::text AS v FROM tenants`;
     });
 
-    expect(await migrate(url)).toEqual(["018_custom_object_owner.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql", "023_connections.sql", "024_page_layout_drafts.sql"]);
+    expect(await migrate(url)).toEqual(["018_custom_object_owner.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql", "023_connections.sql", "024_page_layout_drafts.sql", "027_data_disposal.sql", "028_sign_up.sql"]);
 
     const fields = async (o: string) => (await call("GET", `/v1/objects/${o}`, { key: ws.keys.admin })).json.data.fields as { name: string; type: string; standard?: boolean }[];
     expect((await fields("visit")).map((f) => [f.name, f.type, f.standard])).toEqual([["title", "text", undefined], ["owner", "relation", true]]);
@@ -218,7 +220,7 @@ describe("migrations", () => {
       return { clerk: clerk!.id, user: user!.id, bot: bot!.id };
     });
 
-    expect(await migrate(url)).toEqual(["019_permission_sets.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql", "023_connections.sql", "024_page_layout_drafts.sql", "025_schema_change_source.sql", "026_event_source.sql"]);
+    expect(await migrate(url)).toEqual(["019_permission_sets.sql", "020_files.sql", "021_commerce.sql", "022_page_layouts.sql", "023_connections.sql", "024_page_layout_drafts.sql", "025_schema_change_source.sql", "026_event_source.sql", "027_data_disposal.sql", "028_sign_up.sql", "029_workspace_limits.sql"]);
 
     const inTenant = <T>(fn: (tx: postgres.TransactionSql) => Promise<T>) => sql.begin(async (tx) => {
       await tx`SELECT set_config('app.tenant_id', ${tenant}, true)`;
@@ -274,5 +276,49 @@ describe("migrations", () => {
     // Running the migrator again adds nothing more.
     expect(await migrate(url)).toEqual([]);
     expect((await inTenant((tx) => tx<{ n: number }[]>`SELECT count(*)::int AS n FROM objects`))[0]!.n).toBe(after.objects.length);
+  });
+  it("029 counts the records a workspace already holds, keeps counting, and gives the app role read-only limits", async () => {
+    await closeDb();
+    await empty();
+    expect((await migrate(url, undefined, { upTo: "022" })).at(-1)).toBe("022_page_layouts.sql");
+    // Two workspaces as a 0.2 server left them: one with records, one without. (Creating a workspace reads no limits.)
+    const [a, b] = [await createWorkspace({ name: "Has records", ownerEmail: `a-029-${Date.now()}@example.com`, ownerName: "A" }),
+      await createWorkspace({ name: "Empty", ownerEmail: `b-029-${Date.now()}@example.com`, ownerName: "B" })];
+    const [ta, tb] = [decodeId(a.workspace.id)!.uuid, decodeId(b.workspace.id)!.uuid];
+    const inTenant = <T>(tenant: string, fn: (tx: postgres.TransactionSql) => Promise<T>) => sql.begin(async (tx) => {
+      await tx`SELECT set_config('app.tenant_id', ${tenant}, true)`;
+      return fn(tx);
+    });
+    const contacts = [uuidv7(), uuidv7(), uuidv7()];
+    await inTenant(ta, async (tx) => {
+      for (const id of contacts) await tx`INSERT INTO contacts (tenant_id, id, first_name) VALUES (${ta}, ${id}, 'Old')`;
+    });
+
+    expect(await migrate(url)).toEqual(["023_connections.sql", "024_page_layout_drafts.sql", "025_schema_change_source.sql", "026_event_source.sql",
+      "027_data_disposal.sql", "028_sign_up.sql", "029_workspace_limits.sql"]);
+
+    const counts = (tenant: string) => inTenant(tenant, (tx) => tx<{ txid: string; delta: number }[]>`SELECT txid::text, delta::int FROM record_counts ORDER BY txid`);
+    expect(await counts(ta)).toEqual([{ txid: "0", delta: 3 }]);
+    expect(await counts(tb)).toEqual([{ txid: "0", delta: 0 }]);
+    // One row per transaction from here on, whatever it adds and removes; the sum is the count.
+    await inTenant(ta, async (tx) => {
+      await tx`INSERT INTO contacts (tenant_id, id, first_name) VALUES (${ta}, ${uuidv7()}, 'New'), (${ta}, ${uuidv7()}, 'New')`;
+      await tx`DELETE FROM contacts WHERE id = ${contacts[0]!}`;
+    });
+    expect((await counts(ta)).map((r) => r.delta)).toEqual([3, 1]);
+    // A workspace's rows go with it: deleting a workspace's records and then the workspace leaves nothing behind.
+    await sql.begin(async (tx) => {
+      await tx`SELECT set_config('app.tenant_id', ${tb}, true)`;
+      await tx`INSERT INTO tenant_limits (tenant_id, key, value) VALUES (${tb}, 'records', 5)`;
+    });
+    const [grants] = await sql<{ read: boolean; ins: boolean; upd: boolean; del: boolean; counts: boolean }[]>`
+      SELECT has_table_privilege('hlcrm_app', 'tenant_limits', 'SELECT') AS read, has_table_privilege('hlcrm_app', 'tenant_limits', 'INSERT') AS ins,
+             has_table_privilege('hlcrm_app', 'tenant_limits', 'UPDATE') AS upd, has_table_privilege('hlcrm_app', 'tenant_limits', 'DELETE') AS del,
+             has_table_privilege('hlcrm_app', 'record_counts', 'SELECT,INSERT,UPDATE,DELETE') AS counts`;
+    expect(grants).toEqual({ read: true, ins: false, upd: false, del: false, counts: true });
+    const rls = await sql<{ relname: string; on: boolean; forced: boolean }[]>`
+      SELECT relname, relrowsecurity AS on, relforcerowsecurity AS forced FROM pg_class WHERE relname IN ('tenant_limits', 'record_counts') ORDER BY relname`;
+    expect(rls).toEqual([{ relname: "record_counts", on: true, forced: true }, { relname: "tenant_limits", on: true, forced: true }]);
+    expect(await migrate(url)).toEqual([]);
   });
 });

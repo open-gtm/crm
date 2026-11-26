@@ -165,7 +165,7 @@ curl -s -OJ localhost:8787/v1/files/file_…/content -H "Authorization: Bearer $
 curl -s -X DELETE localhost:8787/v1/files/file_… -H "Authorization: Bearer $KEY"              # remove
 ```
 
-- **Limits.** 10 MB per file and 1 GB per workspace by default (`FILE_MAX_MB`, `FILE_QUOTA_MB`); `GET /v1/files/limits` shows them. The 1 MB limit on JSON bodies is unchanged.
+- **Limits.** 10 MB per file and 1 GB per workspace by default (`FILE_MAX_MB`, `FILE_QUOTA_MB`); `GET /v1/files/limits` shows them. The per-workspace figure is a workspace limit, so the operator can set another for one workspace, and an upload past it answers 409 `limit_reached` ([limits.md](limits.md)). The 1 MB limit on JSON bodies is unchanged.
 - **Where the bytes are.** In Postgres by default (`file_blobs`), so one backup covers everything. `FILE_STORE=s3` keeps new files in an S3-compatible bucket (`S3_ENDPOINT`, `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`), sealed with the workspace's data key: the bucket alone can't be read, so `HLCRM_MASTER_KEY` and the database are needed to restore them. Back the bucket up with the database.
 - **No virus scanner is built in.** Files are `unscanned` and are always sent as a download (`attachment`, `application/octet-stream`, `nosniff`), never opened in the page. The `content_type` a file shows is detected from its first bytes; the uploader's is ignored.
 - **Names** are one line with no `/`, `\` or control character.
@@ -188,7 +188,7 @@ curl -s -X DELETE localhost:8787/v1/files/file_… -H "Authorization: Bearer $KE
 - **Statuses:** `status text NOT NULL` holds a tenant-configurable status key, `status_category text NOT NULL` holds the system category. The service layer enforces transitions (§6). A trigger checks that the category matches the tenant's status definition.
 - **Document numbers:** `number text NOT NULL`, unique per tenant and type, assigned from `number_sequences` when the document is issued (format per tenant, for example `INV-{YYYY}-{seq:4}`).
 - **Composite foreign keys everywhere:** `(tenant_id, x_id) REFERENCES t (tenant_id, id)`. RLS policies as in [ADR 0002](decisions/0002-tenant-directory.md) and `packages/server/migrations/`.
-- **Deletion:** archive only. Hard deletes happen only in the erasure and tenant-deletion workflows.
+- **Deletion:** archive only, with two exceptions ([ADR 0020](decisions/0020-data-disposal.md)): [erasing a person's records](#erasing-a-persons-records), which blanks rows and keeps them, and [deleting a workspace](#deleting-a-workspace), the only hard delete of records.
 
 ---
 
@@ -507,9 +507,54 @@ As built (`core/merge.ts`, `core/duplicates.ts`, `core/bulk.ts`, `restoreRecord`
 - **Delete protection:** archiving a contact or account that has orders, contracts or invoices needs `force: true` and the `admin` scope, and is audited.
 - **Sensitivity classification of core fields:** emails, phones, addresses and names are `confidential`; `payment_method_ref` and `processor_ref` are `restricted`. Tenants can raise any field's sensitivity, but cannot lower system defaults below these.
 - **No card data:** only processor tokens and references are stored. A validation rule rejects values that look like a card number (Luhn check) in any text field classified as restricted, and also in the payment fields.
-- **Erasure (`erase_contact`):** clears names, email, phones, addresses and custom fields classified confidential or restricted, replacing them with `[erased]`. It deletes contact points and consents (keeping a consent tombstone so outreach stays blocked), and scrubs personal values from activity payloads that reference the contact. Financial documents keep the minimum needed for legal and tax purposes: the invoice snapshot keeps the billing name and address as issued, because tax law requires it, and this is documented as a lawful-basis exception. The audit log keeps the actor ID but not the erased values.
-- **Consent** is queryable through `effective_consents`. Outreach automations (email actions) check it before sending, and fail closed.
+- **Erasure** is built for contacts, leads and records of custom objects: see [Erasing a person's records](#erasing-a-persons-records) below. Contact points and consents are designed, not built; an erased contact's email address goes on the automation suppression list instead, as a keyed hash.
+- **Consent** (designed, not built) is queryable through `effective_consents`; outreach automations would check it before sending, and fail closed. Today automations check the suppression list.
 - **Merges** are recorded in `merges` (with the survivor's previous values encrypted) and the audit log (IDs and field names, no values).
+
+### Erasing a person's records
+
+As built (`core/erasure.ts`, [ADR 0020](decisions/0020-data-disposal.md)). `POST /v1/objects/{object}/records/{id}/erase`, `POST /v1/ops/erase_contact`, admin MCP `erase_record`, `crm data erase`.
+
+Archiving hides a record and keeps every value. Erasing removes the values for good, wherever the server kept a copy, and can't be undone. It is for a person's request to be forgotten, not for tidying up.
+
+```sh
+# A dry run (the default): what would go, and a confirm_token
+curl -s -X POST localhost:8787/v1/objects/contact/records/con_…/erase -H "Authorization: Bearer $ADMIN_KEY" -H 'Content-Type: application/json' -d '{}'
+# Apply exactly that
+curl -s -X POST localhost:8787/v1/objects/contact/records/con_…/erase -H "Authorization: Bearer $ADMIN_KEY" -H 'Content-Type: application/json' \
+  -d '{"dry_run": false, "confirm_token": "…"}'
+```
+
+- **What can be erased:** a contact, a lead, or a record of a custom object. An account is an organisation: erase the contacts at it. Deals, tasks, activities, quotes and orders are refused.
+- **The row stays,** blank, archived and marked: it reads with `erased_at`, and a contact's `last_name` is `[erased]`. Deals, quotes and orders that refer to it still do. A contact keeps its lifecycle stage, account, owner and dates; a lead keeps its status, owner and the deal it became. Names, email, phone, job title, source, external IDs and **every** custom value go, whatever the field's sensitivity. An erased record can't be restored, updated or merged.
+- **What goes with it:** records merged into it (a merged duplicate still holds the person's values; erasing a merged duplicate directly is refused, naming the survivor); for a contact, all its leads, and its links to accounts and deals; every activity and task about any of those records, or done by the contact (subject or title becomes `[erased]`, body, description and payload go; type, time and the records it is about stay); their files (bytes, names and hashes); the values of their custom relation fields.
+- **Copies:** the data of events about those records, webhook delivery payloads made from those events (one not yet sent is never sent), automation run results (a run not yet finished is skipped), notifications (blanked and resolved), alert deadlines, and the survivor's earlier values that a merge kept.
+- **The suppression list:** a contact's email address is added as a keyed hash, so automations don't write to it again. `suppress_email: false` leaves it off.
+- **Who:** `schema:manage`, with a key that has the `admin` scope (or a browser session). So it is not on the ops MCP server. Object and field rules don't narrow it: it removes values the caller's role might not be able to read, and `schema:manage` already requires unrestricted record access.
+- **Confirmation:** `dry_run` defaults to true and returns the IDs it would blank, counts, and a `confirm_token` (15 minutes, single-use, bound to the credential and to exactly those records, activities and tasks). A real run needs it; if something was added since, it is refused (409) and nothing changes. One erasure blanks at most 5,000 rows.
+- **Recorded as:** an audit entry and an event `<object>.erased` per erased record, with IDs and counts, never values. Subscribers to the event should erase their own copies.
+
+**What an erasure does not reach.** The result says so too (`not_erased`).
+
+- Values someone copied into another record: a deal named after the person, a note on an account. `possible_copies` lists up to 50 other records whose searchable text holds the contact's email address or full name; they are not changed. Look at them. (`null` when the search could not finish in time.)
+- Sent quotes and orders: they keep the customer's name as issued.
+- The audit log: it holds field names, IDs and counts, not values, and can't be changed.
+- Saved views whose filter has the person's email typed into it.
+- Replay copies of responses to requests sent with an `Idempotency-Key`: encrypted with the workspace's key and deleted after 24 hours.
+- Database backups, until they age out, and anything a webhook or an export already delivered elsewhere.
+
+### Deleting a workspace
+
+As built (`core/disposal.ts`, [ADR 0020](decisions/0020-data-disposal.md)).
+
+Everything goes: every row the workspace has in every table, its files' bytes, its members, keys, sessions and connected apps, its audit log, and its data key. Deleting the key makes anything encrypted with it unreadable wherever a copy remains.
+
+- **An owner asks.** `POST /v1/workspace/deletion` with `{"confirm_name": "<the workspace's name>"}`. Owners only, with their own API key (`admin` scope) or from a browser session; never an app connected over OAuth and never through an MCP server. It answers 202 with when the deletion is due.
+- **A grace period.** `WORKSPACE_DELETION_GRACE_DAYS`, 7 unless whoever runs the server changed it; 0 means the worker's next pass, within a minute. Until then the workspace works exactly as before, and `GET /v1/workspace` shows `deletion` (who asked, when, when it is due) to every member. Any owner can withdraw it: `DELETE /v1/workspace/deletion`. Asking and withdrawing are audited.
+- **Whoever runs the server** can delete a workspace at once: `docker compose run --rm api delete-workspace --workspace ws_… --confirm ws_…` (the ID twice).
+- **What is left:** one row in `deleted_workspaces`, and a copy in blob storage (`deleted-workspaces/<id>.json`): the workspace's ID, when it was created and deleted, who asked (a user ID, or the operator), how many rows each table held, and where its audit chain ended. No name, member or record. Audit anchors already written to blob storage stay too: an ID and hashes.
+- **What it does not reach:** database backups made earlier, until they age out (restoring one brings the workspace back); exports and webhook deliveries already sent elsewhere. Files kept in S3 are deleted one by one, and are unreadable anyway once the key is gone.
+- **Not built:** a screen for this in the web UI, a `crm` command, and email to owners when a deletion is scheduled.
 
 ---
 
