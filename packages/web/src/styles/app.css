@@ -2,16 +2,8 @@
 @import "./tokens.css";
 
 @custom-variant dark (&:where(.dark, .dark *));
-/* Hover styles only where there is a pointer that hovers: a touch screen leaves them stuck on after a tap. */
-@custom-variant hover {
-  @media (hover: hover) and (pointer: fine) {
-    &:hover {
-      @slot;
-    }
-  }
-}
-
-/* Utilities point at the tokens (tokens.css), and Tailwind's own palette is turned off so nothing drifts from them. */
+/* Hover styles apply only where the device can hover: Tailwind wraps every hover: utility in
+   @media (hover: hover), so a touch screen doesn't leave them stuck on after a tap. */
 @theme inline {
   --color-*: initial;
   --color-transparent: transparent;

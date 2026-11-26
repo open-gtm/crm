@@ -345,8 +345,8 @@ test.describe("as the owner", () => {
     const row = grid.getByRole("row").filter({ has: page.getByRole("link", { name, exact: true }) });
     await expect(row).toContainText("Negotiation");
     await row.getByRole("link", { name, exact: true }).click();
-    await expect(page.getByRole("combobox", { name: "Stage" })).toHaveValue(/.+/);
-    await expect(page.getByRole("combobox", { name: "Stage" }).locator("option:checked")).toHaveText("Negotiation");
+    // A deal's page shows its stage on the stage path (the default layout has one), with the current stage marked.
+    await expect(page.locator('button[aria-current="step"]')).toHaveText(/Negotiation/);
   });
 
   test("complete a task, and the inbox count changes", async () => {
