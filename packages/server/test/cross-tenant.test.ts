@@ -22,7 +22,7 @@ const bIds: Record<string, string> = {};
 
 /** Routes that take no record IDs anywhere: they can only ever see the caller's own workspace. */
 const NO_ID_ROUTES = new Set([
-  "GET /v1/me", "GET /v1/me/access", "GET /v1/workspace", "PATCH /v1/workspace/modules", "GET /v1/schema", "GET /v1/schema/changes",
+  "GET /v1/me", "GET /v1/me/access", "GET /v1/workspace", "GET /v1/workspace/usage", "PATCH /v1/workspace/modules", "GET /v1/schema", "GET /v1/schema/changes",
   "GET /v1/objects", "GET /v1/objects/:object", "POST /v1/objects", "PATCH /v1/objects/:object",
   "POST /v1/objects/:object/fields", "PATCH /v1/objects/:object/fields/:field", "POST /v1/objects/:object/fields/:field/archive",
   "GET /v1/pipelines", "POST /v1/pipelines", "GET /v1/objects/:object/records", "GET /v1/search", "GET /v1/me/tasks",

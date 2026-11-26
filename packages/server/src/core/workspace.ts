@@ -1,4 +1,5 @@
 import type { Tx } from "../db/pool.js";
+import { assertRoom } from "./limits.js";
 import { db } from "../db/pool.js";
 import { conflict, forbidden, notFound, unprocessable } from "../lib/errors.js";
 import { decodeId, encodeId, uuidv7 } from "../lib/ids.js";
@@ -210,6 +211,7 @@ export async function addMember(tx: Tx, ctx: Ctx, input: { email: string; name: 
   const role = await resolveRole(tx, input.role, "share");
   await assertCanAssign(tx, ctx, role, "user");
   const sets = input.permission_sets !== undefined ? await setsToAssign(tx, ctx, input.permission_sets) : [];
+  await assertRoom(tx, ctx.tenantId, "members");
   const id = uuidv7();
   try {
     await insertUser(tx, { tenantId: ctx.tenantId, id, email: input.email, name: input.name ?? input.email, roleId: role.id });
@@ -231,6 +233,7 @@ export async function addServiceAccount(tx: Tx, ctx: Ctx, input: { name: string;
   const role = await resolveRole(tx, input.role, "share");
   await assertCanAssign(tx, ctx, role, "service_account");
   const sets = input.permission_sets !== undefined ? await setsToAssign(tx, ctx, input.permission_sets) : [];
+  await assertRoom(tx, ctx.tenantId, "service_accounts");
   const id = uuidv7();
   try {
     await insertServiceAccount(tx, { tenantId: ctx.tenantId, id, name: input.name, roleId: role.id, createdBy: ctx.actor.id });
@@ -319,6 +322,8 @@ export async function updateMember(tx: Tx, ctx: Ctx, publicId: string, patch: Up
       details: { added: setsAdded.map((x) => x.key), removed: setsRemoved.map((x) => x.key), permissions_in_added_sets: gained } });
   }
   if (active !== wasActive) {
+    // Re-enabling someone takes a place, like adding them.
+    if (active) await assertRoom(tx, ctx.tenantId, ref.type === "user" ? "members" : "service_accounts");
     await setMemberActive(tx, ref.type, ref.id, active);
     if (!active) {
       keysRevoked = await revokeKeysOf(tx, ref.type, ref.id);

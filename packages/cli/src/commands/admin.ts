@@ -75,6 +75,13 @@ export function registerAdmin(program: Command, act: Act): void {
       ctx.out.line(`Revoked ${id}.`);
     }));
 
+  program.command("usage").description("What the workspace uses against each of its limits (the limits are set by whoever runs the server)").action(act(async (ctx) => {
+    const { data } = await ctx.client().get<{ data: { limits: { key: string; used: number | null; limit: number | null; source: string }[] } }>("/v1/workspace/usage");
+    if (ctx.g.json) return ctx.out.data({ data });
+    ctx.out.table(data.limits.map((l) => ({ limit: l.key, used: l.used ?? "not counted here", max: l.limit ?? "unlimited",
+      set_by: l.source === "workspace" ? "the server's operator, for this workspace" : "the server's default" })), ["limit", "used", "max", "set_by"]);
+  }));
+
   const members = program.command("members").description("Members and service accounts (needs members:manage)");
   members.command("list").description("List members and service accounts").action(act(async (ctx) => {
     const { data } = await ctx.client().get<{ data: { users: Record<string, unknown>[]; service_accounts: Record<string, unknown>[] } }>("/v1/members");

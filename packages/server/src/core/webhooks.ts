@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { assertRoom } from "./limits.js";
 import { config } from "../config.js";
 import type { Tx } from "../db/pool.js";
 import { badRequest, conflict, forbidden, notFound, unprocessable } from "../lib/errors.js";
@@ -10,7 +11,7 @@ import { can, withRestricted as grantRestricted, without, type Ctx } from "./con
 import { decryptValue, encryptValue } from "./encryption.js";
 import type { EventRow } from "./queries/events.js";
 import {
-  abandonDeliveriesOf, archiveWebhookRow, countLiveWebhooks, countWebhookFailure, deliveriesOf, deliveryById, insertDelivery, insertReplayDelivery,
+  abandonDeliveriesOf, archiveWebhookRow, countWebhookFailure, deliveriesOf, deliveryById, insertDelivery, insertReplayDelivery,
   insertTestDelivery, insertWebhook, liveWebhooks, markDeliveryFailed, markDeliverySucceeded, pendingTestDeliveries, resetWebhookFailures,
   setWebhookSecret, updateWebhookSettings, webhookById, type DeliveryRow, type WebhookRow,
 } from "./queries/webhooks.js";
@@ -111,8 +112,7 @@ export async function createWebhook(tx: Tx, ctx: Ctx, input: WebhookInput) {
   const url = validateUrl(input.url);
   const events = validateEvents(input.events ?? []);
   if (input.include_restricted) assertMayGrantRestricted(ctx);
-  const count = await countLiveWebhooks(tx);
-  if ((count ?? 0) >= 50) throw conflict("A workspace can have at most 50 webhooks");
+  await assertRoom(tx, ctx.tenantId, "webhooks");
   const id = uuidv7();
   const secret = newSecret();
   await insertWebhook(tx, { tenantId: ctx.tenantId, id, url, description: input.description ?? null, events, includeRestricted: input.include_restricted ?? false,

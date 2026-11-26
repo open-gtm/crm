@@ -89,6 +89,7 @@ Schema-changing tools **default to `dry_run: true`** and return a diff (`changes
 | `get_schema_changes` | Who changed what in the schema, and through which surface |
 | `get_audit_log`, `verify_audit_log` | Audit trail and its integrity check |
 | `list_members`, `list_api_keys` | Oversight. Key secrets are never returned or created here. |
+| `get_usage` | What the workspace uses against each of its limits ([limits.md](../limits.md)). No tool changes a limit: whoever runs the server sets them. A write refused with `limit_reached` names the limit that is full. |
 | `create_automation` | "When <trigger> (and the record matches <condition>), do <steps>". Triggers: a record event (`trigger_event`), or `trigger` for a schedule or a run-on-request automation. Steps include `http_request` and `send_email` ([automations.md](../automations.md)). Defaults to `dry_run: true`, which returns a plain-language summary with every URL and recipient, and for a schedule the next runs. Marked destructive and open-world. |
 | `test_automation` | Run a saved or draft automation against a real record (or none, for a schedule) with no side effects: shows whether it matches, the webhook payload, the exact HTTP request (secret headers hidden) and email, and the records it would create or change. |
 | `run_automation` | Run a saved automation now for up to 25 records. Defaults to `dry_run: true`, which shows each step; a real run is queued. Destructive and open-world. |

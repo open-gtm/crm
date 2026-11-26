@@ -143,6 +143,12 @@ export const BASE_SCHEMAS: Record<string, JsonSchema> = {
     groups: list(object({ reason: anyObject, count: int, records: list(ref("Record")) })),
     more_groups: bool, skipped_rules: list({}),
   }, ["object", "scanned", "window_full", "groups", "more_groups"]),
+  UsageLine: strict({
+    key: { type: "string", description: "The limit: records, members, service_accounts, api_keys, custom_objects, custom_fields, webhooks, automations, file_storage_mb, requests_per_minute, automation_actions_per_hour, automation_http_per_hour, automation_emails_per_hour" },
+    description: str, kind: { type: "string", enum: ["count", "rate"], description: "count: what exists now. rate: what is done in a window of time" },
+    used: { ...nullable({ type: "number" }), description: "What is in use now (hourly limits: in the current clock hour). null when the server doesn't keep one figure for it (requests_per_minute)" },
+    limit: { ...nullable({ type: "number" }), description: "The ceiling; null is unlimited" },
+    source: { type: "string", enum: ["server", "workspace"], description: "server: the server's default. workspace: set for this workspace by whoever runs the server" } }),
   SignInSettings: strict({ password: bool, sso: bool, sso_allowed_domains: list(str),
     oauth_apps: { type: "boolean", description: "Members may connect apps to the MCP servers over OAuth (ADR 0010)" },
     oauth_scopes: { type: "array", items: { type: "string", enum: ["ops:read", "ops:write", "restricted:read", "admin"] }, description: "The scopes connected apps may be granted" } }),

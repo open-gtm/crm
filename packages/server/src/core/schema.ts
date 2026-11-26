@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { assertSchemaRoom } from "./limits.js";
 import type { Tx } from "../db/pool.js";
 import { txState } from "../db/tx.js";
 import { badRequest, conflict, forbidden, notFound, unprocessable } from "../lib/errors.js";
@@ -81,8 +82,7 @@ const RESERVED_NAMES = new Set([
 ]);
 const RESERVED_FIELD_NAMES = new Set(["id", "object", "created_at", "updated_at", "created_by", "updated_by", "version",
   "archived_at", "external_ids", "related_to", "display_name", "included", "merged_into", "merge_chain", ...PROTOTYPE_NAMES]);
-/** Self-hosted builds have no per-tenant quotas, but every custom object adds work to search and the schema summary. */
-export const MAX_CUSTOM_OBJECTS = 100;
+/** One object's fields. How many custom objects and custom fields a workspace may have in all is a workspace limit (core/limits.ts). */
 export const MAX_FIELDS = 300;
 /** The types an object's display_field can be: a record's name is one line of text. */
 const DISPLAY_TYPES: readonly FieldType[] = ["text", "email", "phone", "url"];
@@ -336,9 +336,7 @@ export async function createObject(tx: Tx, ctx: Ctx, input: ObjectInput, dryRun:
   const archived = await archivedObjectNames(tx);
   if (archived.some((a) => a.api_name === input.api_name)) throw conflict(`Object "${input.api_name}" exists, archived (an uninstalled pack's object); choose another name`);
   checkText({ label: input.label, plural_label: input.plural_label, description: input.description });
-  if ([...schema.objects.values()].filter((o) => !o.is_system).length >= MAX_CUSTOM_OBJECTS) {
-    throw unprocessable(`A workspace can have at most ${MAX_CUSTOM_OBJECTS} custom objects`);
-  }
+  await assertSchemaRoom(tx, schema, { objects: 1, fields: (input.fields ?? []).length });
   const prefix = newPrefix(schema, input.api_name, input.id_prefix, new Set(archived.map((a) => a.id_prefix)));
   const draft: ObjectMeta = {
     id: "", api_name: input.api_name, label: input.label ?? titleCase(input.api_name),
@@ -405,6 +403,7 @@ export async function addField(tx: Tx, ctx: Ctx, objectName: string, input: Fiel
   const obj = getObject(schema, objectName);
   validateFieldInput(schema, input, obj);
   if (obj.fields.length >= MAX_FIELDS) throw unprocessable(`An object can have at most ${MAX_FIELDS} fields`);
+  await assertSchemaRoom(tx, schema, { fields: 1 });
   if ((await countFieldsEver(tx, obj.id)) >= MAX_FIELDS_EVER) throw unprocessable(`This object has reached ${MAX_FIELDS_EVER} fields, archived ones included`);
   const change: Change = { change: "field_added", object: obj.api_name, field: input.api_name, after: fieldSummary(input) };
   if (input.required) change.warning = "Existing records have no value for this field; it is enforced on new and updated records.";
