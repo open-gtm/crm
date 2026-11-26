@@ -88,6 +88,11 @@ Schema-changing tools **default to `dry_run: true`** and return a diff (`changes
 | `create_pipeline` | A deal pipeline with stages |
 | `set_modules` | Turn modules on or off |
 | `get_schema_changes` | Who changed what in the schema, and through which surface |
+| `get_page_layout` | How an object's record page is arranged: key facts, and columns of components. Returns the shared draft when there is one (with its `revision`, what it changes and who changed it through what), else the published layout. `published: true` ignores the draft. |
+| `set_page_layout` | Change the shared draft, the same one people edit in the web UI. Defaults to `dry_run: true`, which returns `changes` in sentences and `warnings`. Takes the whole layout and the `revision` read; a draft someone changed since is not overwritten. `note` records what the user asked for. Nothing is published. |
+| `publish_page_layout` | Publish the draft as the next version, for every member. Defaults to a dry run that shows what would change, including other people's changes to the draft. `overwrite` publishes over a layout that changed since the draft was started. |
+| `list_page_layout_versions`, `restore_page_layout` | The published versions with who published each and through which surface; put an earlier one into the draft (dry run by default). |
+| `discard_page_layout_draft` | Throw the draft away. Needs `confirm: true`. |
 | `get_audit_log`, `verify_audit_log` | Audit trail and its integrity check |
 | `list_members`, `list_api_keys` | Oversight. Key secrets are never returned or created here. |
 | `create_automation` | "When <trigger> (and the record matches <condition>), do <steps>". Triggers: a record event (`trigger_event`), or `trigger` for a schedule or a run-on-request automation. Steps include `http_request` and `send_email` ([automations.md](../automations.md)). Defaults to `dry_run: true`, which returns a plain-language summary with every URL and recipient, and for a schedule the next runs. Marked destructive and open-world. |

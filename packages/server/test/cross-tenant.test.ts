@@ -31,6 +31,9 @@ const NO_ID_ROUTES = new Set([
   "GET /v1/commerce-settings", "PATCH /v1/commerce-settings",
   // A record page's layout names an object and its fields, never an ID.
   "GET /v1/objects/:object/layout", "PUT /v1/objects/:object/layout", "DELETE /v1/objects/:object/layout",
+  "GET /v1/objects/:object/layout/draft", "PUT /v1/objects/:object/layout/draft", "DELETE /v1/objects/:object/layout/draft",
+  "POST /v1/objects/:object/layout/publish", "GET /v1/objects/:object/layout/versions", "GET /v1/objects/:object/layout/versions/:version",
+  "POST /v1/objects/:object/layout/restore",
   "GET /v1/webhooks", "POST /v1/webhooks", "GET /v1/automations", "GET /v1/connections", "POST /v1/connections",
   "GET /v1/me/notifications", "GET /v1/me/attention", "GET /v1/me/notification-preferences", "PATCH /v1/me/notification-preferences",
   "GET /v1/me/alerts", "GET /v1/alerts", "GET /v1/schema/export", "GET /v1/objects/:object/export",
@@ -51,6 +54,7 @@ const NO_ID_ROUTES = new Set([
 
 /** Routes whose request bodies carry IDs; each has explicit cases below. */
 const BODY_ID_ROUTES = new Set([
+  "POST /v1/objects/:object/layout/draft/undo", "POST /v1/objects/:object/layout/draft/review",
   "POST /v1/objects/:object/records", "POST /v1/objects/:object/records/batch", "POST /v1/objects/:object/records/upsert", "POST /v1/query",
   "POST /v1/ops/capture_interest", "POST /v1/ops/convert_lead", "POST /v1/ops/move_deal_stage", "POST /v1/ops/assign_owner",
   "POST /v1/ops/log_activity", "POST /v1/ops/create_quote", "POST /v1/ops/send_quote", "POST /v1/ops/accept_quote", "POST /v1/ops/revise_quote", "POST /v1/api-keys", "POST /v1/members", "POST /v1/service-accounts", "POST /v1/roles", "POST /v1/permission-sets", "POST /v1/automations", "POST /v1/automations/test", "GET /v1/events",
@@ -101,6 +105,9 @@ beforeAll(async () => {
     base_url: "https://b-secret.example/api", secret: "b-secret-token" } });
   if (conn.status !== 201) throw new Error(`setup: connection ${JSON.stringify(conn.json)}`);
   bIds.connection = conn.json.data.id;
+  const draft = await call("PUT", "/v1/objects/contact/layout/draft", { key: b.keys.admin, body: { layout: { columns: { left: [{ type: "fields", name: "B Secret section", fields: ["email"] }] } } } });
+  if (draft.status !== 200) throw new Error(`setup: layout draft ${JSON.stringify(draft.json)}`);
+  bIds.layoutChange = (await call("GET", "/v1/objects/contact/layout/draft", { key: b.keys.admin })).json.data.changes[0].id;
   bBrowser = await signedIn(b.ownerEmail);
   bIds.session = (await bBrowser.request("GET", "/v1/auth/session")).json.session.id;
   const view = await call("POST", "/v1/views", { key: b.keys.ops, body: { object: "contact", name: "B Secret view", shared: true,
@@ -184,6 +191,9 @@ describe("cross-tenant isolation", () => {
       ["POST", "/v1/ops/accept_quote", { quote: bIds.quote }],
       ["POST", "/v1/ops/revise_quote", { quote: bIds.quote }],
       ["POST", "/v1/objects/quote_line_item/records", { quote: bIds.quote, description: "x", unit_price: 1 }],
+      // A change to B's layout draft, named in A's workspace.
+      ["POST", "/v1/objects/contact/layout/draft/undo", { change: bIds.layoutChange }],
+      ["POST", "/v1/objects/contact/layout/draft/review", { change: bIds.layoutChange }],
       ["POST", "/v1/roles", { key: "copied", name: "x", copy_from: bIds.role }],
       ["POST", "/v1/permission-sets", { key: "copied_set", name: "x", copy_from: bIds.permission_set }],
       ["POST", "/v1/members", { email: "y@a.example", name: "y", role: "member", permission_sets: [bIds.permission_set] }],

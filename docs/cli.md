@@ -187,6 +187,8 @@ pipelines:
       - { id: stg_01JD…, name: Lost, category: lost, probability: 0 }
 ```
 
+An object may have a `layout`: its record page, as `header.key_facts`, `top` and `columns.left`, `main` and `right`, each a list of components ([ADR 0017](decisions/0017-agent-first-page-layouts.md)). `pull` writes it for objects that have one. `plan` shows what it would change as a `layout_published` change, and `apply` publishes it as the object's next layout version, with the CLI as its source. Leave the key out to leave the page alone; `layout: null` is the default page. A layout published by someone else since the pull is not reported as drift.
+
 Field properties: `name`, `type` (text, long_text, number, currency, boolean, date, datetime, single_select, multi_select, email, phone, url, relation, status, address, json, rating, percent, duration; see [field types](data-model.md#field-types)), `label`, `description`, `required`, `unique`, `hidden`, `sensitivity` (standard, confidential, restricted), `default`, `validation` (`min`/`max` for numbers, percent and duration, `max_length`/`pattern` for text), `values` (select and status fields), `relation` (`to`, `cardinality`), `initial` and `transitions` (status fields), `max` (rating: 1 to 10; can be raised, not lowered) and `shape` (json: `type`, `required`, `properties`, `additional_properties`). `standard` and `read_only` are written by `pull` for information and ignored on input. Unknown properties are an error, so a typo doesn't pass silently.
 
 ### How a file is matched to the workspace

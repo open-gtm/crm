@@ -559,6 +559,64 @@ export function buildAdminServer(client: HlCrmClient): McpServer {
     annotations: change,
   }, (a) => run(() => client.post(`/v1/objects/${enc(a.object)}/fields`, { ...fieldBody(a), dry_run: a.dry_run ?? true })));
 
+  // --- Record page layouts (ADR 0017): people and agents edit one shared draft, then publish it ---
+
+  const LayoutShape = z.object({
+    header: z.object({ key_facts: z.array(z.string()).max(6).nullable().optional().describe("Field names shown in the header; null leaves them to the page") }).optional(),
+    top: z.array(z.record(z.string(), z.unknown())).optional().describe("Across the top: [{type: \"stage_path\"}] or []"),
+    columns: z.object({
+      left: z.array(z.record(z.string(), z.unknown())).optional(), main: z.array(z.record(z.string(), z.unknown())).optional(),
+      right: z.array(z.record(z.string(), z.unknown())).optional(),
+    }).describe("Components per column, in order. Each is {id?, type, …}: fields {name, columns: 1|2, collapsed, fields: [field names]}; "
+      + "related {object, field?, rows?} (a list of records that point at this one); tasks {rows?}; quotes {rows?}; stage_path {field?}; agent_changes {days?}; "
+      + "timeline; notes; files; related_lists (every related list not placed on its own). Keep each component's id when you change it, so the change reads as a change."),
+  }).describe("The whole layout. Start from get_page_layout and change what was asked: a component you leave out is taken off the page.");
+
+  server.registerTool("get_page_layout", {
+    description: "How an object's record page is arranged: key facts in the header and columns of components (sections of fields, related lists, timeline, notes, files, quotes, tasks, "
+      + "stage path, changes by agents). Returns the shared draft when there is one (with its revision, what it changes and who changed it), else the published layout. "
+      + "A layout arranges and never grants access: a field someone's role can't read stays hidden wherever it is placed.",
+    inputSchema: { object: z.string(), published: z.boolean().optional().describe("true: the published layout, ignoring any draft") }, annotations: read,
+  }, (a) => run(async () => unwrap(await client.get<{ data: unknown }>(`/v1/objects/${enc(a.object)}/layout${a.published ? "" : "/draft"}`))));
+
+  server.registerTool("set_page_layout", {
+    description: "Change the shared draft of an object's record page layout, which people edit in the web UI too. Defaults to dry_run: true, which saves nothing and returns `changes` "
+      + "(what would change, one sentence each) and `warnings`: show them to the user, then call again with dry_run: false. Send the whole layout and the `revision` from get_page_layout; "
+      + "if someone changed the draft since, the call is refused and you read it again. Nothing is published: record pages change only after publish_page_layout.",
+    inputSchema: { object: z.string(), layout: LayoutShape, revision: z.number().int().min(0).optional().describe("The draft revision you read (0: there was no draft)"),
+      note: z.string().max(500).optional().describe("What the user asked for, in a sentence. It is shown beside the change."), dry_run: dryRun },
+    annotations: change,
+  }, (a) => run(async () => unwrap(await client.put<{ data: unknown }>(`/v1/objects/${enc(a.object)}/layout/draft`, { layout: a.layout, revision: a.revision, note: a.note, dry_run: a.dry_run ?? true }))));
+
+  server.registerTool("publish_page_layout", {
+    description: "Publish the shared draft of an object's layout as its next version: every member's record pages show it from then on. Defaults to dry_run: true, which returns what "
+      + "would change against the published layout, including changes other people made to the draft: show that to the user and publish only after they confirm.",
+    inputSchema: { object: z.string(), note: z.string().max(500).optional(), revision: z.number().int().min(0).optional().describe("The draft revision the user saw"),
+      overwrite: z.boolean().optional().describe("Publish although the published layout changed since the draft was started. Ask the user first."), dry_run: dryRun },
+    annotations: change,
+  }, (a) => run(async () => unwrap(await client.post<{ data: unknown }>(`/v1/objects/${enc(a.object)}/layout/publish`, { note: a.note, revision: a.revision, overwrite: a.overwrite, dry_run: a.dry_run ?? true }))));
+
+  server.registerTool("list_page_layout_versions", {
+    description: "The published versions of an object's layout, newest first: what each changed, who published it and through which surface (web, admin-mcp, cli, api), "
+      + "and who contributed to its draft. Pass `version` for one version with its layout.",
+    inputSchema: { object: z.string(), version: z.number().int().positive().optional() }, annotations: read,
+  }, (a) => run(async () => unwrap(await client.get<{ data: unknown }>(`/v1/objects/${enc(a.object)}/layout/versions${a.version ? `/${a.version}` : ""}`))));
+
+  server.registerTool("restore_page_layout", {
+    description: "Put an earlier version of an object's layout into the shared draft. Defaults to dry_run: true (returns what would change). Nothing is published until publish_page_layout.",
+    inputSchema: { object: z.string(), version: z.number().int().positive(), revision: z.number().int().min(0).optional(), dry_run: dryRun },
+    annotations: change,
+  }, (a) => run(async () => unwrap(await client.post<{ data: unknown }>(`/v1/objects/${enc(a.object)}/layout/restore`, { version: a.version, revision: a.revision, dry_run: a.dry_run ?? true }))));
+
+  server.registerTool("discard_page_layout_draft", {
+    description: "Throw away the shared draft of an object's layout, including changes other people made to it. The published layout is untouched. Needs confirm: true; ask the user first.",
+    inputSchema: { object: z.string(), confirm: z.boolean().describe("Must be true") },
+    annotations: { ...change, destructiveHint: true },
+  }, (a) => run(async () => {
+    if (a.confirm !== true) throw new Error("Pass confirm: true after the user agreed to discard the draft");
+    return unwrap(await client.delete<{ data: unknown }>(`/v1/objects/${enc(a.object)}/layout/draft`));
+  }));
+
   server.registerTool("create_relation", {
     description: "Relate two objects by adding a relation field to `from_object` that points at `to_object`.",
     inputSchema: {
