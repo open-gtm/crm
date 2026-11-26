@@ -388,6 +388,30 @@ export async function upsertByKey(tx: Tx, ctx: Ctx, obj: ObjectMeta, key: string
   return { action: "update", id: updated.id };
 }
 
+/**
+ * One record, created or updated by a unique field: what another system needs to push a record in with one
+ * request (`POST /v1/objects/{object}/records/upsert`, the ops MCP `upsert_record`). The rules are an
+ * import row's, checked before anything is read: write and read on the object, a key the caller can read
+ * (which record matches would otherwise reveal a value), and write on every other field given (whether
+ * anything changed is told, so a field the caller can't write is refused, never compared).
+ */
+export async function upsertRecord(tx: Tx, ctx: Ctx, objectName: string, key: string, values: Record<string, unknown>) {
+  const obj = getObject(await loadSchema(tx), objectName);
+  assertObject(ctx, obj, "write");
+  assertObject(ctx, obj, "read");
+  if (key === "id") throw unprocessable("To update a record by its id, use PATCH /v1/objects/{object}/records/{id}");
+  if (!isUniqueKey(obj, key)) throw unprocessable(`The upsert key must be a unique field of ${obj.api_name}; "${key}" is not unique`);
+  if (!canReadField(ctx, obj, key)) throw forbidden(`This key can't read ${obj.api_name}.${key}, so it can't be the upsert key`);
+  const v = values[key];
+  if (v === undefined || v === null || v === "") throw unprocessable(`values must hold the key, ${key}`, { field: key });
+  const unwritable = Object.keys(values).filter((k) => k !== key && obj.byName.has(k) && fieldAccess(ctx, obj, obj.byName.get(k)!) !== "write");
+  if (unwritable.length) throw forbidden(`This key can't write ${unwritable.map((k) => `${obj.api_name}.${k}`).join(", ")}`);
+  const out = await upsertByKey(tx, ctx, obj, key, { ...values });
+  if (out.action === "error") throw new ApiError(409, "conflict", out.reason ?? "The record can't be matched");
+  const action = out.action === "create" ? "created" as const : out.action === "update" ? "updated" as const : "unchanged" as const;
+  return { action, data: await getRecord(tx, ctx, obj.api_name, out.id!) };
+}
+
 async function coerce(tx: Tx, ctx: Ctx, schema: Schema, c: Column, raw: string, lookups: Map<string, string>): Promise<unknown> {
   const list = (s: string) => s.split(";").map((x) => x.trim()).filter(Boolean);
   if (!c.field) return list(raw); // related_to

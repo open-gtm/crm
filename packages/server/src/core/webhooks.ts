@@ -214,13 +214,24 @@ function visibleData(ctx: Ctx | undefined, schema: Awaited<ReturnType<typeof loa
   return out;
 }
 
+/**
+ * The app or key an event came through is a name its owner chose. It is shown to the member the key or app
+ * acts for and to those who read the audit log (where the key itself is named); to others the surface is enough.
+ * Never part of a webhook payload (no caller).
+ */
+function viaFor(ctx: Ctx | undefined, e: EventRow): { via?: string | null } {
+  if (!ctx || e.via === undefined) return {};
+  const own = e.actor_id !== null && ctx.actor.id === e.actor_id;
+  return own || can(ctx, "audit:read") ? { via: e.via } : {};
+}
+
 export async function publicEvent(tx: Tx, e: EventRow, ctx?: Ctx) {
   const schema = await loadSchema(tx);
   const prefix = e.object_type ? schema.objects.get(e.object_type)?.id_prefix : undefined;
   return {
     id: encodeId("evt", e.id), type: e.type, occurred_at: e.occurred_at.toISOString(),
     object: e.object_type, record_id: e.record_id && prefix ? encodeId(prefix, e.record_id) : null,
-    actor: { type: e.actor_type, id: actorRef(e.actor_type, e.actor_id), surface: e.surface },
+    actor: { type: e.actor_type, id: actorRef(e.actor_type, e.actor_id), surface: e.surface, ...viaFor(ctx, e) },
     causation_depth: e.causation_depth,
     automation_id: e.automation_id ? encodeId("auto", e.automation_id) : null,
     data: visibleData(ctx, schema, e),

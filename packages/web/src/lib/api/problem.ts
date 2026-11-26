@@ -74,7 +74,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
   "restricted:read": "see restricted values", "schema:manage": "change the schema", "members:manage": "manage members",
   "roles:manage": "manage roles", "keys:manage": "manage API keys", "webhooks:manage": "manage webhooks",
   "automations:manage": "manage automations", "alerts:manage": "manage workspace alerts", "audit:read": "read the audit log",
-  "views:manage": "manage shared views",
+  "views:manage": "manage shared views", "connections:manage": "manage connections",
 };
 const permissionLabel = (p: string) => (Object.hasOwn(PERMISSION_LABELS, p) ? PERMISSION_LABELS[p]! : p);
 

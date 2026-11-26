@@ -56,7 +56,7 @@ export interface RouteDef<B = unknown, Q = unknown> {
   rawBody?: { maxBytes: () => number };
   query?: z.ZodType<Q>;
   /** Path params that hold record or entity IDs, for the cross-tenant test harness. */
-  idParams?: Record<string, "record" | "key" | "webhook" | "automation" | "delivery" | "notification" | "alert" | "member" | "service_account" | "role" | "permission_set" | "session" | "view" | "grant" | "file">;
+  idParams?: Record<string, "record" | "key" | "webhook" | "automation" | "delivery" | "notification" | "alert" | "member" | "service_account" | "role" | "permission_set" | "session" | "view" | "grant" | "file" | "connection">;
   /**
    * "session": only a signed-in person (browser session) may call it, never an API key: it acts on the
    * person's own sign-in (their session, their password). Unset: keys and sessions alike.
@@ -96,6 +96,7 @@ export const isWrite = (m: Method) => m !== "GET";
 /** Admin-scope routes in these tags need the matching permission unless they say otherwise. */
 const ADMIN_TAG_PERMISSION: Record<string, Permission> = {
   schema: "schema:manage", webhooks: "webhooks:manage", automations: "automations:manage", alerts: "alerts:manage",
+  connections: "connections:manage",
 };
 
 /**

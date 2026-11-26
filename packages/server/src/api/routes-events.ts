@@ -10,7 +10,11 @@ import {
   archiveWebhook, createWebhook, getDelivery, getWebhook, listDeliveries, listWebhooks, publicEvent, replayDelivery,
   revealWebhookSecret, rotateWebhookSecret, testWebhook, updateWebhook,
 } from "../core/webhooks.js";
-import { recentEvents, type EventProcessing } from "../core/queries/events.js";
+import { activityBySource, recentEvents, type EventProcessing } from "../core/queries/events.js";
+import { runsSummary } from "../core/queries/automation-runs.js";
+import { AGENT_SURFACES } from "../core/source.js";
+import { actorRef } from "../core/webhooks.js";
+import { encodeId } from "../lib/ids.js";
 import { loadSchema } from "../core/schema.js";
 import { badRequest } from "../lib/errors.js";
 import { decodeId } from "../lib/ids.js";
@@ -18,7 +22,7 @@ import { route } from "./registry.js";
 import { data, enumOf, list, nullable, object, plain, R, ref, S } from "./responses.js";
 
 /** Through an MCP server: the header a key's client sends, or the surface a connected app's token fixes. */
-const viaMcp = (headers: Headers, ctx: Ctx) => (headers.get("x-hlcrm-surface") ?? "api").endsWith("mcp") || ctx.surface.endsWith("mcp");
+export const viaMcp = (headers: Headers, ctx: Ctx) => (headers.get("x-hlcrm-surface") ?? "api").endsWith("mcp") || ctx.surface.endsWith("mcp");
 
 const WebhookBody = z.object({
   url: z.string().max(2000),
@@ -270,7 +274,8 @@ const publicProcessing = (r: EventProcessing) => ({
 /** An event as the caller may see it (core/webhooks.ts publicEvent), with how the worker got on with it. */
 const Event = object({
   id: S.str, type: S.str, occurred_at: S.time, object: nullable(S.str), record_id: nullable(S.str),
-  actor: object({ type: S.str, id: nullable(S.str), surface: S.str }),
+  actor: object({ type: S.str, id: nullable(S.str), surface: S.str,
+    via: { ...nullable(S.str), description: "The connected app or API key the change came through, by name. Only on your own events, or with audit:read" } }, ["type", "id", "surface"]),
   causation_depth: { type: "integer", description: "How many automation steps led to it (0 for a direct change)" },
   automation_id: { ...nullable(S.str), description: "The automation whose step caused it, or null" },
   data: { type: "object", additionalProperties: true,
@@ -281,10 +286,14 @@ const Event = object({
 route({
   method: "GET", path: "/v1/events", scope: "ops:read", tag: "events",
   response: plain(object({ data: list(Event), next_before: nullable(S.str) })),
-  summary: "Recent events (90 days), newest first. Filter by type prefix, record or processing status (dead = failed every retry)",
+  summary: "Recent events (90 days), newest first. Filter by type prefix, record, processing status (dead = failed every retry), who caused them (actor=me), "
+    + "how they arrived (surface=agents: API keys, the CLI and MCP) and since when",
   query: z.object({
     type: z.string().max(100).optional(), record: z.string().optional(), limit: z.coerce.number().int().optional(), before: z.string().optional(),
     status: z.enum(["pending", "processed", "dead"]).optional(),
+    actor: z.string().max(60).optional().describe("me, or a member or service account ID (usr_…, svc_…)"),
+    surface: z.enum(["agents", "api", "cli", "admin-mcp", "ops-mcp", "web", "automation", "system"]).optional().describe("agents: api, cli, admin-mcp and ops-mcp together"),
+    since: z.string().max(40).optional().describe("An ISO date-time: only events at or after it"),
   }),
   handler: async ({ tx, ctx, query }) => {
     const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
@@ -297,10 +306,61 @@ route({
     if (query.record && !record) throw badRequest("record must be a record ID");
     const before = query.before ? decodeId(query.before) : null;
     if (query.before && (!before || before.prefix !== "evt")) throw badRequest("before must be an event ID (evt_…)");
+    const actor = query.actor === undefined ? null : query.actor === "me" ? ctx.actor.id : decodeId(query.actor)?.uuid ?? null;
+    if (query.actor !== undefined && !actor) throw badRequest("actor must be me, or a member or service account ID");
+    const since = query.since === undefined ? null : new Date(query.since);
+    if (since && Number.isNaN(since.getTime())) throw badRequest("since must be an ISO date-time");
     const rows = await recentEvents(tx, { type: query.type ?? null, record: record?.uuid ?? null, before: before?.uuid ?? null, all, readable,
-      status: query.status ?? null, limit });
+      status: query.status ?? null, actor, surfaces: query.surface === undefined ? null : query.surface === "agents" ? [...AGENT_SURFACES] : [query.surface], since, limit });
     const data = [];
     for (const r of rows) data.push({ ...(await publicEvent(tx, r, ctx)), processing: publicProcessing(r) });
     return { body: { data, next_before: rows.length === limit ? data[data.length - 1]!.id : null } };
+  },
+});
+
+/** A window for the summaries below: the last `hours` hours, a day by default, a week at most. */
+const Window = z.object({ hours: z.coerce.number().int().min(1).max(168).optional() });
+const sinceHours = (hours: number | undefined) => new Date(Date.now() - (hours ?? 24) * 3_600_000);
+
+route({
+  method: "GET", path: "/v1/events/summary", scope: "admin", permission: "audit:read", tag: "events",
+  summary: "Who and what changed the workspace through API keys, the CLI and MCP in the last hours (24 by default): changes counted per member, surface and app or key. Reads are not recorded",
+  response: data(object({
+    since: S.time,
+    sources: list(object({
+      actor: { ...nullable(S.str), description: "The member or service account the key or app acts for" }, surface: S.str,
+      via: { ...nullable(S.str), description: "The connected app or API key, by name; null for changes from before names were recorded" },
+      changes: { type: "integer", description: "Events it caused: one per record created, changed, archived or merged, and per schema change" },
+      records: { type: "integer", description: "Distinct records among them" }, last_at: S.time,
+    })),
+  })),
+  query: Window,
+  handler: async ({ tx, query }) => {
+    const since = sinceHours(query.hours);
+    const rows = await activityBySource(tx, since, [...AGENT_SURFACES], 100);
+    return { body: { data: { since: since.toISOString(), sources: rows.map((r) => ({
+      actor: actorRef(r.actor_type, r.actor_id), surface: r.surface, via: r.via, changes: r.changes, records: r.records, last_at: r.last_at.toISOString() })) } } };
+  },
+});
+
+route({
+  method: "GET", path: "/v1/automations/runs/summary", scope: "admin", tag: "automations",
+  summary: "Runs of every automation in the last hours (24 by default): totals by status, and per automation its counts and last failure",
+  response: data(object({
+    since: S.time, totals: object({ succeeded: S.int, failed: S.int, skipped: S.int, queued: S.int, running: S.int }),
+    automations: list(object({ id: S.str, name: S.str, succeeded: S.int, failed: S.int, skipped: S.int, open: { type: "integer", description: "Queued or running" },
+      last_failed_at: nullable(S.time), last_failure: { ...nullable(S.str), description: "Why its newest failed run failed" } })),
+  })),
+  query: Window,
+  handler: async ({ tx, query }) => {
+    const since = sinceHours(query.hours);
+    const rows = await runsSummary(tx, since);
+    const totals = { succeeded: 0, failed: 0, skipped: 0, queued: 0, running: 0 };
+    for (const r of rows) {
+      totals.succeeded += r.succeeded; totals.failed += r.failed; totals.skipped += r.skipped; totals.queued += r.queued; totals.running += r.running;
+    }
+    return { body: { data: { since: since.toISOString(), totals, automations: rows.map((r) => ({
+      id: encodeId("auto", r.automation_id), name: r.name, succeeded: r.succeeded, failed: r.failed, skipped: r.skipped, open: r.queued + r.running,
+      last_failed_at: r.last_failed_at ? r.last_failed_at.toISOString() : null, last_failure: r.last_failure })) } } };
   },
 });

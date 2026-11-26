@@ -3,7 +3,7 @@ import {
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown, ArrowUp, Lock, Pencil } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox, Skeleton } from "@/components/ui/misc";
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/overlays";
@@ -12,6 +12,7 @@ import { cn } from "@/lib/cn";
 import { useSession } from "@/lib/session";
 import { canSort, canWrite, isRestrictedValue, readOnlyReason, toApiValue, toFormValue, validateValues, type FormValue } from "@/meta/fields";
 import { FieldControl, FieldValue, isNumeric, RecordLink } from "@/meta/registry";
+import { lastActivityField, StalePill } from "./stale";
 
 /**
  * The records table: a virtualized grid (only visible rows are in the DOM, so thousands of loaded rows
@@ -45,6 +46,8 @@ export interface DataTableProps {
   onLoadMore: () => void;
   /** Rows the server has in all (a count), for screen readers. */
   total?: number;
+  /** A totals row pinned under the rows: what each number column adds up to for the whole filtered list. Absent cells stay empty. */
+  footer?: { cells: Record<string, ReactNode> };
 }
 
 const SYSTEM: Record<string, FieldMeta> = {
@@ -169,7 +172,7 @@ export function DataTable(p: DataTableProps) {
       role="grid"
       tabIndex={-1}
       aria-label={`${meta.plural_label}`}
-      aria-rowcount={(p.total ?? rows.length) + 1}
+      aria-rowcount={(p.total ?? rows.length) + 1 + (p.footer ? 1 : 0)}
       aria-colcount={leafCols.length}
       aria-multiselectable="true"
       onKeyDown={onKeyDown}
@@ -263,6 +266,20 @@ export function DataTable(p: DataTableProps) {
             })}
           </div>
         )}
+        {p.footer && !p.loading ? (
+          <div role="row" aria-rowindex={(p.total ?? rows.length) + 2} className="sticky bottom-0 z-10 flex border-t border-line bg-surface-2 text-sm font-medium text-muted">
+            {leafCols.map((c, ci) => {
+              const sticky = c.id === SELECT_COL ? "sticky left-0 z-[1] bg-surface-2" : c.id === NAME_COL ? "sticky left-10 z-[1] border-r border-line bg-surface-2" : "";
+              const f = fieldOf(meta, c.id);
+              return (
+                <div key={c.id} role="gridcell" aria-colindex={ci + 1} style={{ width: c.getSize() }}
+                  className={cn("flex min-h-9 shrink-0 items-center overflow-hidden px-2", sticky, f && isNumeric(f.type) && "justify-end text-right")}>
+                  {c.id === NAME_COL ? "Total" : p.footer!.cells[c.id] ?? null}
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -285,6 +302,7 @@ function Cell({ meta, row, colId, selected, onToggle, editable, onStartEdit }: {
   return (
     <>
       <span className={cn("min-w-0 flex-1", isNumeric(f.type) && "text-right")}><FieldValue field={f} value={row[colId]} record={row} meta={meta} /></span>
+      {f === lastActivityField(meta) ? <StalePill value={row[colId]} /> : null}
       {editable ? (
         <button type="button" tabIndex={-1} aria-label={`Edit ${f.label}`} onClick={onStartEdit}
           className="ml-1 hidden shrink-0 rounded-sm p-0.5 text-subtle hover:bg-surface-3 hover:text-fg group-hover:inline-flex">

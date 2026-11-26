@@ -3,6 +3,7 @@ import { ApiError, conflict, forbidden, notFound, unprocessable } from "../lib/e
 import { logger } from "../lib/logger.js";
 import { decodeId, encodeId, uuidv7 } from "../lib/ids.js";
 import { BlockedTargetError, checkUrl } from "../lib/outbound.js";
+import { checkConnectionPath, connectionForStep, connectionUrl } from "./connections.js";
 import { ownerField } from "./alerts.js";
 import { audit } from "./audit.js";
 import { dependencies, depsHiddenFrom, writeDenied, writes } from "./automation-access.js";
@@ -132,7 +133,7 @@ interface Validated {
   actions: Step[]; secrets: Record<string, Record<string, string>>; runRoles: string[]; settings: Settings; nextRuns: string[] | null;
 }
 
-interface StepCtx { schema: Schema; trigger: Trigger; obj: ObjectMeta | null; condition: Where | null; cur: ObjectMeta | null; inFor: boolean; known: Map<string, Step | InnerStep>; outbound: boolean; warnings: string[] }
+interface StepCtx { schema: Schema; trigger: Trigger; obj: ObjectMeta | null; condition: Where | null; cur: ObjectMeta | null; inFor: boolean; /** Inside a for_each over an HTTP reply's list: {{item…}} is an element of it, and there is no current record. */ itemData?: boolean; known: Map<string, Step | InnerStep>; outbound: boolean; warnings: string[] }
 
 /** Most placeholders one step may hold in all its strings. Each is filled per run (and per recipient), so this bounds the work. */
 const MAX_STEP_PLACEHOLDERS = 200;
@@ -143,7 +144,7 @@ const MAX_STEP_PLACEHOLDERS = 200;
  * would replace the real value) and no hidden field in what goes out.
  */
 function checkTemplates(c: StepCtx, step: Step | InnerStep, where: string): void {
-  const texts = strings(step.type === "for_each" ? { if: step.if, query: step.query } : step);
+  const texts = strings(step.type === "for_each" ? { if: step.if, query: step.query, items: step.items } : step);
   let count = 0;
   for (const t of texts) {
     const found = placeholders(t);
@@ -168,8 +169,9 @@ function checkTemplates(c: StepCtx, step: Step | InnerStep, where: string): void
         if (!c.obj) throw unprocessable(`${where}: {{record…}} needs a trigger record, and this trigger has none${c.inFor ? "; use {{item…}} for the current item" : ""}`);
         fieldOf(c.obj);
       } else if (root === "item") {
-        if (!c.inFor || !c.cur) throw unprocessable(`${where}: {{item…}} only works inside for_each`);
-        fieldOf(c.cur);
+        if (!c.inFor || (!c.cur && !c.itemData)) throw unprocessable(`${where}: {{item…}} only works inside for_each`);
+        // An element of an HTTP reply is another system's data, not a record: there are no fields to check.
+        if (c.cur) fieldOf(c.cur);
       } else if (root === "steps") {
         const src = c.known.get(a!);
         if (!src) throw unprocessable(`${where}: {{steps.${a}…}} names no earlier step; give that step "id": "${a}"`);
@@ -270,7 +272,17 @@ async function checkStep(tx: Tx, ctx: Ctx, c: StepCtx, step: Step | InnerStep, w
       return;
     }
     case "http_request": {
-      checkUrlTemplate(step.url, where);
+      const conn = step.connection !== undefined ? await connectionForStep(tx, step.connection) : null;
+      if (conn) {
+        // The credential is the connection's: a step can't add secrets of its own, which would travel with it to wherever the connection points.
+        if (step.secret_headers && Object.keys(step.secret_headers).length) throw unprocessable(`${where}: a step with a connection can't have secret_headers; the connection holds the credential`);
+        checkConnectionPath(step.url, `${where}: url`);
+        if (Object.keys(step.headers ?? {}).some((k) => k.toLowerCase() === conn.header_name.toLowerCase())) {
+          throw unprocessable(`${where}: header ${conn.header_name} is set by connection ${conn.key}`);
+        }
+        if (!conn.enabled) c.warnings.push(`${where}: connection ${conn.key} is turned off, so this step will fail until it is turned on.`);
+      }
+      checkUrlTemplate(conn ? connectionUrl(conn, step.url) : step.url, where);
       const names = new Set<string>();
       for (const [k, v] of Object.entries(step.headers ?? {})) {
         if (!isHeaderName(k) || !headerAllowed(k)) throw unprocessable(`${where}: header "${k}" is not allowed`);
@@ -309,7 +321,24 @@ async function checkStep(tx: Tx, ctx: Ctx, c: StepCtx, step: Step | InnerStep, w
     }
     case "for_each": {
       if (c.inFor) throw unprocessable(`${where}: for_each can't be nested`);
-      if (Boolean(step.over) === Boolean(step.query)) throw unprocessable(`${where}: for_each needs exactly one of over (a find_records step id) or query`);
+      if ([step.over, step.query, step.items].filter((x) => x !== undefined).length !== 1) {
+        throw unprocessable(`${where}: for_each needs exactly one of over (a find_records step id), query, or items (a list from an HTTP reply)`);
+      }
+      if (step.items !== undefined) {
+        // Exactly one placeholder, into the parsed JSON of an earlier http_request's reply. Nothing else is a list a run holds.
+        const m = /^\{\{\s*([^{}|]+?)\s*\}\}$/.exec(step.items);
+        const path = m ? m[1]!.split(".") : [];
+        const src = path[0] === "steps" ? c.known.get(path[1] ?? "") : undefined;
+        if (!m || !src || src.type !== "http_request" || path[2] !== "json") {
+          throw unprocessable(`${where}: items must be one placeholder for a list in an earlier http_request step's reply, such as "{{steps.fetch.json.results}}"`);
+        }
+        const inner: StepCtx = { ...c, cur: null, inFor: true, itemData: true };
+        for (const [i, s] of step.steps.entries()) {
+          await checkStep(tx, ctx, inner, s, `${where}.${i + 1} (${s.type})`, webhooks, settings);
+          if (s.id) c.known.set(s.id, s);
+        }
+        return;
+      }
       let obj: ObjectMeta;
       if (step.over) {
         const src = c.known.get(step.over);
@@ -453,10 +482,10 @@ function describeStep(s: Step | InnerStep, object: string | null, webhooks: Map<
       case "notify": return `notify ${[s.recipients.record_owner ? `the ${object}'s owner` : null, s.recipients.users?.length ? s.recipients.users.join(", ") : null].filter(Boolean).join(" and ")} ("${s.title}"; inbox, and email per their preferences)`;
       case "find_records": return `find up to ${s.limit ?? LIMITS.findDefault} ${s.object} records${s.where ? ` matching ${JSON.stringify(s.where)}` : ""}`;
       case "upsert_record": return `create or update a ${s.object} matched on ${s.key}, with ${kv(s.values)}`;
-      case "http_request": return `send an HTTP ${s.method} request to ${s.url} (outside the CRM; headers: ${[...Object.keys(s.headers ?? {}), ...Object.keys(s.secret_headers ?? {}).map((k) => `${k} (secret)`)].join(", ") || "none"})`;
+      case "http_request": return `send an HTTP ${s.method} request to ${s.connection ? `${s.url} through connection ${s.connection}` : s.url} (outside the CRM; headers: ${[...Object.keys(s.headers ?? {}), ...Object.keys(s.secret_headers ?? {}).map((k) => `${k} (secret)`)].join(", ") || "none"})`;
       case "send_email": return `email ${s.to.member ? `member ${s.to.member}` : s.to.record_owner ? `the ${object}'s owner` : s.to.field ? `the address in the ${object}'s ${s.to.field} field` : s.to.address} ("${s.subject}")`;
       case "stop": return "stop the run";
-      case "for_each": return `for each ${s.over ? `record found by ${s.over}` : `${s.query!.object} record${s.query!.where ? ` matching ${JSON.stringify(s.query!.where)}` : ""}`} (at most ${s.query?.limit ?? (s.over ? LIMITS.forEachMax : LIMITS.forEachDefault)}): ${s.steps.map((x) => describeStep(x, s.query?.object ?? "item", webhooks)).join("; then ")}`;
+      case "for_each": return `for each ${s.items ? `element of ${s.items}` : s.over ? `record found by ${s.over}` : `${s.query!.object} record${s.query!.where ? ` matching ${JSON.stringify(s.query!.where)}` : ""}`} (at most ${s.query?.limit ?? (s.over || s.items ? LIMITS.forEachMax : LIMITS.forEachDefault)}): ${s.steps.map((x) => describeStep(x, s.query?.object ?? "item", webhooks)).join("; then ")}`;
     }
   })();
   return `${body}${gate}`;

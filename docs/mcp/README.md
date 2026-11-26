@@ -35,6 +35,7 @@ Both protocol revisions are served on the same URL: 2025-11-25 and earlier (an `
 | `create_record` | Create one record of any object. |
 | `create_records` | Create up to 100 records of one object, all or nothing. Use it for lists. `dry_run: true` returns, per record, what would be created or its errors, and writes nothing. |
 | `update_record` | Update fields. Pass `expected_version` to avoid overwriting another change. |
+| `upsert_record` | Create a record, or update the one that already has the given value in a unique field (`key`: a contact's email, an account's domain, a unique custom field such as another system's ID). Answers with the record and `action`: created, updated or unchanged. For copying records in from another system without duplicates. |
 | `archive_record` | Archive a record. Needs `confirm: true`. |
 | `restore_record` | Un-archive a record. Refused when another record now holds one of its unique values, or when it was merged. Annotations: write, not destructive. |
 | `find_duplicates` | Groups of likely duplicates with the reason for each: contacts by email or name and account, accounts by domain or company name, leads by contact and interest, custom objects by the fields named in `rules`; `fuzzy: true` adds similar names. Read-only. |
@@ -86,7 +87,12 @@ Schema-changing tools **default to `dry_run: true`** and return a diff (`changes
 | `update_object` | Relabel, describe or hide an object |
 | `create_pipeline` | A deal pipeline with stages |
 | `set_modules` | Turn modules on or off |
-| `get_schema_changes` | Who changed what in the schema, and through which surface |
+| `get_schema_changes` | Who changed what in the schema, through which surface (web, admin-mcp, cli, api), connected app or API key (`via`), and for which schema pack. `object` narrows it to one object and its fields. |
+| `get_page_layout` | How an object's record page is arranged: key facts, and columns of components. Returns the shared draft when there is one (with its `revision`, what it changes and who changed it through what), else the published layout. `published: true` ignores the draft. |
+| `set_page_layout` | Change the shared draft, the same one people edit in the web UI. Defaults to `dry_run: true`, which returns `changes` in sentences and `warnings`. Takes the whole layout and the `revision` read; a draft someone changed since is not overwritten. `note` records what the user asked for. Nothing is published. |
+| `publish_page_layout` | Publish the draft as the next version, for every member. Defaults to a dry run that shows what would change, including other people's changes to the draft. `overwrite` publishes over a layout that changed since the draft was started. |
+| `list_page_layout_versions`, `restore_page_layout` | The published versions with who published each and through which surface; put an earlier one into the draft (dry run by default). |
+| `discard_page_layout_draft` | Throw the draft away. Needs `confirm: true`. |
 | `get_audit_log`, `verify_audit_log` | Audit trail and its integrity check |
 | `list_members`, `list_api_keys` | Oversight. Key secrets are never returned or created here. |
 | `create_automation` | "When <trigger> (and the record matches <condition>), do <steps>". Triggers: a record event (`trigger_event`), or `trigger` for a schedule or a run-on-request automation. Steps include `http_request` and `send_email` ([automations.md](../automations.md)). Defaults to `dry_run: true`, which returns a plain-language summary with every URL and recipient, and for a schedule the next runs. Marked destructive and open-world. |
@@ -95,6 +101,7 @@ Schema-changing tools **default to `dry_run: true`** and return a diff (`changes
 | `list_automations`, `update_automation`, `archive_automation`, `get_automation_runs` | Manage automations and see what they did, step by step. `update_automation` defaults to a dry run; `archive_automation` needs `confirm: true`. |
 | `pause_automation`, `resume_automation`, `set_automation_settings`, `preview_automation_schedule`, `suppress_email` | Pause one automation or (settings) every automation; the next runs of a schedule; stop automations emailing an address and its `+tag` variants (needs `automations:manage`). Email to non-members can't be turned on here. |
 | `register_webhook`, `list_webhooks`, `update_webhook` | Webhook endpoints and their subscriptions. `register_webhook` and `update_webhook` default to `dry_run: true`, which shows the exact URL and events (and, for updates, the current values); apply with `dry_run: false` after the user confirms. Secrets are never shown here, `include_restricted` cannot be set here, and the URL and events of a webhook that receives restricted values cannot be changed here. |
+| `list_connections` | [Connections](../connections.md): stored credentials for calling other systems, each bound to one base URL. An `http_request` step uses one with `"connection": "<key>"` and a path. Secrets are never shown, and connections can't be created, changed, tested or archived through MCP. |
 | `rotate_webhook_secret`, `test_webhook` | Rotate with an overlap window; send a signed test event now. |
 | `list_webhook_deliveries`, `get_webhook_delivery`, `replay_webhook_delivery` | The delivery log (metadata only: event type, status, attempts, timestamps, last HTTP result), one delivery with its payload, and resending a delivery (not one that carries restricted values: replay those through the API). |
 | `create_workspace_alert` | Alerts for the team: event, inactivity ("untouched for 14 days") or date-passed ("task overdue") rules that notify owners or named members and optionally webhooks. Dry run by default, with a backtest. |

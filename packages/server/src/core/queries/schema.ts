@@ -76,27 +76,55 @@ export async function bumpSchemaVersion(tx: Tx): Promise<{ schema_version: strin
 
 /** Logs a schema change. `before` and `after` are stored as JSON; undefined stores NULL. */
 export async function insertSchemaChange(tx: Tx, c: { tenantId: string; version: number; actorType: string; actorId: string | null; surface: string;
-  change: string; objectId: string | null; fieldId: string | null; before: unknown; after: unknown }): Promise<void> {
+  change: string; objectId: string | null; fieldId: string | null; before: unknown; after: unknown; via: string | null; pack: string | null }): Promise<void> {
   await tx`
-    INSERT INTO schema_changes (tenant_id, version, actor_type, actor_id, surface, change_type, object_id, field_id, before, after)
-    VALUES (${c.tenantId}, ${c.version}, ${c.actorType}, ${c.actorId}, ${c.surface}, ${c.change},
+    INSERT INTO schema_changes (tenant_id, version, actor_type, actor_id, surface, via, pack, change_type, object_id, field_id, before, after)
+    VALUES (${c.tenantId}, ${c.version}, ${c.actorType}, ${c.actorId}, ${c.surface}, ${c.via}, ${c.pack}, ${c.change},
             ${c.objectId}, ${c.fieldId},
             ${c.before === undefined ? null : tx.json(c.before as never)},
             ${c.after === undefined ? null : tx.json(c.after as never)})`;
 }
 
 export interface SchemaChangeLogRow { version: string; changed_at: Date; actor_type: string; actor_id: string | null; surface: string;
-  change_type: string; before: unknown; after: unknown; object_name: string | null; field_name: string | null }
+  via: string | null; pack: string | null; change_type: string; before: unknown; after: unknown; object_name: string | null; field_name: string | null }
 
 /** The newest schema changes, at most `limit`, with the names of the objects and fields they touched. */
-export async function schemaChangeLog(tx: Tx, limit: number): Promise<SchemaChangeLogRow[]> {
+export async function schemaChangeLog(tx: Tx, limit: number, objectId: string | null = null): Promise<SchemaChangeLogRow[]> {
   return tx<SchemaChangeLogRow[]>`
-    SELECT sc.version::text, sc.changed_at, sc.actor_type, sc.actor_id, sc.surface, sc.change_type, sc.before, sc.after,
+    SELECT sc.version::text, sc.changed_at, sc.actor_type, sc.actor_id, sc.surface, sc.via, sc.pack, sc.change_type, sc.before, sc.after,
            o.api_name AS object_name, f.api_name AS field_name
     FROM schema_changes sc
     LEFT JOIN objects o ON o.tenant_id = sc.tenant_id AND o.id = sc.object_id
     LEFT JOIN fields f ON f.tenant_id = sc.tenant_id AND f.id = sc.field_id
+    WHERE ${objectId}::uuid IS NULL OR sc.object_id = ${objectId}::uuid
     ORDER BY sc.version DESC LIMIT ${limit}`;
+}
+
+export interface LastChangeRow { field_id: string | null; version: string; changed_at: Date; actor_type: string; actor_id: string | null; surface: string;
+  via: string | null; pack: string | null; change_type: string }
+
+/** The newest schema change of an object itself (field_id NULL) and of each of its fields. */
+export async function lastChangesOf(tx: Tx, objectId: string): Promise<LastChangeRow[]> {
+  return tx<LastChangeRow[]>`
+    SELECT DISTINCT ON (field_id) field_id, version::text, changed_at, actor_type, actor_id, surface, via, pack, change_type
+    FROM schema_changes WHERE object_id = ${objectId}
+    ORDER BY field_id, version DESC`;
+}
+
+/** What installed packs own: object and field IDs by pack name. */
+export async function packOwnership(tx: Tx): Promise<{ name: string; owned: { objects?: Record<string, string>; fields?: Record<string, string> } }[]> {
+  return tx<{ name: string; owned: { objects?: Record<string, string>; fields?: Record<string, string> } }[]>`
+    SELECT name, owned FROM installed_packs WHERE status = 'installed' ORDER BY name`;
+}
+
+export async function apiKeyName(tx: Tx, id: string): Promise<string | undefined> {
+  const [row] = await tx<{ name: string }[]>`SELECT name FROM api_keys WHERE id = ${id}`;
+  return row?.name;
+}
+
+export async function oauthClientName(tx: Tx, grantId: string): Promise<string | undefined> {
+  const [row] = await tx<{ client_name: string }[]>`SELECT client_name FROM oauth_grants WHERE id = ${grantId}`;
+  return row?.client_name;
 }
 
 export type DriftRow = { version: string; changed_at: Date; actor_type: string; actor_id: string | null; surface: string; change_type: string;
