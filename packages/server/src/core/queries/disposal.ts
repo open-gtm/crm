@@ -5,12 +5,15 @@ import type { Sql, Tx } from "../../db/pool.js";
  * keeps its checks, errors, audits and the order of statements in its transaction.
  */
 
-export interface DeletionState { name: string; requested_at: Date | null; requested_by: string | null; delete_after: Date | null }
+export interface DeletionState { name: string; requested_at: Date | null; requested_by: string | null; delete_after: Date | null;
+  /** Whether delete_after has passed, by the database's clock: the application's may differ. */
+  due: boolean }
 
 /** The workspace the transaction is in: its name, and its pending deletion if one was asked for. Locks the workspace's row. */
 export async function deletionStateForUpdate(tx: Tx): Promise<DeletionState | undefined> {
   const [row] = await tx<DeletionState[]>`
-    SELECT t.name, t.deletion_requested_at AS requested_at, t.deletion_requested_by AS requested_by, d.delete_after
+    SELECT t.name, t.deletion_requested_at AS requested_at, t.deletion_requested_by AS requested_by, d.delete_after,
+           COALESCE(d.delete_after <= now(), false) AS due
     FROM tenants t JOIN tenant_directory d ON d.tenant_id = t.tenant_id FOR UPDATE OF t`;
   return row;
 }
@@ -18,7 +21,8 @@ export async function deletionStateForUpdate(tx: Tx): Promise<DeletionState | un
 /** The same, without a lock: for showing it. */
 export async function deletionState(tx: Tx): Promise<DeletionState | undefined> {
   const [row] = await tx<DeletionState[]>`
-    SELECT t.name, t.deletion_requested_at AS requested_at, t.deletion_requested_by AS requested_by, d.delete_after
+    SELECT t.name, t.deletion_requested_at AS requested_at, t.deletion_requested_by AS requested_by, d.delete_after,
+           COALESCE(d.delete_after <= now(), false) AS due
     FROM tenants t JOIN tenant_directory d ON d.tenant_id = t.tenant_id`;
   return row;
 }

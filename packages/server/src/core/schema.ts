@@ -8,6 +8,7 @@ import { ID_PREFIX_PATTERN, uuidv7 } from "../lib/ids.js";
 import { pluralize } from "../lib/plural.js";
 import { masterKey } from "../config.js";
 import { audit } from "./audit.js";
+import { viaOf } from "./source.js";
 import {
   CATALOG, ENTITIES, isEntity, OWNER_FIELD,
   type CatalogObject, type FieldOptions, type FieldType, type JsonShape, type Sensitivity,
@@ -90,7 +91,7 @@ const DISPLAY_TYPES: readonly FieldType[] = ["text", "email", "phone", "url"];
 const MAX_FIELDS_EVER = 500;
 const RESERVED_PREFIXES = new Set([...CATALOG.map((o) => o.id_prefix), ...Object.values(ENTITIES).map((e) => e.prefix),
   "prod", "price", "quote", "ord", "ctr", "ent", "psch", "inv", "pay", "qli", "oli", "cli", "sitm", "ili", "palloc", "fld", "obj",
-  "evt", "whk", "dlv", "auto", "run", "key", "usr", "svc", "alr", "ntf", "ws", "file", "role", "pset"]);
+  "evt", "whk", "dlv", "auto", "run", "key", "usr", "svc", "alr", "ntf", "ws", "file", "role", "pset", "conn"]);
 
 /** Per-process cache, one schema per workspace, keyed by schema_token (migration 009): a value never reused, even after a rollback. */
 const cache = new Map<string, Schema>();
@@ -300,8 +301,10 @@ export async function recordChange(tx: Tx, ctx: Ctx, change: Change & { object_i
   const row = await bumpSchemaVersion(tx);
   const version = Number(row.schema_version);
   txState()?.ownSchemas.set(row.schema_token, undefined);
+  // The connected app or key by name, as layout changes record it (ADR 0017): a label for people; the audit log has the IDs.
+  const via = await viaOf(tx, ctx);
   await insertSchemaChange(tx, { tenantId: ctx.tenantId, version, actorType: ctx.actor.type, actorId: ctx.actor.id, surface: ctx.surface, change: change.change,
-    objectId: change.object_id ?? null, fieldId: change.field_id ?? null, before: change.before, after: change.after });
+    objectId: change.object_id ?? null, fieldId: change.field_id ?? null, before: change.before, after: change.after, via, pack: ctx.pack ?? null });
   await audit(tx, ctx, { action: `schema.${change.change}`, objectType: change.object, details: { field: change.field, version } });
   await emit(tx, ctx, { type: `schema.${change.change}`, objectType: change.object, data: { field: change.field, version } });
   return version;

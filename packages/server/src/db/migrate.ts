@@ -68,7 +68,7 @@ export async function syncStandardObjects(sql: postgres.Sql): Promise<void> {
       for (const o of missing) {
         const { schema_version } = await bumpSchemaVersion(tx);
         await insertSchemaChange(tx, { tenantId, version: Number(schema_version), actorType: "system", actorId: null, surface: "system", change: "object_created",
-          objectId: null, fieldId: null, before: undefined, after: { api_name: o.api_name, module: o.module, standard: true } });
+          objectId: null, fieldId: null, before: undefined, after: { api_name: o.api_name, module: o.module, standard: true }, via: null, pack: null });
       }
       logger.info({ tenant: tenantId, objects: missing.map((o) => o.api_name) }, "added standard objects");
     });

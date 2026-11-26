@@ -48,15 +48,18 @@ export function RecordCalendar({ meta, field, where, month, onMonth }: { meta: O
   return (
     <div className="flex h-full min-h-0 flex-col p-4 md:px-6">
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <Button size="icon-sm" aria-label="Previous month" onClick={() => shift(-1)}><ChevronLeft /></Button>
-        <Button size="icon-sm" aria-label="Next month" onClick={() => shift(1)}><ChevronRight /></Button>
         <h2 className="text-md font-semibold" aria-live="polite">{title}</h2>
-        {month !== monthOf(new Date()) ? <Button size="sm" variant="ghost" onClick={() => {
-          setOpen(null);
-          onMonth(monthOf(new Date()));
-        }}>This month</Button> : null}
+        <span className="text-sm text-muted">by {field.label.toLowerCase()}</span>
         <span className="flex-1" />
-        <span className="text-sm text-muted">{q.isPending ? "Loading…" : `${(q.data?.data.length ?? 0).toLocaleString()} by ${field.label.toLowerCase()}`}</span>
+        <span className="text-sm text-muted">{q.isPending ? "Loading…" : `${(q.data?.data.length ?? 0).toLocaleString()} ${meta.plural_label.toLowerCase()}`}</span>
+        <div className="flex gap-1">
+          <Button size="icon-sm" aria-label="Previous month" onClick={() => shift(-1)}><ChevronLeft /></Button>
+          <Button size="sm" onClick={() => {
+            setOpen(null);
+            onMonth(monthOf(new Date()));
+          }}>Today</Button>
+          <Button size="icon-sm" aria-label="Next month" onClick={() => shift(1)}><ChevronRight /></Button>
+        </div>
       </div>
       {q.data?.next_cursor ? <p role="status" className="mb-2 rounded-md border border-warning/50 bg-warning-soft px-3 py-2 text-base text-warning-fg">This month has more than {MAX} {meta.plural_label.toLowerCase()}; the first {MAX} are shown. Filter the list to see the others.</p> : null}
       {q.error && !q.data ? <ProblemView error={q.error} onRetry={() => q.refetch()} /> : (

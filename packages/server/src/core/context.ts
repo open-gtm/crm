@@ -25,6 +25,7 @@ export const PERMISSIONS = {
   "alerts:manage": "Manage workspace alert rules",
   "audit:read": "Read the audit log, schema history and access review",
   "views:manage": "Create, change and delete views shared with the workspace",
+  "connections:manage": "Create, change and test connections: stored credentials automations use to call other systems",
 } as const;
 export type Permission = keyof typeof PERMISSIONS;
 export const ALL_PERMISSIONS = Object.keys(PERMISSIONS) as Permission[];
@@ -61,7 +62,7 @@ export const SCOPE_PERMISSIONS: Record<Scope, Permission[]> = {
   "ops:read": ["records:read"],
   "ops:write": ["records:read", "records:write", "records:archive", "views:manage"],
   "restricted:read": ["restricted:read"],
-  admin: ["schema:manage", "members:manage", "roles:manage", "keys:manage", "webhooks:manage", "automations:manage", "alerts:manage", "audit:read", "views:manage"],
+  admin: ["schema:manage", "members:manage", "roles:manage", "keys:manage", "webhooks:manage", "automations:manage", "alerts:manage", "audit:read", "views:manage", "connections:manage"],
 };
 
 /** The built-in roles every workspace starts with. They cannot be edited; custom roles can. */
@@ -154,6 +155,8 @@ export interface Ctx {
    * servers, with the surface fixed by the token's resource. Audit entries name the grant and client.
    */
   oauth?: { grantId: string; clientId: string };
+  /** The schema pack being applied or uninstalled, by name: its schema changes are recorded as the pack's. */
+  pack?: string;
   /** What this request may do. Every authorization decision reads this, through `can`. */
   permissions: ReadonlySet<Permission>;
   /** Per-object and per-field rules of the role, when it has any. Read through core/access.ts. */

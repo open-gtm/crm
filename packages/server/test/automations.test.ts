@@ -89,7 +89,9 @@ describe("templates", () => {
       expect(() => parsePlaceholder(bad), bad).toThrow();
     }
     expect(fillString("{{steps.call.json.hasownproperty}}", scope)).toBeNull();
-    expect(() => fillString("{{steps.call.json.toString}}", scope)).toThrow(/lowercase/);
+    // Capitals are allowed in a path (another system's JSON keys), and still reach own properties only: a method is never found.
+    for (const inherited of ["toString", "hasOwnProperty", "valueOf", "__defineGetter__"]) expect(fillString(`{{steps.call.json.${inherited}}}`, scope), inherited).toBeNull();
+    expect(() => fillString("{{steps.call.json.to-string}}", scope)).toThrow(/not a valid path/);
     expect(fillString("{{record.tags.length}}", scope)).toBeNull(); // own properties of plain objects and array indexes only
     expect(fillString("{{record.tags.1}}", scope)).toBe("b");
     // A value that looks like a placeholder is data: filling is one pass.

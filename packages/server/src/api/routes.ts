@@ -170,15 +170,17 @@ route({
 });
 
 route({
-  method: "GET", path: "/v1/schema/changes", scope: "admin", permission: "audit:read", tag: "schema", summary: "Schema change history, newest first",
+  method: "GET", path: "/v1/schema/changes", scope: "admin", permission: "audit:read", tag: "schema", summary: "Schema change history, newest first: what changed, who changed it, through which surface, app or key, and for which pack",
   response: dataList(object({
     version: S.int, changed_at: S.time, change: S.str, object: nullable(S.str), field: nullable(S.str), surface: S.str,
+    via: { ...nullable(S.str), description: "The connected app or API key the change came through, by name; null for changes from before this was recorded" },
+    pack: { ...nullable(S.str), description: "The schema pack that made the change, when one did" },
     actor: { type: "string", description: "The member or service account (usr_…, svc_…), or the actor type (system)" },
     before: { description: "The changed definition before, as stored: open by design, its shape depends on the change" },
     after: { description: "The changed definition after, as stored: open by design, its shape depends on the change" },
   })),
-  query: z.object({ limit: z.coerce.number().int().optional() }),
-  handler: async ({ tx, query }) => ({ body: { data: await schemaChanges(tx, query.limit) } }),
+  query: z.object({ limit: z.coerce.number().int().optional(), object: z.string().max(100).optional().describe("Only this object's changes, its fields' included") }),
+  handler: async ({ tx, query }) => ({ body: { data: await schemaChanges(tx, query.limit, query.object) } }),
 });
 
 route({

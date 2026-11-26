@@ -132,7 +132,7 @@ export async function purgeDueWorkspaces(): Promise<number> {
         await enterWorkspace(tx, tenantId);
         return deletionState(tx);
       });
-      if (!state?.delete_after || state.delete_after.getTime() > Date.now() || !state.requested_at || !state.requested_by) continue;
+      if (!state?.due || !state.requested_at || !state.requested_by) continue;
       await deleteWorkspaceNow(tenantId, { type: "owner", userId: state.requested_by, requestedAt: state.requested_at });
       n++;
     } catch (e) {
