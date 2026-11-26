@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, LogOut, Monitor, Moon, Sun } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Link } from "@tanstack/react-router";
+import { KeyRound, LogOut } from "lucide-react";
+import { useEffect, useState, type MouseEvent } from "react";
 import { ProblemAlert, ProblemView } from "@/components/feedback";
 import { Button } from "@/components/ui/button";
 import { FormField, Input, NativeSelect } from "@/components/ui/input";
@@ -10,48 +11,56 @@ import { useToast } from "@/components/ui/toast";
 import { useApi } from "@/lib/api/context";
 import { asProblem } from "@/lib/api/problem";
 import type { EmailLevel, NotificationPrefs, SessionRow, Severity } from "@/lib/api/types";
-import { cn } from "@/lib/cn";
 import { formatDateTime, formatRelative, roleLabel } from "@/lib/format";
 import { qk } from "@/lib/keys";
 import { useSession } from "@/lib/session";
 import { confirmMethods, useCapabilities } from "@/lib/signin";
-import { useTheme, type ThemeChoice } from "@/lib/theme";
+import { ThemeCards } from "./account/ThemeCards";
+import { TeamSetting } from "./account/TeamSetting";
 import { AppsList } from "./ConnectedApps";
 import { Section, SimpleTable, useAdmin } from "./SettingsLayout";
 
+const ANCHORS: [string, string][] = [
+  ["profile", "Profile"], ["appearance", "Appearance"], ["team", "Your team"], ["password", "Password"], ["sessions", "Sessions"], ["connected-apps", "Connected apps"],
+];
+
+/** Personal settings as one page: an anchor list on the side, then a section per topic. */
 export function AccountSettings() {
   const s = useSession();
+  // Jump without touching the router's history; no smooth scrolling, so it is instant for everyone.
+  const jump = (id: string) => (e: MouseEvent<HTMLAnchorElement>) => {
+    e.preventDefault();
+    document.getElementById(id)?.scrollIntoView();
+  };
   return (
-    <>
-      <Section title="Profile" description="Your name and email are set by a workspace admin.">
-        <dl className="grid gap-3 sm:grid-cols-3">
-          <div><dt className="text-sm text-muted">Name</dt><dd>{s.member.name}</dd></div>
-          <div><dt className="text-sm text-muted">Email</dt><dd className="break-all">{s.member.email}</dd></div>
-          <div><dt className="text-sm text-muted">Role</dt><dd>{roleLabel(s.role)}</dd></div>
-        </dl>
-      </Section>
-      <ThemeSection />
-      <PasswordSection />
-      <SessionsSection />
-      <ConnectedAppsSection />
-    </>
-  );
-}
-
-function ThemeSection() {
-  const theme = useTheme();
-  const opts: [ThemeChoice, string, typeof Sun][] = [["system", "System", Monitor], ["light", "Light", Sun], ["dark", "Dark", Moon]];
-  return (
-    <Section title="Theme" description="Saved to your account, so it follows you to other browsers.">
-      <div role="radiogroup" aria-label="Theme" className="flex flex-wrap gap-2">
-        {opts.map(([v, label, Icon]) => (
-          <button key={v} type="button" role="radio" aria-checked={theme.choice === v} onClick={() => theme.setChoice(v)}
-            className={cn("flex items-center gap-2 rounded-md border px-3 py-2 text-base", theme.choice === v ? "border-accent bg-accent-soft text-accent-soft-fg" : "border-line hover:bg-surface-2")}>
-            <Icon className="size-4" aria-hidden /> {label}
-          </button>
-        ))}
+    <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:gap-8">
+      <nav aria-label="On this page" className="lg:sticky lg:top-4 lg:w-44 lg:shrink-0">
+        <ul className="flex gap-1 overflow-x-auto lg:flex-col">
+          {ANCHORS.map(([id, label]) => (
+            <li key={id}><a href={`#${id}`} onClick={jump(id)} className="flex h-8 items-center whitespace-nowrap rounded-md px-2 text-base text-muted hover:bg-surface-2 hover:text-fg focus-visible:outline-2 focus-visible:outline-focus">{label}</a></li>
+          ))}
+          <li><Link to="/settings/notifications" className="flex h-8 items-center whitespace-nowrap rounded-md px-2 text-base text-muted hover:bg-surface-2 hover:text-fg focus-visible:outline-2 focus-visible:outline-focus">Notifications</Link></li>
+        </ul>
+      </nav>
+      <div className="min-w-0 flex-1">
+        <Section id="profile" title="Profile" description="Your name and email are set by a workspace admin.">
+          <dl className="grid gap-3 sm:grid-cols-3">
+            <div><dt className="text-sm text-muted">Name</dt><dd>{s.member.name}</dd></div>
+            <div><dt className="text-sm text-muted">Email</dt><dd className="break-all">{s.member.email}</dd></div>
+            <div><dt className="text-sm text-muted">Role</dt><dd>{roleLabel(s.role)}</dd></div>
+          </dl>
+        </Section>
+        <Section id="appearance" title="Appearance" description="Saved to your account, so it follows you to other browsers.">
+          <ThemeCards />
+        </Section>
+        <Section id="team" title="Your team" description="Picks the Home you see first.">
+          <TeamSetting />
+        </Section>
+        <PasswordSection />
+        <SessionsSection />
+        <ConnectedAppsSection />
       </div>
-    </Section>
+    </div>
   );
 }
 
@@ -158,7 +167,7 @@ function SessionsSection() {
   });
   const list = q.data?.data ?? [];
   return (
-    <Section title="Sessions" description="Browsers signed in as you. API keys are separate and keep working."
+    <Section id="sessions" title="Sessions" description="Browsers signed in as you. API keys are separate and keep working."
       actions={list.length > 1 ? <Button size="sm" busy={others.isPending} onClick={() => others.mutate()}><LogOut /> Sign out everywhere else</Button> : null}>
       {q.isPending ? <Skeleton className="h-16" /> : q.error ? <ProblemView error={q.error} compact /> : (
         <SimpleTable label="Your sessions" head={["Device", "Signed in", "Last active", "Ends", ""]}>

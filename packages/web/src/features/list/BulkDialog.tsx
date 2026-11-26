@@ -22,14 +22,18 @@ interface BulkResult { dry_run: boolean; count: number; counts: Record<string, n
  * Archive selected records, or set one field on all of them. Always a dry run first (what each record
  * would do, nothing changed), then the real run with the dry run's single-use confirmation token.
  */
-export function BulkDialog({ meta, ids, mode, onClose, onDone }: { meta: ObjectMeta; ids: string[]; mode: "archive" | "update"; onClose: () => void; onDone: () => void }) {
+export function BulkDialog({ meta, ids, mode, initialField, onClose, onDone }: {
+  meta: ObjectMeta; ids: string[]; mode: "archive" | "update"; onClose: () => void; onDone: () => void;
+  /** The field to start on (the "Assign owner" shortcut starts on the owner). */
+  initialField?: string;
+}) {
   const api = useApi();
   const qc = useQueryClient();
   const applyWrite = useApplyWrite();
   const toast = useToast();
   const s = useSession();
   const fields = visibleFields(meta).filter((f) => canWrite(f, meta.access, "edit") && f.relation?.cardinality !== "many_to_many");
-  const [fieldName, setFieldName] = useState(fields[0]?.name ?? "");
+  const [fieldName, setFieldName] = useState(fields.find((f) => f.name === initialField)?.name ?? fields[0]?.name ?? "");
   const field = fields.find((f) => f.name === fieldName);
   const [value, setValue] = useState<FormValue>(field ? toFormValue(field, null) : null);
   const [stage, setStage] = useState<"edit" | "preview">(mode === "archive" ? "preview" : "edit");
@@ -59,7 +63,7 @@ export function BulkDialog({ meta, ids, mode, onClose, onDone }: { meta: ObjectM
   });
   const failed = (preview.data?.rows ?? []).filter((r) => r.action === "error");
   const n = preview.data?.counts[mode] ?? 0;
-  const title = mode === "archive" ? `Archive ${ids.length} selected` : `Change ${ids.length} selected`;
+  const title = mode === "archive" ? `Archive ${ids.length} selected` : initialField === "owner" && fieldName === "owner" ? `Assign owner to ${ids.length} selected` : `Change ${ids.length} selected`;
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent title={title} size="md"
